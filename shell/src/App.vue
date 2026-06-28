@@ -1,77 +1,437 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import TerminalPane from "./components/TerminalPane.vue";
-import { createSession, killSession, listSessions } from "./lib/daemon.js";
+import WindowFrame from "./components/WindowFrame.vue";
+import TrackerSidebar from "./components/TrackerSidebar.vue";
+import QuickLaunch from "./components/QuickLaunch.vue";
+import Dock from "./components/Dock.vue";
+import { useWindowManager, type LayoutMode } from "./composables/useWindowManager.js";
+import { createSession, listSessions } from "./lib/daemon.js";
+import { getTrackerInfo, listTickets, type Ticket } from "./lib/tracker.js";
 import type { SessionInfo } from "./lib/protocol.js";
 
-const sessions = ref<SessionInfo[]>([]);
+const wm = useWindowManager();
+
+const tickets = ref<Ticket[]>([]);
+const providerName = ref("Switchyard");
+const sidebarOpen = ref(true);
+const quickOpen = ref(false);
 const error = ref<string | null>(null);
-const cwd = ref("");
-const command = ref("claude");
+
+// Live per-session state. Daemon poll discovers sessions + gives a status/pending
+// fallback; TerminalPane emits override it instantly over the WebSocket.
+const sessionsById = reactive<Record<string, SessionInfo>>({});
+const live = reactive<Record<string, { status?: SessionInfo["status"]; attention?: boolean }>>({});
+const ticketById = reactive<Record<string, string>>({});
+const initialInputById = reactive<Record<string, string>>({});
+
 let poll: ReturnType<typeof setInterval> | null = null;
+
+function basename(p: string): string {
+  return p.split("/").filter(Boolean).pop() ?? "~";
+}
+
+// --- session discovery / reconciliation ---
+function reconcile(list: SessionInfo[]) {
+  const ids = new Set(list.map((s) => s.id));
+  for (const k of Object.keys(sessionsById)) if (!ids.has(k)) delete sessionsById[k];
+  for (const s of list) sessionsById[s.id] = s;
+
+  for (const s of list) {
+    if (!wm.windows.find((w) => w.id === s.id)) {
+      wm.add({
+        id: s.id,
+        type: s.command === "claude" ? "agent" : "bash",
+        title: s.command === "claude" ? "claude-code" : s.command,
+        ticket: ticketById[s.id],
+        repo: basename(s.cwd),
+      });
+    }
+  }
+  for (const w of [...wm.windows]) if (!ids.has(w.id)) wm.remove(w.id);
+}
 
 async function refresh() {
   try {
-    sessions.value = await listSessions();
+    reconcile(await listSessions());
     error.value = null;
   } catch (e) {
     error.value = `Daemon unreachable — is it running on :4317? (${String(e)})`;
   }
 }
 
-async function spawn(cmd: string) {
+// --- live status → dot color (ties the prototype's palette to real daemon state) ---
+function winStatus(id: string) {
+  const l = live[id];
+  const s = sessionsById[id];
+  const attention = l?.attention ?? (s ? s.pendingPermissions > 0 : false);
+  const status = l?.status ?? s?.status ?? "running";
+  if (attention) return { c: "#d6a651", g: "#d6a65177", attention: true }; // needs you
+  if (status === "exited") return { c: "#6a737f", g: "#6a737f55", attention: false }; // idle
+  return { c: "#5fb98a", g: "#5fb98a77", attention: false }; // running
+}
+
+function onStatus(id: string, status: SessionInfo["status"]) {
+  (live[id] ??= {}).status = status;
+}
+function onAttention(id: string, pending: boolean) {
+  (live[id] ??= {}).attention = pending;
+}
+
+// --- spawning ---
+async function spawnFresh(kind: "claude" | "bash") {
+  wm.setLayout("float");
   try {
-    await createSession({
-      command: cmd,
-      cwd: cwd.value.trim() || undefined,
-      title: cmd === "claude" ? "claude-code" : cmd,
-    });
+    const s = await createSession({ command: kind, title: kind === "claude" ? "claude-code" : kind });
     await refresh();
+    wm.bringFront(s.id);
   } catch (e) {
     error.value = String(e);
   }
 }
 
-async function onKill(id: string) {
-  await killSession(id);
-  await refresh();
+async function spawnTicket(t: Ticket) {
+  quickOpen.value = false;
+  wm.setLayout("float");
+  try {
+    const s = await createSession({ command: "claude", title: "claude-code" });
+    ticketById[s.id] = t.key;
+    // Pre-fill (don't auto-submit) the ticket so the agent starts scoped to it.
+    initialInputById[s.id] = `${t.key}: ${t.title}`;
+    await refresh();
+    wm.bringFront(s.id);
+  } catch (e) {
+    error.value = String(e);
+  }
 }
 
-onMounted(() => {
-  refresh();
-  // Light poll only to discover sessions created elsewhere; live content rides
-  // each pane's own WebSocket.
-  poll = setInterval(refresh, 4000);
+// --- visible windows + computed rects ---
+const rects = computed(() => wm.computeRects());
+const visible = computed(() => wm.windows.filter((w) => !w.minimized));
+
+const dockItems = computed(() =>
+  wm.windows
+    .filter((w) => w.minimized)
+    .map((w) => {
+      const st = winStatus(w.id);
+      const sub = w.type === "bash" ? "shell session" : ticketById[w.id] ? "agent session" : "claude session";
+      return { win: w, statusColor: st.c, statusGlow: st.g, attention: st.attention, sub };
+    }),
+);
+
+const focusedRepo = computed(() => {
+  const w = wm.windows.find((x) => x.id === wm.focusedId.value);
+  return w ? `~/${w.repo}` : "no session";
 });
-onBeforeUnmount(() => poll && clearInterval(poll));
+
+const layouts: LayoutMode[] = ["float", "tile", "focus"];
+
+// --- desktop sizing ---
+const deskEl = ref<HTMLDivElement | null>(null);
+let deskObs: ResizeObserver | null = null;
+
+function onKey(e: KeyboardEvent) {
+  if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+    e.preventDefault();
+    quickOpen.value = !quickOpen.value;
+  }
+}
+
+onMounted(async () => {
+  try {
+    const info = await getTrackerInfo();
+    providerName.value = info.name;
+    tickets.value = await listTickets(true);
+  } catch {
+    /* sidebar/palette just stay empty if the tracker is unreachable */
+  }
+  await refresh();
+  poll = setInterval(refresh, 3000);
+
+  if (deskEl.value) {
+    const r = deskEl.value.getBoundingClientRect();
+    wm.setDesk(r.width, r.height);
+    deskObs = new ResizeObserver(() => {
+      const b = deskEl.value!.getBoundingClientRect();
+      wm.setDesk(b.width, b.height);
+    });
+    deskObs.observe(deskEl.value);
+  }
+  window.addEventListener("keydown", onKey);
+});
+
+onBeforeUnmount(() => {
+  if (poll) clearInterval(poll);
+  deskObs?.disconnect();
+  window.removeEventListener("keydown", onKey);
+});
 </script>
 
 <template>
   <div class="app">
+    <!-- TOP BAR -->
     <header class="topbar">
-      <h1>⚓ Drydock</h1>
-      <span class="tagline">watch the agents work</span>
-      <span class="spacer"></span>
-      <input v-model="cwd" class="cwd" placeholder="working dir (default: $HOME)" />
-      <input v-model="command" class="cmd" placeholder="command" @keyup.enter="spawn(command)" />
-      <button @click="spawn(command)">New</button>
-      <button class="ghost" @click="spawn('claude')">+ claude</button>
-      <button class="ghost" @click="spawn('bash')">+ bash</button>
+      <div class="brand">
+        <svg width="30" height="30" viewBox="0 0 48 34">
+          <g stroke="#3f5468" stroke-width="1" fill="none" stroke-linecap="round">
+            <path d="M5 6 V20 H2 V28 H46 V20 H43 V6" />
+            <line x1="2" y1="28" x2="46" y2="28" />
+          </g>
+          <g fill="#5b7794">
+            <rect x="13" y="25" width="3" height="3" />
+            <rect x="22" y="25" width="3" height="3" />
+            <rect x="31" y="25" width="3" height="3" />
+          </g>
+          <path fill="#7aa6cc" d="M9 15 L9 21 Q9 25 13 25 L34 25 L41 18 L41 16 L13 16 Z" />
+          <path fill="#7aa6cc" d="M19 16 L19 9 L22 9 L22 16 Z M24 16 L24 11 L29 11 L29 16 Z" />
+          <line x1="20.5" y1="9" x2="20.5" y2="4" stroke="#7aa6cc" stroke-width="1" />
+        </svg>
+        <div class="word">
+          <span class="name">Drydock</span>
+          <span class="tagline">watch the agents work</span>
+        </div>
+      </div>
+
+      <div class="grow"></div>
+
+      <div class="switcher">
+        <button
+          v-for="m in layouts"
+          :key="m"
+          :class="{ active: wm.layout.value === m }"
+          @click="wm.setLayout(m)"
+        >
+          {{ m[0].toUpperCase() + m.slice(1) }}
+        </button>
+      </div>
+
+      <div class="grow"></div>
+
+      <div class="controls">
+        <div class="repo">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#5a636f" stroke-width="1.4">
+            <path d="M2 4h4l1.5 2H14v6a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1z" />
+          </svg>
+          <span>{{ focusedRepo }}</span>
+        </div>
+        <button class="new" @click="quickOpen = true">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#9cc6ec" stroke-width="1.6">
+            <path d="M8 3v10M3 8h10" />
+          </svg>
+          New session
+          <span class="kbd">Ctrl K</span>
+        </button>
+        <button class="ghost" @click="spawnFresh('claude')">+ claude</button>
+        <button class="ghost" @click="spawnFresh('bash')">+ bash</button>
+      </div>
     </header>
 
     <p v-if="error" class="error">{{ error }}</p>
 
-    <main class="grid" :class="{ empty: sessions.length === 0 }">
-      <p v-if="sessions.length === 0" class="hint">
-        No sessions yet. Spawn one above — it'll keep running in the daemon even if
-        you close this tab.
-      </p>
-      <TerminalPane
-        v-for="s in sessions"
-        :key="s.id"
-        :session="s"
-        @kill="onKill"
+    <!-- BODY -->
+    <div class="body">
+      <TrackerSidebar
+        v-if="sidebarOpen"
+        :name="providerName"
+        :tickets="tickets"
+        @launch="spawnTicket"
       />
-    </main>
+
+      <div ref="deskEl" class="desk">
+        <p v-if="!wm.windows.length" class="hint">
+          No sessions yet. Spawn one above, or pick a ticket from the sidebar —
+          it keeps running in the daemon even if you close this tab.
+        </p>
+
+        <WindowFrame
+          v-for="w in visible"
+          :key="w.id"
+          :win="w"
+          :rect="rects[w.id]"
+          :layout="wm.layout.value"
+          :focused="wm.focusedId.value === w.id"
+          :status-color="winStatus(w.id).c"
+          :status-glow="winStatus(w.id).g"
+          :attention="winStatus(w.id).attention"
+          :dragging="wm.isDragging()"
+          @focus="wm.bringFront(w.id)"
+          @drag-start="(e) => wm.startDrag(e, w.id)"
+          @resize-start="(e) => wm.startResize(e, w.id)"
+          @minimize="wm.minimize(w.id)"
+          @close="wm.remove(w.id)"
+        >
+          <TerminalPane
+            v-if="sessionsById[w.id]"
+            :session="sessionsById[w.id]"
+            :active="wm.focusedId.value === w.id"
+            :initial-input="initialInputById[w.id]"
+            @status="onStatus"
+            @attention="onAttention"
+          />
+        </WindowFrame>
+
+        <Dock :items="dockItems" @restore="wm.restore" />
+      </div>
+    </div>
+
+    <QuickLaunch
+      :open="quickOpen"
+      :tickets="tickets"
+      :provider-name="providerName"
+      @close="quickOpen = false"
+      @launch="spawnTicket"
+      @spawn-blank="(quickOpen = false), spawnFresh('claude')"
+    />
   </div>
 </template>
+
+<style scoped>
+.app {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: #0a0c0f;
+  color: #d5dde6;
+  overflow: hidden;
+}
+.topbar {
+  height: 54px;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 0 14px;
+  background: #0e1116;
+  border-bottom: 1px solid #ffffff10;
+  z-index: 50;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.word {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+}
+.name {
+  font-size: 17px;
+  font-weight: 680;
+  letter-spacing: -0.01em;
+  color: #eaf0f6;
+}
+.tagline {
+  font-size: 12px;
+  color: #5a636f;
+}
+.grow {
+  flex: 1;
+}
+.switcher {
+  display: flex;
+  background: #0a0c0f;
+  border: 1px solid #ffffff12;
+  border-radius: 8px;
+  padding: 3px;
+  gap: 2px;
+}
+.switcher button {
+  padding: 5px 14px;
+  border: none;
+  border-radius: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+  background: transparent;
+  color: #7a8593;
+}
+.switcher button.active {
+  background: #1d2a38;
+  color: #cfe3f5;
+}
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.repo {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  background: #0a0c0f;
+  border: 1px solid #ffffff12;
+  border-radius: 8px;
+  padding: 0 10px;
+  height: 34px;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+  color: #9aa6b2;
+}
+.new {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 12px;
+  background: #16314a;
+  border: 1px solid #2a557d;
+  border-radius: 8px;
+  color: #cfe3f5;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.kbd {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  color: #7fa8cf;
+  background: #0e2236;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.ghost {
+  height: 34px;
+  padding: 0 11px;
+  background: #13171c;
+  border: 1px solid #ffffff14;
+  border-radius: 8px;
+  color: #b9c3cf;
+  font-size: 12.5px;
+  font-family: "JetBrains Mono", monospace;
+  cursor: pointer;
+}
+.error {
+  margin: 0;
+  padding: 7px 14px;
+  background: #2a1416;
+  color: #f0c9c4;
+  font-size: 12.5px;
+  border-bottom: 1px solid #5c2b2b;
+}
+.body {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+.desk {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  background: #0a0c0f;
+  background-image: radial-gradient(#ffffff09 1px, transparent 1px);
+  background-size: 26px 26px;
+}
+.hint {
+  position: absolute;
+  top: 40%;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 420px;
+  text-align: center;
+  color: #5a636f;
+  font-size: 13px;
+  line-height: 1.5;
+}
+</style>

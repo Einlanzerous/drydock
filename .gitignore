@@ -3,3 +3,4 @@ dist/
 *.log
 .drydock/
 .DS_Store
+*.tsbuildinfo
