@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 600,
+            "command": "curl -s -m 590 -X POST \"$DRYDOCK_DAEMON_URL/hook/pretooluse\" -H \"Content-Type: application/json\" -H \"X-Drydock-Session: $DRYDOCK_SESSION_ID\" --data-binary @-"
+          }
+        ]
+      }
+    ]
+  }
+}

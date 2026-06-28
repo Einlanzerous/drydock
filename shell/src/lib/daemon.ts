@@ -1,0 +1,47 @@
+import type { SessionInfo } from "./protocol.js";
+
+// The daemon runs on the same host that served this shell, on the fixed daemon
+// port — so the shell works whether it's loaded from localhost or over the
+// LAN/Tailscale, with no hardcoded IP. Set VITE_DAEMON_URL to override (e.g. to
+// point at a different host's daemon; a per-host switcher belongs here later).
+const DAEMON_PORT = 4317;
+const override = import.meta.env.VITE_DAEMON_URL as string | undefined;
+const host =
+  typeof window !== "undefined" ? window.location.hostname || "127.0.0.1" : "127.0.0.1";
+const wsProto =
+  typeof window !== "undefined" && window.location.protocol === "https:" ? "wss" : "ws";
+
+export const DAEMON_HTTP = override ?? `http://${host}:${DAEMON_PORT}`;
+export const DAEMON_WS = override
+  ? override.replace(/^http/, "ws")
+  : `${wsProto}://${host}:${DAEMON_PORT}`;
+
+export async function listSessions(): Promise<SessionInfo[]> {
+  const res = await fetch(`${DAEMON_HTTP}/api/sessions`);
+  const body = await res.json();
+  return body.sessions;
+}
+
+export async function createSession(opts: {
+  command: string;
+  args?: string[];
+  cwd?: string;
+  title?: string;
+}): Promise<SessionInfo> {
+  const res = await fetch(`${DAEMON_HTTP}/api/sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(opts),
+  });
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error ?? "failed to create session");
+  return body.session;
+}
+
+export async function killSession(id: string): Promise<void> {
+  await fetch(`${DAEMON_HTTP}/api/sessions/${id}/kill`, { method: "POST" });
+}
+
+export function attachUrl(id: string): string {
+  return `${DAEMON_WS}/api/sessions/${id}/attach`;
+}

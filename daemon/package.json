@@ -1,0 +1,22 @@
+{
+  "name": "@drydock/daemon",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "comment": "This process runs on NODE, not Bun: node-pty's native addon uses the V8 C++ API (v8::Value::ToString), which Bun's JavaScriptCore runtime doesn't provide — it loads but segfaults on first PTY spawn. Bun still manages deps, builds the addon (scripts/build-native.mjs), and runs everything else; `bun run` honors the explicit `node` here and routes to real Node. tsx runs the TS directly.",
+  "scripts": {
+    "dev": "node --import tsx --watch src/index.ts",
+    "start": "node --import tsx src/index.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "node-pty": "1.0.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

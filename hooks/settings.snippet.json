@@ -1,0 +1,17 @@
+{
+  "_comment": "Merge this into the .claude/settings.json of any repo you open through Drydock. The daemon injects DRYDOCK_SESSION_ID and DRYDOCK_DAEMON_URL into the session's environment; this hook pipes Claude Code's PreToolUse payload to the daemon and returns the daemon's decision verbatim. curl's -m 590 keeps us just under Claude Code's ~600s hook ceiling so the daemon always resolves first. Widen the matcher (e.g. \"Bash|Write|Edit|WebFetch\") to gate more tools.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 600,
+            "command": "curl -s -m 590 -X POST \"$DRYDOCK_DAEMON_URL/hook/pretooluse\" -H \"Content-Type: application/json\" -H \"X-Drydock-Session: $DRYDOCK_SESSION_ID\" --data-binary @-"
+          }
+        ]
+      }
+    ]
+  }
+}

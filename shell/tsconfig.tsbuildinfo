@@ -1,0 +1,1 @@
+{"root":["./src/App.vue","./src/main.ts","./src/components/TerminalPane.vue","./src/lib/daemon.ts","./src/lib/protocol.ts","./vite.config.ts"],"version":"5.9.3"}
