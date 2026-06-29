@@ -57,8 +57,8 @@ export function useWindowManager() {
     const w: Win = {
       x: win.x ?? pos.x,
       y: win.y ?? pos.y,
-      w: win.w ?? 452,
-      h: win.h ?? 330,
+      w: win.w ?? 632,
+      h: win.h ?? 462,
       z: ++z,
       minimized: win.minimized ?? false,
       ...win,
