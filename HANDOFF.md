@@ -84,11 +84,19 @@ localhost-only) and `bun run shell`.
 **Mocked / default-to-fake:**
 - **Tracker data defaults to `FixtureProvider`** — 8 hardcoded tickets ported from the
   design prototype, served through the real endpoints so they *look* live but are static.
-- **`SwitchyardProvider`** (live REST) exists but is **off** unless `DRYDOCK_TRACKER=switchyard`
-  + `DRYDOCK_SWITCHYARD_URL`/`_TOKEN` are set, and has **not** been exercised against a live
-  Switchyard server. Treat as "written, unverified."
+  Set `DRYDOCK_TRACKER=switchyard` (+ creds, see below) to go live.
+- **`SwitchyardProvider` — now verified live (reads).** Talks to the Switchyard REST API at
+  `DRYDOCK_SWITCHYARD_URL` (the API is under **`/v1`** and listens on `:4002`; from the host use
+  `http://localhost:4002` — the `switchyard` docker hostname doesn't resolve there) with a
+  `Bearer DRYDOCK_SWITCHYARD_TOKEN`. `listProjects`/`listTickets`/`searchTickets`/`getTicket`
+  were exercised end-to-end through the daemon against real data. Two fixes were needed vs the
+  original draft: base path `/api`→`/v1`, and there's **no `open` flag** — "open" is sent as
+  `status=backlog,planning,in_progress,blocked` (a closed-excluding category list). Creds load
+  from a gitignored **`.env`** at the repo root (`.env.example` documents it; loader is
+  `daemon/src/env.ts`, real env vars still win).
 - **Jira backend** — not implemented; silently falls back to fixture.
-- **comment / transition** — capabilities defined + implemented server-side, but no UI calls them.
+- **comment / transition** — server-side + paths verified live, but the request *bodies* are
+  unverified (no UI calls them yet). Confirm field names when wiring the capability-gated UI.
 
 **Not built (leftovers):** layout persistence (resets on reload), per-repo theming, and
 **branch/worktree-per-ticket** — a ticket-spawned agent runs in the repo's *current* branch
@@ -126,7 +134,7 @@ matches the tracker:
 | DRY-7  | Local git diff review UI (approve agent commits) | Backlog |
 | DRY-8  | Spike: session-durability design | **Closed** (answered; implemented in DRY-3) |
 | DRY-9  | Implement Drydock web UI shell (from design prototype) | In Progress — shell browser-verified; ticket-spawn now real (cwd + SessionStart-hook context), pending browser-verify of the panel + live hook |
-| DRY-10 | Pluggable issue-tracker provider abstraction (Switchyard + Jira) | In Progress — abstraction + fixture done; Switchyard unverified; Jira TODO |
+| DRY-10 | Pluggable issue-tracker provider abstraction (Switchyard + Jira) | In Progress — abstraction + fixture done; **Switchyard verified live (reads)**; Jira TODO |
 
 Before working a ticket, read its full description in Switchyard — they carry the real
 design rationale. Comment progress and transition status as you go.
@@ -139,9 +147,10 @@ design rationale. Comment progress and transition status as you go.
    What's left is driving it in a browser against a real `claude` in a repo that has the
    `SessionStart` hook installed, and confirming the injected context lands. Next increment:
    **branch/worktree-per-ticket** (the agent currently runs in the repo's current branch).
-2. **Verify `SwitchyardProvider` against a live server (DRY-10).** Stand it up with real
-   `DRYDOCK_SWITCHYARD_URL`/`_TOKEN`, confirm `listProjects`/`listTickets`/`getTicket` map
-   correctly, then exercise `comment`/`transition` and surface them in the UI (capability-gated).
+2. **Switchyard writes + UI (DRY-10).** Reads are verified live; what's left is the
+   capability-gated **comment / transition** UI — and confirming those two request *bodies*
+   against the API (paths are right, field names aren't yet exercised). Browser-verify the live
+   sidebar/palette/detail-panel against real tickets while you're at it.
 3. **Jira backend (DRY-10).** Jira Cloud REST v3 + JQL, corp-network friendly, credentials
    host-side. Same `TrackerProvider` interface, selected by config — no UI branching.
 4. **DRY-4 leftovers.** Layout persistence across restarts (serialize window manager state)

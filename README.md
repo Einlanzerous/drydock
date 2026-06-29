@@ -118,6 +118,21 @@ Repo→directory mapping is host config on the daemon: `DRYDOCK_REPOS_ROOT`
 overrides via `DRYDOCK_REPO_PATHS="construct-server=~/construct-server,imperium-loop=~/imperium-loop"`.
 A name that resolves to no existing directory falls back to `$HOME`.
 
+## Tracker config
+
+The sidebar/palette default to a built-in fixture set. Point at a live tracker
+with host config (copy `.env.example` → `.env`, which the daemon auto-loads;
+real env vars win over the file). For Switchyard:
+
+```bash
+DRYDOCK_TRACKER=switchyard
+DRYDOCK_SWITCHYARD_URL=http://localhost:4002   # REST API base; provider adds /v1
+DRYDOCK_SWITCHYARD_TOKEN=sw_…                   # sent as a Bearer token, host-side only
+```
+
+The token never reaches the browser — the shell only ever calls the daemon's
+`/api/tracker/*`. Credentials live in `.env` (gitignored), never in the repo.
+
 ## Not in this PoC
 
 Tauri packaging, per-repo theming, side-by-side diff review, embedded webview,
