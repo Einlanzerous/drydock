@@ -2,6 +2,39 @@
    per-component layout lives in each .vue's scoped <style>. */
 @import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap");
 
+/* Nerd Font for the terminal — the powerline/icon glyphs an oh-my-zsh / p10k
+   prompt draws. Self-hosted (MesloLGS NF, Apache-2.0) because xterm.js renders
+   in the browser: it can only use a font the page has loaded, not one the OS
+   has installed for the native terminal. */
+@font-face {
+  font-family: "MesloLGS NF";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/MesloLGSNF-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "MesloLGS NF";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/fonts/MesloLGSNF-Bold.woff2") format("woff2");
+}
+@font-face {
+  font-family: "MesloLGS NF";
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/MesloLGSNF-Italic.woff2") format("woff2");
+}
+@font-face {
+  font-family: "MesloLGS NF";
+  font-style: italic;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/fonts/MesloLGSNF-BoldItalic.woff2") format("woff2");
+}
+
 * {
   box-sizing: border-box;
 }

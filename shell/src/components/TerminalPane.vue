@@ -94,9 +94,23 @@ function resolve(decision: "allow" | "deny") {
   emit("attention", props.session.id, false);
 }
 
-onMounted(() => {
+onMounted(async () => {
+  // Load the Nerd Font before xterm measures glyph metrics — otherwise the
+  // prompt's powerline/icon glyphs render with fallback metrics and stay
+  // misaligned until a later refit. Best-effort: if the font is unavailable
+  // (e.g. offline), fall through to the mono stack below.
+  try {
+    await Promise.all([
+      document.fonts.load('12.5px "MesloLGS NF"'),
+      document.fonts.load('bold 12.5px "MesloLGS NF"'),
+    ]);
+  } catch {
+    /* font not loadable — mono fallback still renders text, just no glyphs */
+  }
+  if (!termEl.value) return; // unmounted while awaiting fonts
+
   const t = new Terminal({
-    fontFamily: "'JetBrains Mono', 'Cascadia Code', Menlo, monospace",
+    fontFamily: "'MesloLGS NF', 'JetBrains Mono', 'Cascadia Code', Menlo, monospace",
     fontSize: 12.5,
     cursorBlink: true,
     scrollback: 10_000,
