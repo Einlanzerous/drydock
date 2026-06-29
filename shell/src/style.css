@@ -1,161 +1,115 @@
-:root {
-  --bg: #06080d;
-  --panel: #0b0e14;
-  --bar: #11151f;
-  --border: #1e2430;
-  --text: #c5c8c6;
-  --muted: #6b7280;
-  --accent: #4f9cf9;
-  --danger: #ef4444;
-  --ok: #22c55e;
-  --warn: #f59e0b;
+/* Global shell styles (DRY-9). Design tokens + animations from the prototype;
+   per-component layout lives in each .vue's scoped <style>. */
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap");
+
+/* Nerd Font for the terminal — the powerline/icon glyphs an oh-my-zsh / p10k
+   prompt draws. Self-hosted (MesloLGS NF, Apache-2.0) because xterm.js renders
+   in the browser: it can only use a font the page has loaded, not one the OS
+   has installed for the native terminal. */
+@font-face {
+  font-family: "MesloLGS NF";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/MesloLGSNF-Regular.woff2") format("woff2");
+}
+@font-face {
+  font-family: "MesloLGS NF";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/fonts/MesloLGSNF-Bold.woff2") format("woff2");
+}
+@font-face {
+  font-family: "MesloLGS NF";
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/MesloLGSNF-Italic.woff2") format("woff2");
+}
+@font-face {
+  font-family: "MesloLGS NF";
+  font-style: italic;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/fonts/MesloLGSNF-BoldItalic.woff2") format("woff2");
 }
 
-* { box-sizing: border-box; }
+* {
+  box-sizing: border-box;
+}
 
-html, body, #app {
+html,
+body,
+#app {
   height: 100%;
   margin: 0;
 }
 
 body {
-  background: var(--bg);
-  color: var(--text);
-  font-family: "Inter", system-ui, sans-serif;
-}
-
-.app {
-  display: flex;
-  flex-direction: column;
-  height: 100%;
-}
-
-.topbar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 14px;
-  background: var(--bar);
-  border-bottom: 1px solid var(--border);
-}
-.topbar h1 { font-size: 16px; margin: 0; }
-.tagline { color: var(--muted); font-size: 12px; }
-.spacer { flex: 1; }
-
-.topbar input {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: 6px;
-  padding: 5px 8px;
-  font-size: 12px;
-}
-.cwd { width: 240px; }
-.cmd { width: 120px; }
-
-button {
-  background: var(--accent);
-  color: #fff;
-  border: none;
-  border-radius: 6px;
-  padding: 5px 12px;
-  font-size: 12px;
-  cursor: pointer;
-}
-button.ghost { background: transparent; border: 1px solid var(--border); color: var(--text); }
-button:hover { filter: brightness(1.1); }
-
-.error {
-  margin: 0;
-  padding: 8px 14px;
-  background: #2a1316;
-  color: #fca5a5;
-  font-size: 12px;
-}
-
-.grid {
-  flex: 1;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(420px, 1fr));
-  gap: 10px;
-  padding: 10px;
-  overflow: auto;
-}
-.grid.empty { display: block; }
-.hint { color: var(--muted); padding: 24px; }
-
-.pane {
-  display: flex;
-  flex-direction: column;
-  min-height: 320px;
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 8px;
+  background: #0a0c0f;
+  color: #d5dde6;
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
   overflow: hidden;
-  transition: border-color 0.15s, box-shadow 0.15s;
-}
-.pane.minimized { min-height: 0; }
-.pane.exited { opacity: 0.7; }
-.pane.attention {
-  border-color: var(--danger);
-  box-shadow: 0 0 0 1px var(--danger), 0 0 18px -2px var(--danger);
 }
 
-.pane-bar {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  background: var(--bar);
-  border-bottom: 1px solid var(--border);
-  font-size: 12px;
+/* Window / dock / palette entrance + status animations */
+@keyframes ddblink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
 }
-.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
-.dot.running { background: var(--ok); }
-.dot.exited { background: var(--danger); }
-.title { font-weight: 600; }
-.meta { color: var(--muted); }
-.badge.detached { color: var(--warn); border: 1px solid var(--warn); border-radius: 4px; padding: 0 5px; font-size: 10px; }
+@keyframes ddpulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+@keyframes dockpop {
+  from {
+    transform: translateY(10px) scale(0.96);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+@keyframes winpop {
+  from {
+    transform: scale(0.97);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
 
-.icon {
+/* Slim scrollbars on scrollable surfaces */
+.ddscroll::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+.ddscroll::-webkit-scrollbar-thumb {
+  background: #2b333d;
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+.ddscroll::-webkit-scrollbar-thumb:hover {
+  background: #3a444f;
+  background-clip: padding-box;
+}
+.ddscroll::-webkit-scrollbar-track {
   background: transparent;
-  color: var(--muted);
-  padding: 2px 6px;
 }
-.icon:hover { color: var(--text); }
-.icon.kill:hover { color: var(--danger); }
-
-.pane-body { position: relative; flex: 1; min-height: 0; }
-.term { position: absolute; inset: 0; padding: 4px; }
-
-.permission {
-  position: absolute;
-  left: 12px;
-  right: 12px;
-  bottom: 12px;
-  background: #1a1014;
-  border: 1px solid var(--danger);
-  border-radius: 8px;
-  padding: 10px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  box-shadow: 0 8px 30px -6px rgba(0, 0, 0, 0.6);
-}
-.permission-text code {
-  color: var(--warn);
-  background: rgba(0, 0, 0, 0.3);
-  padding: 1px 5px;
-  border-radius: 4px;
-  margin-left: 6px;
-}
-.permission-text pre {
-  margin: 6px 0 0;
-  max-height: 120px;
-  overflow: auto;
-  font-size: 11px;
-  color: var(--muted);
-}
-.permission-actions { display: flex; gap: 8px; }
-.approve { background: var(--ok); }
-.deny { background: var(--danger); }

@@ -13,10 +13,31 @@ export const CONFIG = {
   scrollbackBytes: Number(process.env.DRYDOCK_SCROLLBACK_BYTES ?? 1_048_576),
 
   /**
+   * Login shell spawned for plain "shell" sessions. Defaults to the host
+   * owner's own shell ($SHELL) so their real setup loads — zsh + oh-my-zsh,
+   * prompt, aliases — instead of a hardcoded bash. Override with DRYDOCK_SHELL.
+   */
+  defaultShell: process.env.DRYDOCK_SHELL ?? process.env.SHELL ?? "bash",
+
+  /**
    * How long the daemon holds a PreToolUse hook request open waiting for a
    * human decision before giving up. Claude Code's own hook timeout (default
    * ~600s) is the hard ceiling; we stay under it so we resolve first and the
    * CLI never silently falls back to its TUI prompt.
    */
   permissionTimeoutMs: Number(process.env.DRYDOCK_PERMISSION_TIMEOUT_MS ?? 300_000),
+
+  /**
+   * Issue-tracker backend for the sidebar + Ctrl+K palette (DRY-10). Defaults
+   * to `fixture` so the shell works with no credentials. Set `switchyard` (or
+   * `jira`, once built) plus the matching credentials to go live. Credentials
+   * stay here on the host — they never reach the browser.
+   */
+  tracker: {
+    kind: (process.env.DRYDOCK_TRACKER ?? "fixture") as "fixture" | "switchyard" | "jira",
+    switchyard: {
+      url: process.env.DRYDOCK_SWITCHYARD_URL,
+      token: process.env.DRYDOCK_SWITCHYARD_TOKEN,
+    },
+  },
 };

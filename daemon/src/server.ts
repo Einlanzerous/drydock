@@ -3,8 +3,10 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { CONFIG } from "./config.js";
 import { SessionManager } from "./manager.js";
 import type { ClientMessage } from "./protocol.js";
+import { createTracker, trackerInfo } from "./tracker/index.js";
 
 const manager = new SessionManager();
+const tracker = createTracker();
 
 function send(res: http.ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
@@ -59,6 +61,45 @@ const server = http.createServer(async (req, res) => {
     if (killMatch && req.method === "POST") {
       manager.remove(killMatch[1]);
       return send(res, 200, { ok: true });
+    }
+
+    // --- Tracker API (DRY-10) ---
+    // The shell's sidebar + Ctrl+K palette read from here, never from the
+    // tracker directly. Credentials stay host-side in the provider.
+    if (pathname === "/api/tracker/info" && req.method === "GET") {
+      return send(res, 200, trackerInfo(tracker));
+    }
+
+    if (pathname === "/api/tracker/tickets" && req.method === "GET") {
+      try {
+        const tickets = await tracker.listTickets({
+          project: url.searchParams.get("project") ?? undefined,
+          open: url.searchParams.get("open") === "true",
+          text: url.searchParams.get("text") ?? undefined,
+        });
+        return send(res, 200, { tickets });
+      } catch (err) {
+        return send(res, 502, { error: `tracker: ${String(err)}` });
+      }
+    }
+
+    if (pathname === "/api/tracker/search" && req.method === "GET") {
+      try {
+        const tickets = await tracker.searchTickets(url.searchParams.get("q") ?? "");
+        return send(res, 200, { tickets });
+      } catch (err) {
+        return send(res, 502, { error: `tracker: ${String(err)}` });
+      }
+    }
+
+    const ticketMatch = pathname.match(/^\/api\/tracker\/ticket\/([^/]+)$/);
+    if (ticketMatch && req.method === "GET") {
+      try {
+        const ticket = await tracker.getTicket(decodeURIComponent(ticketMatch[1]));
+        return send(res, 200, { ticket });
+      } catch (err) {
+        return send(res, 404, { error: `tracker: ${String(err)}` });
+      }
     }
 
     // --- PreToolUse hook endpoint ---

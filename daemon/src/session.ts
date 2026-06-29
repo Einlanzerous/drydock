@@ -20,6 +20,20 @@ export interface SpawnOptions {
   env?: Record<string, string>;
 }
 
+/**
+ * Translate a logical command into the executable to actually spawn. "shell"
+ * resolves to the host owner's own login shell ($SHELL) so their zsh/oh-my-zsh
+ * config loads, rather than a hardcoded bash. Everything else spawns verbatim.
+ * The logical command is kept on the session (SessionInfo.command) so the shell
+ * still classifies panes by "claude" vs other — only the spawn target changes.
+ */
+function resolveSpawn(command: string, args: string[]): { file: string; args: string[] } {
+  if (command === "shell") {
+    return { file: CONFIG.defaultShell, args: ["-l", ...args] };
+  }
+  return { file: command, args };
+}
+
 interface PendingPermission {
   tool: string;
   input: unknown;
@@ -63,7 +77,8 @@ export class PtySession {
     this.cols = opts.cols ?? 80;
     this.rows = opts.rows ?? 24;
 
-    this.pty = pty.spawn(this.command, this.args, {
+    const spawn = resolveSpawn(this.command, this.args);
+    this.pty = pty.spawn(spawn.file, spawn.args, {
       name: "xterm-256color",
       cols: this.cols,
       rows: this.rows,
