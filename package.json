@@ -12,7 +12,7 @@
     "daemon": "bun run --filter '@drydock/daemon' dev",
     "daemon:local": "DRYDOCK_HOST=127.0.0.1 bun run --filter '@drydock/daemon' dev",
     "shell": "bun run --filter '@drydock/shell' dev",
-    "dev": "echo 'Run `bun run daemon` and `bun run shell` in two terminals.'"
+    "dev": "bun run --filter '*' dev"
   },
   "engines": {
     "bun": ">=1.3"
