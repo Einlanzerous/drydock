@@ -26,8 +26,8 @@ survive disconnects, sleep, and multi-day gaps. The browser is just a viewer.
                                        │  • resolves ticket repo → spawn cwd    │
                                        │  • localhost-only; one per host        │
                                        └──────────────────────────────────────┘
-                                                        │ spawns
-                                                        ▼  (PTY in the ticket's repo cwd,
+                                                        │ spawns  claude --settings <hooks>
+                                                        ▼  (PTY in the ticket's cwd,
                                                            DRYDOCK_SESSION_ID in env)
                                               claude / gemini-cli / shell
 ```
@@ -102,16 +102,21 @@ approval loop.
   resolves a ticket's repo name to its real working directory on this host.
 - `shell/` — Vue 3 viewer. `components/TerminalPane.vue` is the core pane;
   `components/TicketDetail.vue` is the read-then-spawn ticket panel.
-- `hooks/` — the `PreToolUse` + `SessionStart` hook config to drop into a repo's
-  `.claude/settings.json`.
+- `daemon/src/hooks.ts` — the `PreToolUse` + `SessionStart` hooks the daemon
+  injects into every spawned `claude` via `--settings` (no per-repo install).
+- `hooks/` — the same hook config as a standalone snippet (reference / manual
+  fallback only; the daemon injects it automatically).
 
 ## Ticket-driven sessions
 
-Picking a ticket (sidebar or `Ctrl K`) opens its description; **Send to agent**
-spawns `claude` **in that ticket's repo** and the ticket body rides into the
-agent's context via a `SessionStart` hook (`curl → /hook/sessionstart`) — it's
-not typed into the prompt. The prompt is pre-filled with your instruction and
-left for you to send (no auto-submit).
+Picking a ticket (sidebar or `Ctrl K`) opens its description; the panel shows
+the resolved **working directory** (editable — projects with no repo default to
+`$HOME`, which you can override). **Send to agent** spawns `claude` there and the
+ticket body rides into the agent's context via a `SessionStart` hook (`curl →
+/hook/sessionstart`) — not typed into the prompt. The prompt is pre-filled with
+your instruction and left for you to send (no auto-submit). The hooks are
+injected by the daemon (`claude --settings`), so they work regardless of cwd —
+no per-repo `.claude/settings.json` needed.
 
 Repo→directory mapping is host config on the daemon: `DRYDOCK_REPOS_ROOT`
 (default `~/projects`, so repo `argosy` → `~/projects/argosy`) with per-repo

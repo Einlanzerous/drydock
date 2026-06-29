@@ -104,14 +104,16 @@ function openTicket(t: Ticket) {
 // Spawn an agent for the reviewed ticket: real repo cwd (daemon resolves the
 // repo name → host path) and the ticket key (so the SessionStart hook injects
 // the body as context). The editable prompt is pre-filled, not auto-submitted.
-async function onSendTicket({ ticket, prompt }: { ticket: Ticket; prompt: string }) {
+async function onSendTicket({ ticket, prompt, cwd }: { ticket: Ticket; prompt: string; cwd: string }) {
   selectedTicket.value = null;
   wm.setLayout("float");
   try {
+    // cwd comes from the panel (resolved from the repo, possibly overridden); an
+    // explicit cwd takes precedence over repo resolution on the daemon.
     const s = await createSession({
       command: "claude",
       title: "claude-code",
-      repo: ticket.repo,
+      cwd,
       ticket: ticket.key,
     });
     ticketById[s.id] = ticket.key;

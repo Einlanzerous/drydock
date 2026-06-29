@@ -71,6 +71,13 @@ const server = http.createServer(async (req, res) => {
       return send(res, 201, { session: session.info() });
     }
 
+    // Resolve a ticket's repo name to the cwd it would spawn in (DRY-12). Lets
+    // the detail panel preview the working dir and flag a repo-less project
+    // (matched=false → fell back to $HOME) so the user can override before spawn.
+    if (pathname === "/api/repos/resolve" && req.method === "GET") {
+      return send(res, 200, resolveRepoCwd(url.searchParams.get("repo") ?? undefined));
+    }
+
     const killMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/kill$/);
     if (killMatch && req.method === "POST") {
       manager.remove(killMatch[1]);

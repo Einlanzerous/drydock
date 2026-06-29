@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import * as pty from "node-pty";
 import type { WebSocket } from "ws";
 import { CONFIG } from "./config.js";
+import { CLAUDE_SETTINGS_PATH } from "./hooks.js";
 import type {
   PermissionDecision,
   ServerMessage,
@@ -25,13 +26,18 @@ export interface SpawnOptions {
 /**
  * Translate a logical command into the executable to actually spawn. "shell"
  * resolves to the host owner's own login shell ($SHELL) so their zsh/oh-my-zsh
- * config loads, rather than a hardcoded bash. Everything else spawns verbatim.
- * The logical command is kept on the session (SessionInfo.command) so the shell
- * still classifies panes by "claude" vs other — only the spawn target changes.
+ * config loads, rather than a hardcoded bash. "claude" gets `--settings` pointing
+ * at the daemon's generated hooks file, so the approval + ticket-context hooks
+ * work in any cwd with no per-repo install. The logical command is kept on the
+ * session (SessionInfo.command) so the shell still classifies panes by "claude"
+ * vs other — only the spawn target changes.
  */
 function resolveSpawn(command: string, args: string[]): { file: string; args: string[] } {
   if (command === "shell") {
     return { file: CONFIG.defaultShell, args: ["-l", ...args] };
+  }
+  if (command === "claude") {
+    return { file: "claude", args: ["--settings", CLAUDE_SETTINGS_PATH, ...args] };
   }
   return { file: command, args };
 }

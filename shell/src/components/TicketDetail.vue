@@ -7,15 +7,18 @@ import {
   type Ticket,
   type TicketDetail,
 } from "../lib/tracker.js";
+import { resolveRepoCwd } from "../lib/daemon.js";
 
 // Ticket detail panel (DRY-9 ticket-spawn). Opened when a ticket is picked from
 // the sidebar or Ctrl+K palette: shows the full description for *you* to read,
-// then "Send to agent" spawns claude in the ticket's repo. The ticket body is
-// delivered to the agent as context via the SessionStart hook (not typed in),
-// so the editable prompt here is just your instruction.
+// then "Send to agent" spawns claude in the chosen working dir. The ticket body
+// is delivered to the agent as context via the SessionStart hook (not typed in),
+// so the editable prompt here is just your instruction. The working dir is
+// pre-resolved from the ticket's repo and editable — projects with no repo
+// (e.g. an ideas board) resolve to $HOME, which you can override here.
 const props = defineProps<{ ticket: Ticket }>();
 const emit = defineEmits<{
-  (e: "send", payload: { ticket: Ticket; prompt: string }): void;
+  (e: "send", payload: { ticket: Ticket; prompt: string; cwd: string }): void;
   (e: "close"): void;
 }>();
 
@@ -23,6 +26,8 @@ const detail = ref<TicketDetail | null>(null);
 const loading = ref(true);
 const loadError = ref<string | null>(null);
 const prompt = ref("");
+const cwd = ref("");
+const cwdMatched = ref(true);
 
 function defaultPrompt(t: Ticket): string {
   return `Work ticket ${t.key}. Its full description is attached as context — implement it.`;
@@ -35,6 +40,15 @@ watch(
     loading.value = true;
     loadError.value = null;
     prompt.value = defaultPrompt(t);
+    cwd.value = "";
+    cwdMatched.value = true;
+    // Resolve the spawn cwd in parallel with the description fetch.
+    resolveRepoCwd(t.repo)
+      .then((r) => {
+        cwd.value = r.cwd;
+        cwdMatched.value = r.matched;
+      })
+      .catch(() => {});
     try {
       detail.value = await getTicket(t.key);
     } catch (e) {
@@ -47,8 +61,8 @@ watch(
 );
 
 function send(): void {
-  if (!prompt.value.trim()) return;
-  emit("send", { ticket: props.ticket, prompt: prompt.value });
+  if (!prompt.value.trim() || !cwd.value.trim()) return;
+  emit("send", { ticket: props.ticket, prompt: prompt.value, cwd: cwd.value.trim() });
 }
 </script>
 
@@ -82,6 +96,12 @@ function send(): void {
         <pre v-else>{{ detail?.description }}</pre>
       </div>
 
+      <label class="plabel">Working directory</label>
+      <input v-model="cwd" class="cwd" :class="{ warn: !cwdMatched }" spellcheck="false" />
+      <p v-if="!cwdMatched" class="cwd-note">
+        No repo set for <strong>{{ ticket.repo }}</strong> — defaulting to your home dir. Set where the agent should run.
+      </p>
+
       <label class="plabel">Your prompt to the agent</label>
       <textarea
         v-model="prompt"
@@ -96,7 +116,7 @@ function send(): void {
         <span class="hint">The ticket body is attached as context via the SessionStart hook.</span>
         <span class="grow"></span>
         <button class="cancel" @click="emit('close')">Cancel</button>
-        <button class="send" :disabled="!prompt.trim()" @click="send">Send to agent</button>
+        <button class="send" :disabled="!prompt.trim() || !cwd.trim()" @click="send">Send to agent</button>
       </div>
     </div>
   </div>
@@ -219,6 +239,34 @@ function send(): void {
   font-size: 11px;
   color: #7a8696;
   margin-bottom: 5px;
+}
+.cwd {
+  width: 100%;
+  background: #0b0e12;
+  border: 1px solid #2a3744;
+  border-radius: 8px;
+  padding: 8px 11px;
+  color: #c3ccd6;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 12px;
+  outline: none;
+  margin-bottom: 10px;
+}
+.cwd:focus {
+  border-color: #3d6fa6;
+}
+.cwd.warn {
+  border-color: #6b5326;
+}
+.cwd-note {
+  margin: -4px 0 10px;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: #d6a651;
+}
+.cwd-note strong {
+  font-family: "JetBrains Mono", monospace;
+  color: #e0b566;
 }
 .prompt {
   resize: vertical;
