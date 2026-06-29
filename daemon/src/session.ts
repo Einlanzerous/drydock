@@ -18,6 +18,8 @@ export interface SpawnOptions {
   cols?: number;
   rows?: number;
   env?: Record<string, string>;
+  /** Tracker ticket this session is scoped to; surfaced to the SessionStart hook. */
+  ticket?: string;
 }
 
 /**
@@ -54,6 +56,7 @@ export class PtySession {
   readonly command: string;
   readonly args: string[];
   readonly cwd: string;
+  readonly ticket?: string;
   title: string;
 
   private readonly pty: pty.IPty;
@@ -73,6 +76,7 @@ export class PtySession {
     this.command = opts.command;
     this.args = opts.args ?? [];
     this.cwd = opts.cwd ?? os.homedir();
+    this.ticket = opts.ticket;
     this.title = opts.title ?? opts.command;
     this.cols = opts.cols ?? 80;
     this.rows = opts.rows ?? 24;
@@ -196,6 +200,7 @@ export class PtySession {
       command: this.command,
       args: this.args,
       cwd: this.cwd,
+      ticket: this.ticket,
       status: this.status,
       exitCode: this.exitCode,
       cols: this.cols,

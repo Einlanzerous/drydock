@@ -2,6 +2,7 @@ import * as http from "node:http";
 import { WebSocketServer, type WebSocket } from "ws";
 import { CONFIG } from "./config.js";
 import { SessionManager } from "./manager.js";
+import { resolveRepoCwd } from "./repos.js";
 import type { ClientMessage } from "./protocol.js";
 import { createTracker, trackerInfo } from "./tracker/index.js";
 
@@ -46,10 +47,23 @@ const server = http.createServer(async (req, res) => {
       if (!body.command || typeof body.command !== "string") {
         return send(res, 400, { error: "command is required" });
       }
+      // cwd precedence: an explicit cwd wins; otherwise a ticket's repo name is
+      // resolved to its real dir on this host (falling back to $HOME if unknown).
+      let cwd = typeof body.cwd === "string" ? body.cwd : undefined;
+      if (!cwd && typeof body.repo === "string") {
+        const r = resolveRepoCwd(body.repo);
+        cwd = r.cwd;
+        if (!r.matched) {
+          console.warn(
+            `[drydock] repo "${body.repo}" not found under repos root or overrides — spawning in ${r.cwd}`,
+          );
+        }
+      }
       const session = manager.create({
         command: body.command,
         args: Array.isArray(body.args) ? body.args : [],
-        cwd: typeof body.cwd === "string" ? body.cwd : undefined,
+        cwd,
+        ticket: typeof body.ticket === "string" ? body.ticket : undefined,
         title: typeof body.title === "string" ? body.title : undefined,
         cols: typeof body.cols === "number" ? body.cols : undefined,
         rows: typeof body.rows === "number" ? body.rows : undefined,
@@ -130,6 +144,32 @@ const server = http.createServer(async (req, res) => {
               : "Denied in Drydock",
         },
       });
+    }
+
+    // --- SessionStart hook endpoint (DRY-9 ticket-spawn) ---
+    // When a session was spawned for a ticket, the wrapped CLI's SessionStart
+    // hook hits this and we return Claude Code's `additionalContext` schema
+    // carrying the ticket body — so the agent starts with the full ticket in
+    // context without it being typed into the prompt. Non-ticket sessions (or an
+    // unknown one) get an empty object, which the hook treats as "no context".
+    if (pathname === "/hook/sessionstart" && req.method === "GET") {
+      const sessionId = (req.headers["x-drydock-session"] as string | undefined) ?? "";
+      const session = manager.get(sessionId);
+      if (!session?.ticket) return send(res, 200, {});
+      try {
+        const t = await tracker.getTicket(session.ticket);
+        const additionalContext =
+          `You are working on tracker ticket ${t.key}.\n\n` +
+          `# ${t.key}: ${t.title}\n` +
+          `Status: ${t.status.label} · Repo: ${t.repo}\n\n` +
+          `${t.description}`;
+        return send(res, 200, {
+          hookSpecificOutput: { hookEventName: "SessionStart", additionalContext },
+        });
+      } catch {
+        // Tracker hiccup: don't block session start — just skip the context.
+        return send(res, 200, {});
+      }
     }
 
     return send(res, 404, { error: "not found" });

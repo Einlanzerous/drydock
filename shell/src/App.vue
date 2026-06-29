@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import TerminalPane from "./components/TerminalPane.vue";
 import WindowFrame from "./components/WindowFrame.vue";
 import TrackerSidebar from "./components/TrackerSidebar.vue";
+import TicketDetail from "./components/TicketDetail.vue";
 import QuickLaunch from "./components/QuickLaunch.vue";
 import Dock from "./components/Dock.vue";
 import { useWindowManager, type LayoutMode } from "./composables/useWindowManager.js";
@@ -16,6 +17,7 @@ const tickets = ref<Ticket[]>([]);
 const providerName = ref("Switchyard");
 const sidebarOpen = ref(true);
 const quickOpen = ref(false);
+const selectedTicket = ref<Ticket | null>(null);
 const error = ref<string | null>(null);
 
 // Live per-session state. Daemon poll discovers sessions + gives a status/pending
@@ -43,7 +45,9 @@ function reconcile(list: SessionInfo[]) {
         id: s.id,
         type: s.command === "claude" ? "agent" : "bash",
         title: s.command === "claude" ? "claude-code" : s.command,
-        ticket: ticketById[s.id],
+        // Prefer client-side spawn intent, but fall back to the daemon's record
+        // so a ticket badge survives a page reload / reattach.
+        ticket: ticketById[s.id] ?? s.ticket,
         repo: basename(s.cwd),
       });
     }
@@ -90,14 +94,28 @@ async function spawnFresh(kind: "claude" | "shell") {
   }
 }
 
-async function spawnTicket(t: Ticket) {
+// Picking a ticket (sidebar or palette) opens its detail panel; the actual
+// spawn happens from there once you've read it and hit "Send to agent".
+function openTicket(t: Ticket) {
   quickOpen.value = false;
+  selectedTicket.value = t;
+}
+
+// Spawn an agent for the reviewed ticket: real repo cwd (daemon resolves the
+// repo name → host path) and the ticket key (so the SessionStart hook injects
+// the body as context). The editable prompt is pre-filled, not auto-submitted.
+async function onSendTicket({ ticket, prompt }: { ticket: Ticket; prompt: string }) {
+  selectedTicket.value = null;
   wm.setLayout("float");
   try {
-    const s = await createSession({ command: "claude", title: "claude-code" });
-    ticketById[s.id] = t.key;
-    // Pre-fill (don't auto-submit) the ticket so the agent starts scoped to it.
-    initialInputById[s.id] = `${t.key}: ${t.title}`;
+    const s = await createSession({
+      command: "claude",
+      title: "claude-code",
+      repo: ticket.repo,
+      ticket: ticket.key,
+    });
+    ticketById[s.id] = ticket.key;
+    initialInputById[s.id] = prompt;
     await refresh();
     wm.bringFront(s.id);
   } catch (e) {
@@ -234,7 +252,7 @@ onBeforeUnmount(() => {
         v-if="sidebarOpen"
         :name="providerName"
         :tickets="tickets"
-        @launch="spawnTicket"
+        @launch="openTicket"
       />
 
       <div ref="deskEl" class="desk">
@@ -279,8 +297,15 @@ onBeforeUnmount(() => {
       :tickets="tickets"
       :provider-name="providerName"
       @close="quickOpen = false"
-      @launch="spawnTicket"
+      @launch="openTicket"
       @spawn-blank="(quickOpen = false), spawnFresh('claude')"
+    />
+
+    <TicketDetail
+      v-if="selectedTicket"
+      :ticket="selectedTicket"
+      @send="onSendTicket"
+      @close="selectedTicket = null"
     />
   </div>
 </template>

@@ -19,14 +19,17 @@ survive disconnects, sleep, and multi-day gaps. The browser is just a viewer.
                                                                      ▼
                                        ┌──────────────────────────────────────┐
                                        │  daemon/  (Node + node-pty + ws)       │
-   claude PreToolUse hook ── HTTP ────▶│  • owns PTY master per session         │
+   claude PreToolUse  hook ─ HTTP ────▶│  • owns PTY master per session         │
    (curl → /hook/pretooluse)           │  • ring-buffer scrollback + replay     │
-                                       │  • holds approval gates open for a UI  │
+   claude SessionStart hook ─ HTTP ───▶│  • holds approval gates open for a UI  │
+   (curl → /hook/sessionstart)         │  • injects ticket body as context      │
+                                       │  • resolves ticket repo → spawn cwd    │
                                        │  • localhost-only; one per host        │
                                        └──────────────────────────────────────┘
                                                         │ spawns
-                                                        ▼  (PTY, with DRYDOCK_SESSION_ID in env)
-                                              claude / gemini-cli / bash
+                                                        ▼  (PTY in the ticket's repo cwd,
+                                                           DRYDOCK_SESSION_ID in env)
+                                              claude / gemini-cli / shell
 ```
 
 The wrapped CLI owns its own auth — Drydock never touches API keys. The
@@ -95,9 +98,25 @@ approval loop.
 ## Layout
 
 - `daemon/` — PTY-owning backend. `session.ts` is the core (PTY ownership,
-  scrollback, approval gates); `server.ts` is the HTTP + WS surface.
-- `shell/` — Vue 3 viewer. `components/TerminalPane.vue` is the core pane.
-- `hooks/` — the `PreToolUse` hook config to drop into a repo's `.claude/settings.json`.
+  scrollback, approval gates); `server.ts` is the HTTP + WS surface; `repos.ts`
+  resolves a ticket's repo name to its real working directory on this host.
+- `shell/` — Vue 3 viewer. `components/TerminalPane.vue` is the core pane;
+  `components/TicketDetail.vue` is the read-then-spawn ticket panel.
+- `hooks/` — the `PreToolUse` + `SessionStart` hook config to drop into a repo's
+  `.claude/settings.json`.
+
+## Ticket-driven sessions
+
+Picking a ticket (sidebar or `Ctrl K`) opens its description; **Send to agent**
+spawns `claude` **in that ticket's repo** and the ticket body rides into the
+agent's context via a `SessionStart` hook (`curl → /hook/sessionstart`) — it's
+not typed into the prompt. The prompt is pre-filled with your instruction and
+left for you to send (no auto-submit).
+
+Repo→directory mapping is host config on the daemon: `DRYDOCK_REPOS_ROOT`
+(default `~/projects`, so repo `argosy` → `~/projects/argosy`) with per-repo
+overrides via `DRYDOCK_REPO_PATHS="construct-server=~/construct-server,imperium-loop=~/imperium-loop"`.
+A name that resolves to no existing directory falls back to `$HOME`.
 
 ## Not in this PoC
 

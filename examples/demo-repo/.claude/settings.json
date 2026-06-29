@@ -11,6 +11,18 @@
           }
         ]
       }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "startup",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 30,
+            "command": "curl -s -m 25 \"$DRYDOCK_DAEMON_URL/hook/sessionstart\" -H \"X-Drydock-Session: $DRYDOCK_SESSION_ID\""
+          }
+        ]
+      }
     ]
   }
 }

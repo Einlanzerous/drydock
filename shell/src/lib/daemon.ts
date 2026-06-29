@@ -26,6 +26,10 @@ export async function createSession(opts: {
   command: string;
   args?: string[];
   cwd?: string;
+  /** Ticket repo name; the daemon resolves it to a real cwd host-side. */
+  repo?: string;
+  /** Ticket key; the daemon binds it to the session for the SessionStart hook. */
+  ticket?: string;
   title?: string;
 }): Promise<SessionInfo> {
   const res = await fetch(`${DAEMON_HTTP}/api/sessions`, {

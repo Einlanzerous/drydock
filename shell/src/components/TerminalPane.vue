@@ -56,8 +56,13 @@ function connect() {
     doFit();
     if (!sentInitial && props.initialInput) {
       sentInitial = true;
-      // Give the wrapped CLI a beat to draw its prompt before we type.
-      setTimeout(() => sendWs({ type: "input", data: props.initialInput! }), 600);
+      const text = props.initialInput;
+      // A multi-line ticket seed is sent as a bracketed paste (ESC[200~ … ESC[201~)
+      // so the CLI drops it into the prompt as one block instead of submitting
+      // each line. No trailing CR — we pre-fill, never auto-submit. Give the
+      // wrapped CLI a beat to draw its prompt (and enable paste mode) first.
+      const data = text.includes("\n") ? `\x1b[200~${text}\x1b[201~` : text;
+      setTimeout(() => sendWs({ type: "input", data }), 700);
     }
   };
   sock.onclose = () => {
