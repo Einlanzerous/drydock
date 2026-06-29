@@ -60,7 +60,11 @@ localhost-only) and `bun run shell`.
 ## What's REAL vs MOCKED right now (read before trusting the UI)
 
 **Real, verified end-to-end:**
-- PTY sessions — `+claude` / `+bash` spawn real processes via node-pty.
+- PTY sessions — `+claude` / `+shell` spawn real processes via node-pty. `+shell`
+  spawns the host owner's **own login shell** (`$SHELL` — e.g. zsh + oh-my-zsh;
+  override with `DRYDOCK_SHELL`) as a login shell, not a hardcoded bash. The session
+  keeps the logical command `"shell"`, so pane classification (agent vs shell) is
+  unchanged; only the spawn target is resolved host-side in `session.ts`.
 - Durability — detach/reattach, scrollback replay, close-tab-keeps-running.
 - **PreToolUse approval loop** (the differentiator) — real `claude -p` hits the hook,
   daemon gates it, UI approve/deny round-trips as the real `permissionDecision`.
@@ -102,19 +106,21 @@ localhost-only) and `bun run shell`.
 
 Work is tracked in Switchyard under the **DRY** project (use the `switchyard` MCP —
 `get_ticket`, `list_tickets` (project DRY), `comment_on_ticket`, `transition_ticket`).
-The epic is **DRY-1**. Current state:
+The epic is **DRY-1** (In Progress). Switchyard status was reconciled with shipped
+code on 2026-06-28 — the four foundational tickets are now **Closed**; the table below
+matches the tracker:
 
-| Ticket | Title | State |
+| Ticket | Title | Switchyard status |
 |--------|-------|-------|
-| DRY-2  | Initial repo scaffolding & monorepo layout | done |
-| DRY-3  | Backend daemon: detached, durable PTY sessions | done (verified) |
-| DRY-4  | Vue 3 + xterm.js shell: always-on grid & window mgmt | mostly done — see leftovers below |
-| DRY-5  | Ambient attention signaling & in-place approval (hooks) | done (approval loop verified) |
-| DRY-6  | Embedded Chromium webview for app previews | not started |
-| DRY-7  | Local git diff review UI (approve agent commits) | not started |
-| DRY-8  | Spike: session-durability design | answered |
-| DRY-9  | Implement Drydock web UI shell (from design prototype) | **done** — browser-verified |
-| DRY-10 | Pluggable issue-tracker provider abstraction (Switchyard + Jira) | **partial** — abstraction + fixture done; Switchyard unverified; Jira TODO |
+| DRY-2  | Initial repo scaffolding & monorepo layout | **Closed** (done) |
+| DRY-3  | Backend daemon: detached, durable PTY sessions | **Closed** (done — verified) |
+| DRY-4  | Vue 3 + xterm.js shell: always-on grid & window mgmt | In Progress — see leftovers below |
+| DRY-5  | Ambient attention signaling & in-place approval (hooks) | **Closed** (done — approval loop verified) |
+| DRY-6  | Embedded Chromium webview for app previews | Backlog |
+| DRY-7  | Local git diff review UI (approve agent commits) | Backlog |
+| DRY-8  | Spike: session-durability design | **Closed** (answered; implemented in DRY-3) |
+| DRY-9  | Implement Drydock web UI shell (from design prototype) | In Progress — shell browser-verified; ticket-spawn still cosmetic (next step #1) |
+| DRY-10 | Pluggable issue-tracker provider abstraction (Switchyard + Jira) | In Progress — abstraction + fixture done; Switchyard unverified; Jira TODO |
 
 Before working a ticket, read its full description in Switchyard — they carry the real
 design rationale. Comment progress and transition status as you go.

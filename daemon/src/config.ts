@@ -13,6 +13,13 @@ export const CONFIG = {
   scrollbackBytes: Number(process.env.DRYDOCK_SCROLLBACK_BYTES ?? 1_048_576),
 
   /**
+   * Login shell spawned for plain "shell" sessions. Defaults to the host
+   * owner's own shell ($SHELL) so their real setup loads — zsh + oh-my-zsh,
+   * prompt, aliases — instead of a hardcoded bash. Override with DRYDOCK_SHELL.
+   */
+  defaultShell: process.env.DRYDOCK_SHELL ?? process.env.SHELL ?? "bash",
+
+  /**
    * How long the daemon holds a PreToolUse hook request open waiting for a
    * human decision before giving up. Claude Code's own hook timeout (default
    * ~600s) is the hard ceiling; we stay under it so we resolve first and the

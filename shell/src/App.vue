@@ -79,10 +79,10 @@ function onAttention(id: string, pending: boolean) {
 }
 
 // --- spawning ---
-async function spawnFresh(kind: "claude" | "bash") {
+async function spawnFresh(kind: "claude" | "shell") {
   wm.setLayout("float");
   try {
-    const s = await createSession({ command: kind, title: kind === "claude" ? "claude-code" : kind });
+    const s = await createSession({ command: kind, title: kind === "claude" ? "claude-code" : "shell" });
     await refresh();
     wm.bringFront(s.id);
   } catch (e) {
@@ -222,7 +222,7 @@ onBeforeUnmount(() => {
           <span class="kbd">Ctrl K</span>
         </button>
         <button class="ghost" @click="spawnFresh('claude')">+ claude</button>
-        <button class="ghost" @click="spawnFresh('bash')">+ bash</button>
+        <button class="ghost" @click="spawnFresh('shell')">+ shell</button>
       </div>
     </header>
 
