@@ -27,6 +27,7 @@ interface SwitchyardTicket {
   status?: { category?: string; display_name?: string };
   project?: { key?: string; name?: string; repo_url?: string | null };
   labels?: { name: string }[];
+  assignee?: { id?: string; name?: string } | null;
 }
 
 // The list endpoint has no `open` flag; "open" = every non-closed category.
@@ -76,6 +77,7 @@ function toTicket(t: SwitchyardTicket): Ticket {
     repo: repoOf(t),
     type: t.type,
     tag: t.labels?.[0]?.name,
+    assignee: t.assignee?.name ? { id: t.assignee.id, name: t.assignee.name } : undefined,
   };
 }
 

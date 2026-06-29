@@ -20,17 +20,18 @@ interface Fixture {
   tag: string;
   category: TicketCategory;
   type?: string;
+  assignee?: string;
 }
 
 // Ported verbatim from Drydock.dc.html's fixture, normalized onto our shape.
 const FIXTURES: Fixture[] = [
-  { key: "ARGY-89", repo: "argosy", title: "Series auto-advance: auto-play the next episode", tag: "frontend", category: "in_progress" },
-  { key: "ARGY-90", repo: "argosy", title: "Skip Intro / Skip Credits buttons (web player)", tag: "frontend", category: "backlog" },
+  { key: "ARGY-89", repo: "argosy", title: "Series auto-advance: auto-play the next episode", tag: "frontend", category: "in_progress", assignee: "Ashley" },
+  { key: "ARGY-90", repo: "argosy", title: "Skip Intro / Skip Credits buttons (web player)", tag: "frontend", category: "backlog", assignee: "Ashley" },
   { key: "ARGY-91", repo: "argosy", title: "Global auto-play preference (opt-in, default off)", tag: "backend", category: "backlog" },
-  { key: "ARGY-64", repo: "argosy", title: "Phase 8 — Extra Credit (Stretch & Scale)", tag: "epic", category: "in_progress", type: "epic" },
-  { key: "SWY-12", repo: "switchyard", title: "Saved filters in the board view", tag: "frontend", category: "review" },
+  { key: "ARGY-64", repo: "argosy", title: "Phase 8 — Extra Credit (Stretch & Scale)", tag: "epic", category: "in_progress", type: "epic", assignee: "Jordan" },
+  { key: "SWY-12", repo: "switchyard", title: "Saved filters in the board view", tag: "frontend", category: "review", assignee: "Jordan" },
   { key: "SWY-7", repo: "switchyard", title: "Webhook retries with exponential backoff", tag: "backend", category: "backlog" },
-  { key: "DRY-3", repo: "drydock", title: "Tile layout snapping + window persistence", tag: "frontend", category: "in_progress" },
+  { key: "DRY-3", repo: "drydock", title: "Tile layout snapping + window persistence", tag: "frontend", category: "in_progress", assignee: "Ashley" },
   { key: "DRY-5", repo: "drydock", title: "Session persistence across server reconnect", tag: "infra", category: "backlog" },
 ];
 
@@ -51,6 +52,7 @@ function toTicket(f: Fixture): Ticket {
     repo: f.repo,
     type: f.type ?? "task",
     tag: f.tag,
+    assignee: f.assignee ? { name: f.assignee } : undefined,
   };
 }
 
