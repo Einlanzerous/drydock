@@ -25,11 +25,30 @@ const error = ref<string | null>(null);
 // Live per-session state. Daemon poll discovers sessions + gives a status/pending
 // fallback; TerminalPane emits override it instantly over the WebSocket.
 const sessionsById = reactive<Record<string, SessionInfo>>({});
-const live = reactive<Record<string, { status?: SessionInfo["status"]; attention?: boolean }>>({});
+const live = reactive<
+  Record<string, { status?: SessionInfo["status"]; attention?: boolean; idle?: boolean }>
+>({});
 const ticketById = reactive<Record<string, string>>({});
 const initialInputById = reactive<Record<string, string>>({});
 
 let poll: ReturnType<typeof setInterval> | null = null;
+let ticketPoll: ReturnType<typeof setInterval> | null = null;
+const refreshingTickets = ref(false);
+
+// Re-pull tickets so the sidebar reflects external status changes (DRY-17).
+// Replaces the data only — TrackerSidebar keeps its own search/filter/expand
+// state, so a refresh doesn't disturb what the user is looking at. A tracker
+// hiccup keeps the last-good list rather than blanking the sidebar.
+async function loadTickets() {
+  refreshingTickets.value = true;
+  try {
+    tickets.value = await listTickets(true);
+  } catch {
+    /* keep last-good list */
+  } finally {
+    refreshingTickets.value = false;
+  }
+}
 
 function basename(p: string): string {
   return p.split("/").filter(Boolean).pop() ?? "~";
@@ -71,10 +90,14 @@ function winStatus(id: string) {
   const l = live[id];
   const s = sessionsById[id];
   const attention = l?.attention ?? (s ? s.pendingPermissions > 0 : false);
+  const idle = l?.idle ?? s?.idle ?? false;
   const status = l?.status ?? s?.status ?? "running";
-  if (attention) return { c: "#d6a651", g: "#d6a65177", attention: true }; // needs you
-  if (status === "exited") return { c: "#6a737f", g: "#6a737f55", attention: false }; // idle
-  return { c: "#5fb98a", g: "#5fb98a77", attention: false }; // running
+  // Permission gate wins (it's blocking a tool); then process-dead; then the
+  // agent yielding its turn ("Your turn", DRY-18); else actively working.
+  if (attention) return { c: "#d6a651", g: "#d6a65177", attention: true, tag: "" }; // needs you
+  if (status === "exited") return { c: "#6a737f", g: "#6a737f55", attention: false, tag: "" }; // exited
+  if (idle) return { c: "#d6a651", g: "#d6a65177", attention: true, tag: "Your turn" }; // yielded
+  return { c: "#5fb98a", g: "#5fb98a77", attention: false, tag: "" }; // running
 }
 
 function onStatus(id: string, status: SessionInfo["status"]) {
@@ -83,6 +106,9 @@ function onStatus(id: string, status: SessionInfo["status"]) {
 function onAttention(id: string, pending: boolean) {
   (live[id] ??= {}).attention = pending;
 }
+function onIdle(id: string, idle: boolean) {
+  (live[id] ??= {}).idle = idle;
+}
 
 // Minimizing unmounts the pane (its WS closes), so the live attention override
 // can no longer update and would shadow the daemon poll via the `??` in
@@ -90,7 +116,13 @@ function onAttention(id: string, pending: boolean) {
 // still lights its dock dot (driven by the 3s pendingPermissions poll).
 function minimizeWindow(id: string) {
   wm.minimize(id);
-  if (live[id]) live[id].attention = undefined;
+  // The unmounted pane's WS can no longer update these overrides, and the `??`
+  // in winStatus would let them shadow the daemon poll. Clear both so the 3s
+  // poll (pendingPermissions / idle) drives the dock dot while docked.
+  if (live[id]) {
+    live[id].attention = undefined;
+    live[id].idle = undefined;
+  }
 }
 
 // --- spawning ---
@@ -192,10 +224,10 @@ onMounted(async () => {
   try {
     const info = await getTrackerInfo();
     providerName.value = info.name;
-    tickets.value = await listTickets(true);
   } catch {
-    /* sidebar/palette just stay empty if the tracker is unreachable */
+    /* provider name stays default if the tracker info call is unreachable */
   }
+  await loadTickets();
   // Restore the saved arrangement before the first poll. reconcile() then keeps
   // restored windows whose sessions are still alive (at their saved geometry),
   // drops those whose session is gone, and cascade-adds any new ones. Rehydrate
@@ -205,6 +237,10 @@ onMounted(async () => {
 
   await refresh();
   poll = setInterval(refresh, 3000);
+  // Tickets change far less often than sessions and each fetch hits Switchyard
+  // live, so poll them on a slower cadence (DRY-17). The sidebar refresh button
+  // forces an immediate re-pull between ticks.
+  ticketPoll = setInterval(loadTickets, 20000);
 
   if (deskEl.value) {
     const r = deskEl.value.getBoundingClientRect();
@@ -220,6 +256,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (poll) clearInterval(poll);
+  if (ticketPoll) clearInterval(ticketPoll);
   deskObs?.disconnect();
   window.removeEventListener("keydown", onKey);
 });
@@ -292,7 +329,9 @@ onBeforeUnmount(() => {
         v-if="sidebarOpen"
         :name="providerName"
         :tickets="tickets"
+        :refreshing="refreshingTickets"
         @launch="openTicket"
+        @refresh="loadTickets"
       />
 
       <div ref="deskEl" class="desk">
@@ -311,6 +350,7 @@ onBeforeUnmount(() => {
           :status-color="winStatus(w.id).c"
           :status-glow="winStatus(w.id).g"
           :attention="winStatus(w.id).attention"
+          :status-tag="winStatus(w.id).tag"
           :dragging="wm.isDragging()"
           @focus="wm.bringFront(w.id)"
           @drag-start="(e) => wm.startDrag(e, w.id)"
@@ -325,6 +365,7 @@ onBeforeUnmount(() => {
             :initial-input="initialInputById[w.id]"
             @status="onStatus"
             @attention="onAttention"
+            @idle="onIdle"
             @initial-sent="onInitialSent"
           />
         </WindowFrame>
