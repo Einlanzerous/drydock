@@ -34,6 +34,11 @@ interface SwitchyardTicket {
 // (Verified against the live API: `open=true` is ignored, a status list filters.)
 const OPEN_CATEGORIES = "backlog,planning,in_progress,blocked";
 
+// The API caps a page at ~100; an unbounded list (the sidebar) follows the
+// cursor until exhausted, but never past this many tickets — a backstop so a
+// huge tracker can't pull the whole world into one sidebar.
+const MAX_TICKETS = 2000;
+
 const CATEGORY_LABEL: Record<TicketCategory, string> = {
   backlog: "Backlog",
   planning: "Planning",
@@ -124,13 +129,25 @@ export class SwitchyardProvider implements TrackerProvider {
   }
 
   async listTickets(q: TicketQuery): Promise<Ticket[]> {
-    const params = new URLSearchParams();
-    if (q.project) params.set("project", q.project);
-    if (q.open) params.set("status", OPEN_CATEGORIES);
-    if (q.text) params.set("text", q.text);
-    params.set("limit", String(q.limit ?? 100));
-    const body = await this.req(`/v1/tickets?${params}`);
-    return this.items(body).map(toTicket);
+    // No explicit limit (the sidebar) means "all open tickets" — a single page
+    // caps at ~100, so follow `next_cursor` until exhausted (bounded by
+    // MAX_TICKETS). A caller that passes a limit (e.g. the palette) gets one page.
+    const paginate = q.limit === undefined;
+    const pageSize = q.limit ?? 200;
+    const out: Ticket[] = [];
+    let cursor: string | undefined;
+    do {
+      const params = new URLSearchParams();
+      if (q.project) params.set("project", q.project);
+      if (q.open) params.set("status", OPEN_CATEGORIES);
+      if (q.text) params.set("text", q.text);
+      params.set("limit", String(pageSize));
+      if (cursor) params.set("cursor", cursor);
+      const body = await this.req(`/v1/tickets?${params}`);
+      out.push(...this.items(body).map(toTicket));
+      cursor = body?.page?.next_cursor ?? undefined;
+    } while (paginate && cursor && out.length < MAX_TICKETS);
+    return out;
   }
 
   async searchTickets(text: string): Promise<Ticket[]> {
