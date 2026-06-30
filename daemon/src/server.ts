@@ -9,6 +9,12 @@ import { createTracker, trackerInfo } from "./tracker/index.js";
 const manager = new SessionManager();
 const tracker = createTracker();
 
+// Permission modes where Claude Code runs tools without asking. In these the
+// PreToolUse hook still fires, but our approve/deny is moot — so we auto-allow
+// rather than show a gate that wouldn't actually hold the tool back. "default"
+// and "acceptEdits" (which still prompts for Bash) keep gating.
+const HANDS_OFF_MODES = new Set(["bypassPermissions", "auto", "dontAsk"]);
+
 function send(res: http.ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
@@ -135,6 +141,20 @@ const server = http.createServer(async (req, res) => {
       const body = await readJson(req);
       if (!session) {
         return send(res, 404, { error: `unknown session ${sessionId}` });
+      }
+      // PreToolUse fires in *every* permission mode. If the agent is running
+      // hands-off (bypassPermissions / auto / dontAsk), Claude Code runs the
+      // tool regardless of what we return — so popping a gate would be a
+      // misleading no-op. Honor the mode and auto-allow without prompting.
+      const mode = typeof body.permission_mode === "string" ? body.permission_mode : "default";
+      if (HANDS_OFF_MODES.has(mode)) {
+        return send(res, 200, {
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "allow",
+            permissionDecisionReason: `Auto-approved (agent in ${mode} mode)`,
+          },
+        });
       }
       const tool = body.tool_name ?? "unknown";
       const decision = await session.requestPermission(tool, body.tool_input ?? {});
