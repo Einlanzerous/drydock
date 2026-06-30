@@ -30,19 +30,21 @@ so this works with no hardcoded IP.
 
 ## Current state (what already exists)
 
-- **git:** initialized. Default branch `main`. Public remote at
-  `https://github.com/Einlanzerous/drydock`. DRY-9/10 work is on branch
-  `dry-9-10-shell-tracker` with open **PR #1**.
-- `daemon/` — TS/Node backend. `src/session.ts` (PTY ownership, scrollback, approval
-  gates), `src/server.ts` (HTTP + WS + `/api/tracker/*`), `src/manager.ts`,
-  `src/protocol.ts`, `src/config.ts`, and `src/tracker/` (provider abstraction — see below).
-- `shell/` — Vue 3 viewer, rewritten to prototype fidelity (DRY-9). `src/App.vue`,
-  `src/composables/useWindowManager.ts` (Float/Tile/Focus engines), `src/components/`
-  (`WindowFrame`, `TerminalPane`, `TrackerSidebar`, `QuickLaunch`, `Dock`),
-  `src/lib/daemon.ts`, `src/lib/tracker.ts`.
-- `daemon/src/hooks.ts` — `PreToolUse` + `SessionStart` hooks the daemon injects into every
-  spawned `claude` via `--settings` (no per-repo install). `hooks/settings.snippet.json` is the
-  same config as a reference/manual fallback only.
+- **git:** Default branch `main`; public remote `https://github.com/Einlanzerous/drydock`.
+  **PRs #1, #2, #3 are all merged** — `main` holds the full PoC. No open PRs.
+- `daemon/` — TS/Node backend. `src/session.ts` (PTY ownership, scrollback, approval gates,
+  spawn resolution: `shell`→`$SHELL -l`, `claude`→`claude --settings <hooks>`), `src/server.ts`
+  (HTTP + WS + `/api/tracker/*` + `/api/repos/resolve` + `/hook/{pretooluse,sessionstart}`),
+  `src/manager.ts`, `src/protocol.ts`, `src/config.ts`, `src/env.ts` (`.env` loader),
+  `src/repos.ts` (ticket repo→cwd resolution), `src/hooks.ts` (daemon-injected Claude hooks),
+  and `src/tracker/` (provider abstraction — `fixture` + `switchyard`).
+- `shell/` — Vue 3 viewer (DRY-9). `src/App.vue`, `src/composables/useWindowManager.ts`
+  (Float/Tile/Focus engines), `src/components/` (`WindowFrame`, `TerminalPane`, `TrackerSidebar`,
+  `TicketDetail`, `QuickLaunch`, `Dock`), `src/lib/daemon.ts`, `src/lib/tracker.ts`.
+- `hooks/settings.snippet.json` — reference/fallback only. The daemon now injects the
+  `PreToolUse` + `SessionStart` hooks into every spawned `claude` via `--settings`
+  (`daemon/src/hooks.ts`), so **no per-repo `.claude/settings.json` is required**.
+- `.env` (gitignored; `.env.example` documents the shape) — host config incl. tracker creds.
 - `examples/demo-repo/` — a repo for exercising the approval loop.
 - Bun monorepo (`daemon` + `shell` workspaces). **Note: the daemon runs on Node, not Bun**
   — `node-pty`'s native addon needs V8's C++ API, which Bun's JSC runtime lacks (it
@@ -58,6 +60,10 @@ bun run dev            # daemon → 0.0.0.0:4317  +  shell → 0.0.0.0:5320 (vit
 Split across two terminals instead: `bun run daemon` (or `bun run daemon:local` for
 localhost-only) and `bun run shell`.
 
+For a **live tracker**, copy `.env.example` → `.env` (the daemon auto-loads it; real env vars
+still win): `DRYDOCK_TRACKER=switchyard`, `DRYDOCK_SWITCHYARD_URL=http://localhost:4002`,
+`DRYDOCK_SWITCHYARD_TOKEN=…`. With no `.env` it defaults to the built-in fixture tickets.
+
 ## What's REAL vs MOCKED right now (read before trusting the UI)
 
 **Real, verified end-to-end:**
@@ -67,11 +73,20 @@ localhost-only) and `bun run shell`.
   keeps the logical command `"shell"`, so pane classification (agent vs shell) is
   unchanged; only the spawn target is resolved host-side in `session.ts`.
 - Durability — detach/reattach, scrollback replay, close-tab-keeps-running.
-- **PreToolUse approval loop** (the differentiator) — real `claude -p` hits the hook,
-  daemon gates it, UI approve/deny round-trips as the real `permissionDecision`.
+- **PreToolUse approval loop** (the differentiator) — a real `claude` Bash call hits the hook,
+  the daemon gates it, UI approve/deny round-trips as the real `permissionDecision`. The daemon
+  **honors the agent's permission mode**: in hands-off modes (`bypassPermissions`/`auto`/`dontAsk`)
+  it auto-allows without prompting — a gate there wouldn't hold the tool back anyway — while
+  `default`/`acceptEdits` still gate. A session that hits a gate **while docked** lights its dock dot.
 - Status dots — green/amber/grey derived from *live* daemon state (WS + 3s poll).
 - Window manager — Float/Tile/Focus, drag/resize, minimize→dock→restore, Ctrl+K palette.
+  **Minimize** keeps the session running (docked); the **X (close) kills the session**. Layout
+  is **not persisted** — a reload resets positions/sizes/layout (DRY-14, the main daily-use gap).
 - Tracker plumbing — daemon `/api/tracker/*` endpoints are real HTTP; shell fetches over them.
+- **Sidebar search + filters (DRY-11)** — always-on search (key/title/repo/assignee), project/
+  status/assignee filters with clear-all, collapsible groups (collapsed by default, with counts).
+  The open list is fully **paginated** (follows the API cursor, capped at 2000), so all open
+  tickets load — not just the first 100.
 - **Ticket → agent spawn** (DRY-9 + DRY-12) — picking a ticket opens a detail panel with the
   full description and the **resolved working dir** (editable: daemon resolves repo→path via
   `DRYDOCK_REPOS_ROOT` default `~/projects` + `DRYDOCK_REPO_PATHS` overrides; a repo-less project
@@ -80,10 +95,10 @@ localhost-only) and `bun run shell`.
   hook** (`/hook/sessionstart`), *not* typed into the prompt, which is pre-filled and **not**
   auto-submitted. **Hooks are injected by the daemon via `claude --settings <generated file>`
   (`daemon/src/hooks.ts`)** — both PreToolUse + SessionStart work in any cwd with **no per-repo
-  `.claude/settings.json`** (that's why `IDEA-2` in `$HOME` previously injected nothing). Daemon
-  path verified headless. Still to do: **browser-verify** against a real `claude` — in particular
-  confirm `--settings <file>` registers the hooks for the spawned session (fallback: inline JSON,
-  or write the file per-session).
+  `.claude/settings.json`** (that's why `IDEA-2` in `$HOME` previously injected nothing). The
+  owner has confirmed the approval hook fires + gates in the live browser, so the `--settings`
+  injection path works (SessionStart context rides the same path). Remaining polish: a full
+  ticket→work→approve→commit pass, then **branch/worktree-per-ticket** isolation.
 
 **Mocked / default-to-fake:**
 - **Tracker data defaults to `FixtureProvider`** — 8 hardcoded tickets ported from the
@@ -102,9 +117,10 @@ localhost-only) and `bun run shell`.
 - **comment / transition** — server-side + paths verified live, but the request *bodies* are
   unverified (no UI calls them yet). Confirm field names when wiring the capability-gated UI.
 
-**Not built (leftovers):** layout persistence (resets on reload), per-repo theming, and
-**branch/worktree-per-ticket** — a ticket-spawned agent runs in the repo's *current* branch
-with no isolation yet (the obvious next increment on top of the now-real cwd resolution).
+**Not built (leftovers):** **workspace layout persistence** (DRY-14 — resets on every reload; the
+main gap before comfortable daily use), per-repo theming, **branch/worktree-per-ticket** (agent
+runs in the repo's current branch, no isolation), **epic display/rollup** (DRY-13 — epics render
+as plain rows), and Switchyard **comment/transition UI** (DRY-10 — server-side ready, no UI).
 
 ## Locked decisions — do not relitigate
 
@@ -119,50 +135,63 @@ with no isolation yet (the obvious next increment on top of the now-real cwd res
   iterates on Linux PTY; ConPTY parity is a separate verification, not a port.
 - **No API-key handling, ever.** Auth is the wrapped CLI's job. Tracker credentials live in
   daemon/host config, **never** in the browser.
+- **Hooks are daemon-injected via `claude --settings`, not per-repo.** The daemon writes a
+  settings file (`daemon/src/hooks.ts`) and spawns `claude --settings <it>`, so the approval +
+  ticket-context hooks work in any cwd. Don't reintroduce a per-repo `.claude/settings.json`
+  install requirement (it would also double-fire).
+- **Ticket-spawn pre-fills, never auto-submits.** The detail panel seeds an editable prompt and
+  shows the (editable) working dir; you hit Send and review in the terminal. The ticket *body*
+  is delivered as SessionStart context, not typed into the prompt.
+- **Drydock honors the agent's permission mode.** Don't force a gate when the agent is hands-off
+  — it's a no-op there and misleads the user.
+- **Close (X) kills the session; minimize docks it (keeps running).** These are the two distinct
+  verbs; don't collapse them.
 
 ## Tracking — Switchyard project DRY
 
 Work is tracked in Switchyard under the **DRY** project (use the `switchyard` MCP —
 `get_ticket`, `list_tickets` (project DRY), `comment_on_ticket`, `transition_ticket`).
-The epic is **DRY-1** (In Progress). Switchyard status was reconciled with shipped
-code on 2026-06-28 — the four foundational tickets are now **Closed**; the table below
-matches the tracker:
+The epic is **DRY-1** (In Progress). DRY-2/3/5/8 were reconciled to **Closed** on 2026-06-28;
+DRY-9/10/11/12 work merged to `main` (PRs #1–#3) on 2026-06-30. The table matches the tracker:
 
 | Ticket | Title | Switchyard status |
 |--------|-------|-------|
 | DRY-2  | Initial repo scaffolding & monorepo layout | **Closed** (done) |
 | DRY-3  | Backend daemon: detached, durable PTY sessions | **Closed** (done — verified) |
-| DRY-4  | Vue 3 + xterm.js shell: always-on grid & window mgmt | In Progress — see leftovers below |
-| DRY-5  | Ambient attention signaling & in-place approval (hooks) | **Closed** (done — approval loop verified) |
+| DRY-4  | Vue 3 + xterm.js shell: always-on grid & window mgmt | In Progress — layout persistence pulled out to DRY-14 |
+| DRY-5  | Ambient attention signaling & in-place approval (hooks) | **Closed** (approval loop + permission-mode + docked-attention) |
 | DRY-6  | Embedded Chromium webview for app previews | Backlog |
 | DRY-7  | Local git diff review UI (approve agent commits) | Backlog |
 | DRY-8  | Spike: session-durability design | **Closed** (answered; implemented in DRY-3) |
-| DRY-9  | Implement Drydock web UI shell (from design prototype) | In Progress — shell browser-verified; ticket-spawn now real (cwd + SessionStart-hook context), pending browser-verify of the panel + live hook |
-| DRY-10 | Pluggable issue-tracker provider abstraction (Switchyard + Jira) | In Progress — abstraction + fixture done; **Switchyard verified live (reads)**; Jira TODO |
-| DRY-11 | Tracker sidebar: search, filters (assignee/project/status) & collapsible groups | In Progress — built on branch `dry-11-sidebar`; pending browser-verify |
+| DRY-9  | Implement Drydock web UI shell (from design prototype) | In Progress — **merged**; shell + ticket-spawn live. Remainder: worktree-per-ticket |
+| DRY-10 | Pluggable issue-tracker provider abstraction (Switchyard + Jira) | In Progress — **merged**; Switchyard reads live + paginated. TODO: comment/transition UI, Jira |
+| DRY-11 | Tracker sidebar: search, filters & collapsible groups | **Closed** (merged, PR #3) |
+| DRY-12 | Robust hook delivery (`claude --settings`) + repo-less cwd selection | In Progress — **merged**; pending owner's final real-use sign-off |
+| DRY-13 | Epics in the sidebar: distinct display + parent/child rollup | Backlog |
+| DRY-14 | Persist & restore workspace layout across reloads/updates | Backlog — **the main gap before daily use** |
 
 Before working a ticket, read its full description in Switchyard — they carry the real
 design rationale. Comment progress and transition status as you go.
 
 ## Next steps (highest value first)
 
-1. **Browser-verify ticket-spawn (finishes DRY-9).** The mechanism is built and the daemon
-   path is headless-verified: detail panel → Send → spawn in the ticket's real repo cwd →
-   ticket body injected via the `SessionStart` hook (decided: leave-pre-filled, no auto-submit).
-   What's left is driving it in a browser against a real `claude` in a repo that has the
-   `SessionStart` hook installed, and confirming the injected context lands. Next increment:
-   **branch/worktree-per-ticket** (the agent currently runs in the repo's current branch).
-2. **Switchyard writes + UI (DRY-10).** Reads are verified live; what's left is the
-   capability-gated **comment / transition** UI — and confirming those two request *bodies*
-   against the API (paths are right, field names aren't yet exercised). Browser-verify the live
-   sidebar/palette/detail-panel against real tickets while you're at it.
-3. **Jira backend (DRY-10).** Jira Cloud REST v3 + JQL, corp-network friendly, credentials
-   host-side. Same `TrackerProvider` interface, selected by config — no UI branching.
-4. **DRY-4 leftovers.** Layout persistence across restarts (serialize window manager state)
-   + per-repo theming.
-5. **Daemon auth.** The daemon is **unauthenticated** and binds `0.0.0.0` by default — fine
-   on a trusted LAN/Tailscale (the owner's setup) but the first thing to add past PoC.
-6. **DRY-6 / DRY-7** (webview previews, git diff review) — larger, not started.
+1. **Workspace layout persistence (DRY-14).** The daemon keeps sessions alive, but the shell's
+   window state is in-memory, so every reload (dev HMR, deploy, refresh) wipes positions/sizes/
+   minimized/z-order/layout-mode. This is **the main gap before comfortable daily use.** Plan:
+   serialize `useWindowManager` state to `localStorage` (debounced), restore + reconcile against
+   live daemon sessions on load, keyed per daemon host, versioned shape. See the ticket.
+2. **Switchyard writes + UI (DRY-10).** Reads are live; what's left is the capability-gated
+   **comment / transition** UI — and confirming those two request *bodies* against the API
+   (paths right, field names not yet exercised).
+3. **Epic display/rollup (DRY-13).** Epics render as plain rows; surface them distinctly with
+   child rollup + progress. Builds on the DRY-11 sidebar; needs `parent_id` on the Ticket model.
+4. **Branch/worktree-per-ticket (finishes DRY-9).** Spawn the ticket agent in an isolated
+   worktree/branch instead of the repo's current branch.
+5. **Jira backend (DRY-10).** Jira Cloud REST v3 + JQL; same `TrackerProvider` interface,
+   selected by config — no UI branching.
+6. **Daemon auth.** The daemon is **unauthenticated** and binds `0.0.0.0` by default — fine on a
+   trusted LAN/Tailscale (the owner's setup) but the first thing to add past PoC.
+7. **DRY-6 / DRY-7** (webview previews, git diff review) — larger, not started.
 
 ## The design (DRY-9) — reference
 
