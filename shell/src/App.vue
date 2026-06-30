@@ -7,7 +7,7 @@ import TicketDetail from "./components/TicketDetail.vue";
 import QuickLaunch from "./components/QuickLaunch.vue";
 import Dock from "./components/Dock.vue";
 import { useWindowManager, type LayoutMode } from "./composables/useWindowManager.js";
-import { createSession, listSessions } from "./lib/daemon.js";
+import { createSession, killSession, listSessions } from "./lib/daemon.js";
 import { getTrackerInfo, listTickets, type Ticket } from "./lib/tracker.js";
 import type { SessionInfo } from "./lib/protocol.js";
 
@@ -104,14 +104,16 @@ function openTicket(t: Ticket) {
 // Spawn an agent for the reviewed ticket: real repo cwd (daemon resolves the
 // repo name → host path) and the ticket key (so the SessionStart hook injects
 // the body as context). The editable prompt is pre-filled, not auto-submitted.
-async function onSendTicket({ ticket, prompt }: { ticket: Ticket; prompt: string }) {
+async function onSendTicket({ ticket, prompt, cwd }: { ticket: Ticket; prompt: string; cwd: string }) {
   selectedTicket.value = null;
   wm.setLayout("float");
   try {
+    // cwd comes from the panel (resolved from the repo, possibly overridden); an
+    // explicit cwd takes precedence over repo resolution on the daemon.
     const s = await createSession({
       command: "claude",
       title: "claude-code",
-      repo: ticket.repo,
+      cwd,
       ticket: ticket.key,
     });
     ticketById[s.id] = ticket.key;
@@ -121,6 +123,26 @@ async function onSendTicket({ ticket, prompt }: { ticket: Ticket; prompt: string
   } catch (e) {
     error.value = String(e);
   }
+}
+
+// Seed consumed once: TerminalPane fires this after typing the pre-filled prompt,
+// so a re-mount (restore from dock, poll re-add) doesn't retype it.
+function onInitialSent(id: string) {
+  delete initialInputById[id];
+}
+
+// Closing a window terminates its session. Without the kill the 3s poller sees
+// the still-alive daemon session and re-adds the window (and the pane re-typed
+// the seed) — minimize→dock is the "keep running" path, the X means done.
+async function closeWindow(id: string) {
+  try {
+    await killSession(id);
+  } catch (e) {
+    error.value = String(e);
+  }
+  wm.remove(id);
+  delete initialInputById[id];
+  delete ticketById[id];
 }
 
 // --- visible windows + computed rects ---
@@ -276,7 +298,7 @@ onBeforeUnmount(() => {
           @drag-start="(e) => wm.startDrag(e, w.id)"
           @resize-start="(e) => wm.startResize(e, w.id)"
           @minimize="wm.minimize(w.id)"
-          @close="wm.remove(w.id)"
+          @close="closeWindow(w.id)"
         >
           <TerminalPane
             v-if="sessionsById[w.id]"
@@ -285,6 +307,7 @@ onBeforeUnmount(() => {
             :initial-input="initialInputById[w.id]"
             @status="onStatus"
             @attention="onAttention"
+            @initial-sent="onInitialSent"
           />
         </WindowFrame>
 

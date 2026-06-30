@@ -40,8 +40,9 @@ so this works with no hardcoded IP.
   `src/composables/useWindowManager.ts` (Float/Tile/Focus engines), `src/components/`
   (`WindowFrame`, `TerminalPane`, `TrackerSidebar`, `QuickLaunch`, `Dock`),
   `src/lib/daemon.ts`, `src/lib/tracker.ts`.
-- `hooks/settings.snippet.json` — the `PreToolUse` hook config to drop into a target
-  repo's `.claude/settings.json`.
+- `daemon/src/hooks.ts` — `PreToolUse` + `SessionStart` hooks the daemon injects into every
+  spawned `claude` via `--settings` (no per-repo install). `hooks/settings.snippet.json` is the
+  same config as a reference/manual fallback only.
 - `examples/demo-repo/` — a repo for exercising the approval loop.
 - Bun monorepo (`daemon` + `shell` workspaces). **Note: the daemon runs on Node, not Bun**
   — `node-pty`'s native addon needs V8's C++ API, which Bun's JSC runtime lacks (it
@@ -71,15 +72,18 @@ localhost-only) and `bun run shell`.
 - Status dots — green/amber/grey derived from *live* daemon state (WS + 3s poll).
 - Window manager — Float/Tile/Focus, drag/resize, minimize→dock→restore, Ctrl+K palette.
 - Tracker plumbing — daemon `/api/tracker/*` endpoints are real HTTP; shell fetches over them.
-- **Ticket → agent spawn** (DRY-9, finished) — picking a ticket opens a detail panel with the
-  full description; **Send to agent** spawns `claude` in the ticket's **real repo cwd** (daemon
-  resolves repo→path: `DRYDOCK_REPOS_ROOT` default `~/projects`, plus `DRYDOCK_REPO_PATHS`
-  overrides for repos that live elsewhere; unknown → `$HOME`) and the ticket body is injected
-  into the agent's context via a **`SessionStart` hook** (`/hook/sessionstart`), *not* typed
-  into the prompt. The prompt is pre-filled with your instruction and **not** auto-submitted.
-  The daemon path is verified headless; the **hook must be installed in the target repo's
-  `.claude/settings.json`** (it's in `hooks/settings.snippet.json` alongside the approval hook).
-  Still to do: **browser-verify** the panel + live hook against a real `claude` session.
+- **Ticket → agent spawn** (DRY-9 + DRY-12) — picking a ticket opens a detail panel with the
+  full description and the **resolved working dir** (editable: daemon resolves repo→path via
+  `DRYDOCK_REPOS_ROOT` default `~/projects` + `DRYDOCK_REPO_PATHS` overrides; a repo-less project
+  like `IDEA` resolves to `$HOME` and is flagged so you can override before spawning). **Send to
+  agent** spawns `claude` there; the ticket body is injected as context via a **`SessionStart`
+  hook** (`/hook/sessionstart`), *not* typed into the prompt, which is pre-filled and **not**
+  auto-submitted. **Hooks are injected by the daemon via `claude --settings <generated file>`
+  (`daemon/src/hooks.ts`)** — both PreToolUse + SessionStart work in any cwd with **no per-repo
+  `.claude/settings.json`** (that's why `IDEA-2` in `$HOME` previously injected nothing). Daemon
+  path verified headless. Still to do: **browser-verify** against a real `claude` — in particular
+  confirm `--settings <file>` registers the hooks for the spawned session (fallback: inline JSON,
+  or write the file per-session).
 
 **Mocked / default-to-fake:**
 - **Tracker data defaults to `FixtureProvider`** — 8 hardcoded tickets ported from the
