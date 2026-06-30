@@ -5,7 +5,8 @@
 // float honors each window's own rect; tile auto-grids ceil(sqrt(n)) columns
 // and reserves space for the dock; focus puts one window large with a
 // right-hand thumbnail strip of the rest.
-import { onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { loadLayout, saveLayout } from "./layoutStore.js";
 
 export type LayoutMode = "float" | "tile" | "focus";
 export type WinType = "agent" | "bash";
@@ -39,12 +40,48 @@ const STRIP_W = 210;
 const MIN_W = 300;
 const MIN_H = 180;
 
-export function useWindowManager() {
+export function useWindowManager(opts: { persistKey?: string } = {}) {
   const layout = ref<LayoutMode>("float");
   const windows = reactive<Win[]>([]);
   const focusedId = ref<string | null>(null);
   const desk = reactive({ w: 1000, h: 640 });
   let z = 30;
+
+  // ---- persistence (DRY-14) ----
+  // Restore the saved arrangement. App.vue calls this *before* the first daemon
+  // poll, so reconcile() sees the restored windows and keeps the alive ones at
+  // their saved geometry (rather than re-adding at cascade), adds genuinely new
+  // sessions, and drops windows whose session is gone.
+  function hydrate() {
+    if (!opts.persistKey) return;
+    const saved = loadLayout(opts.persistKey);
+    if (!saved) return;
+    windows.splice(0, windows.length, ...saved.windows);
+    layout.value = saved.layout;
+    // Keep the z counter above every restored window so new spawns land on top.
+    z = windows.reduce((m, w) => Math.max(m, w.z), z);
+    const top = windows
+      .filter((w) => !w.minimized)
+      .reduce<Win | null>((best, w) => (!best || w.z > best.z ? w : best), null);
+    focusedId.value = top?.id ?? null;
+  }
+
+  // Debounced so a drag/resize (many mutations/sec) coalesces into one write.
+  let saveTimer: ReturnType<typeof setTimeout> | null = null;
+  function persist() {
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = null;
+    if (opts.persistKey) saveLayout(opts.persistKey, layout.value, windows);
+  }
+  function schedulePersist() {
+    if (!opts.persistKey) return;
+    if (saveTimer) clearTimeout(saveTimer);
+    saveTimer = setTimeout(persist, 400);
+  }
+  if (opts.persistKey) {
+    watch(layout, schedulePersist);
+    watch(windows, schedulePersist, { deep: true });
+  }
 
   // Cascade offset so freshly spawned float windows don't stack exactly.
   function cascade() {
@@ -161,6 +198,7 @@ export function useWindowManager() {
   onBeforeUnmount(() => {
     document.removeEventListener("mousemove", onMove);
     document.removeEventListener("mouseup", onUp);
+    if (saveTimer) persist(); // flush a pending debounced write
   });
 
   const isDragging = () => drag !== null;
@@ -229,6 +267,7 @@ export function useWindowManager() {
     windows,
     focusedId,
     desk,
+    hydrate,
     add,
     remove,
     bringFront,

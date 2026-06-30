@@ -7,11 +7,13 @@ import TicketDetail from "./components/TicketDetail.vue";
 import QuickLaunch from "./components/QuickLaunch.vue";
 import Dock from "./components/Dock.vue";
 import { useWindowManager, type LayoutMode } from "./composables/useWindowManager.js";
-import { createSession, killSession, listSessions } from "./lib/daemon.js";
+import { DAEMON_HTTP, createSession, killSession, listSessions } from "./lib/daemon.js";
 import { getTrackerInfo, listTickets, type Ticket } from "./lib/tracker.js";
 import type { SessionInfo } from "./lib/protocol.js";
 
-const wm = useWindowManager();
+// Persist the workspace arrangement per daemon host (DRY-14) so a reload
+// restores positions/sizes/dock/z-order/layout instead of resetting them.
+const wm = useWindowManager({ persistKey: DAEMON_HTTP });
 
 const tickets = ref<Ticket[]>([]);
 const providerName = ref("Switchyard");
@@ -194,6 +196,13 @@ onMounted(async () => {
   } catch {
     /* sidebar/palette just stay empty if the tracker is unreachable */
   }
+  // Restore the saved arrangement before the first poll. reconcile() then keeps
+  // restored windows whose sessions are still alive (at their saved geometry),
+  // drops those whose session is gone, and cascade-adds any new ones. Rehydrate
+  // ticket associations so dock sub-labels / badges survive the reload too.
+  wm.hydrate();
+  for (const w of wm.windows) if (w.ticket) ticketById[w.id] = w.ticket;
+
   await refresh();
   poll = setInterval(refresh, 3000);
 
