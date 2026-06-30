@@ -19,6 +19,7 @@ export interface Ticket {
   repo: string;
   type?: string;
   tag?: string;
+  assignee?: { id?: string; name: string };
   url?: string;
 }
 

@@ -139,6 +139,7 @@ matches the tracker:
 | DRY-8  | Spike: session-durability design | **Closed** (answered; implemented in DRY-3) |
 | DRY-9  | Implement Drydock web UI shell (from design prototype) | In Progress — shell browser-verified; ticket-spawn now real (cwd + SessionStart-hook context), pending browser-verify of the panel + live hook |
 | DRY-10 | Pluggable issue-tracker provider abstraction (Switchyard + Jira) | In Progress — abstraction + fixture done; **Switchyard verified live (reads)**; Jira TODO |
+| DRY-11 | Tracker sidebar: search, filters (assignee/project/status) & collapsible groups | In Progress — built on branch `dry-11-sidebar`; pending browser-verify |
 
 Before working a ticket, read its full description in Switchyard — they carry the real
 design rationale. Comment progress and transition status as you go.

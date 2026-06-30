@@ -33,6 +33,8 @@ export interface Ticket {
   type?: string;
   /** Primary label/tag, surfaced as a chip in the sidebar. */
   tag?: string;
+  /** Assignee, when the provider exposes one. Absent = unassigned. */
+  assignee?: { id?: string; name: string };
   url?: string;
 }
 

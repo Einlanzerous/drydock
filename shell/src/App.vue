@@ -82,6 +82,15 @@ function onAttention(id: string, pending: boolean) {
   (live[id] ??= {}).attention = pending;
 }
 
+// Minimizing unmounts the pane (its WS closes), so the live attention override
+// can no longer update and would shadow the daemon poll via the `??` in
+// winStatus. Clear it so a session that hits an approval gate *while docked*
+// still lights its dock dot (driven by the 3s pendingPermissions poll).
+function minimizeWindow(id: string) {
+  wm.minimize(id);
+  if (live[id]) live[id].attention = undefined;
+}
+
 // --- spawning ---
 async function spawnFresh(kind: "claude" | "shell") {
   wm.setLayout("float");
@@ -297,7 +306,7 @@ onBeforeUnmount(() => {
           @focus="wm.bringFront(w.id)"
           @drag-start="(e) => wm.startDrag(e, w.id)"
           @resize-start="(e) => wm.startResize(e, w.id)"
-          @minimize="wm.minimize(w.id)"
+          @minimize="minimizeWindow(w.id)"
           @close="closeWindow(w.id)"
         >
           <TerminalPane
