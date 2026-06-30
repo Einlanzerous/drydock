@@ -18,6 +18,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: "status", id: string, status: SessionInfo["status"]): void;
   (e: "attention", id: string, pending: boolean): void;
+  (e: "initial-sent", id: string): void; // seed typed once; parent clears it so re-mounts don't retype
 }>();
 
 const termEl = ref<HTMLDivElement | null>(null);
@@ -56,8 +57,16 @@ function connect() {
     doFit();
     if (!sentInitial && props.initialInput) {
       sentInitial = true;
-      // Give the wrapped CLI a beat to draw its prompt before we type.
-      setTimeout(() => sendWs({ type: "input", data: props.initialInput! }), 600);
+      const text = props.initialInput;
+      // Tell the parent to drop the seed so a later re-mount (restore from dock,
+      // poll re-add) doesn't retype it. `text` is already captured locally.
+      emit("initial-sent", props.session.id);
+      // A multi-line ticket seed is sent as a bracketed paste (ESC[200~ … ESC[201~)
+      // so the CLI drops it into the prompt as one block instead of submitting
+      // each line. No trailing CR — we pre-fill, never auto-submit. Give the
+      // wrapped CLI a beat to draw its prompt (and enable paste mode) first.
+      const data = text.includes("\n") ? `\x1b[200~${text}\x1b[201~` : text;
+      setTimeout(() => sendWs({ type: "input", data }), 700);
     }
   };
   sock.onclose = () => {

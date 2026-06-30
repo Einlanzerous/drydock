@@ -26,6 +26,10 @@ export async function createSession(opts: {
   command: string;
   args?: string[];
   cwd?: string;
+  /** Ticket repo name; the daemon resolves it to a real cwd host-side. */
+  repo?: string;
+  /** Ticket key; the daemon binds it to the session for the SessionStart hook. */
+  ticket?: string;
   title?: string;
 }): Promise<SessionInfo> {
   const res = await fetch(`${DAEMON_HTTP}/api/sessions`, {
@@ -44,4 +48,11 @@ export async function killSession(id: string): Promise<void> {
 
 export function attachUrl(id: string): string {
   return `${DAEMON_WS}/api/sessions/${id}/attach`;
+}
+
+/** Preview the cwd a ticket's repo resolves to (host-side). matched=false means
+ *  no repo dir was found and it fell back to $HOME — the panel lets you override. */
+export async function resolveRepoCwd(repo: string): Promise<{ cwd: string; matched: boolean }> {
+  const res = await fetch(`${DAEMON_HTTP}/api/repos/resolve?repo=${encodeURIComponent(repo)}`);
+  return res.json();
 }

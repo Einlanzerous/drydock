@@ -19,14 +19,17 @@ survive disconnects, sleep, and multi-day gaps. The browser is just a viewer.
                                                                      ▼
                                        ┌──────────────────────────────────────┐
                                        │  daemon/  (Node + node-pty + ws)       │
-   claude PreToolUse hook ── HTTP ────▶│  • owns PTY master per session         │
+   claude PreToolUse  hook ─ HTTP ────▶│  • owns PTY master per session         │
    (curl → /hook/pretooluse)           │  • ring-buffer scrollback + replay     │
-                                       │  • holds approval gates open for a UI  │
+   claude SessionStart hook ─ HTTP ───▶│  • holds approval gates open for a UI  │
+   (curl → /hook/sessionstart)         │  • injects ticket body as context      │
+                                       │  • resolves ticket repo → spawn cwd    │
                                        │  • localhost-only; one per host        │
                                        └──────────────────────────────────────┘
-                                                        │ spawns
-                                                        ▼  (PTY, with DRYDOCK_SESSION_ID in env)
-                                              claude / gemini-cli / bash
+                                                        │ spawns  claude --settings <hooks>
+                                                        ▼  (PTY in the ticket's cwd,
+                                                           DRYDOCK_SESSION_ID in env)
+                                              claude / gemini-cli / shell
 ```
 
 The wrapped CLI owns its own auth — Drydock never touches API keys. The
@@ -95,9 +98,45 @@ approval loop.
 ## Layout
 
 - `daemon/` — PTY-owning backend. `session.ts` is the core (PTY ownership,
-  scrollback, approval gates); `server.ts` is the HTTP + WS surface.
-- `shell/` — Vue 3 viewer. `components/TerminalPane.vue` is the core pane.
-- `hooks/` — the `PreToolUse` hook config to drop into a repo's `.claude/settings.json`.
+  scrollback, approval gates); `server.ts` is the HTTP + WS surface; `repos.ts`
+  resolves a ticket's repo name to its real working directory on this host.
+- `shell/` — Vue 3 viewer. `components/TerminalPane.vue` is the core pane;
+  `components/TicketDetail.vue` is the read-then-spawn ticket panel.
+- `daemon/src/hooks.ts` — the `PreToolUse` + `SessionStart` hooks the daemon
+  injects into every spawned `claude` via `--settings` (no per-repo install).
+- `hooks/` — the same hook config as a standalone snippet (reference / manual
+  fallback only; the daemon injects it automatically).
+
+## Ticket-driven sessions
+
+Picking a ticket (sidebar or `Ctrl K`) opens its description; the panel shows
+the resolved **working directory** (editable — projects with no repo default to
+`$HOME`, which you can override). **Send to agent** spawns `claude` there and the
+ticket body rides into the agent's context via a `SessionStart` hook (`curl →
+/hook/sessionstart`) — not typed into the prompt. The prompt is pre-filled with
+your instruction and left for you to send (no auto-submit). The hooks are
+injected by the daemon (`claude --settings`), so they work regardless of cwd —
+no per-repo `.claude/settings.json` needed.
+
+Repo→directory mapping is host config on the daemon: `DRYDOCK_REPOS_ROOT`
+(default `~/projects`, so repo `argosy` → `~/projects/argosy`) with per-repo
+overrides via `DRYDOCK_REPO_PATHS="construct-server=~/construct-server,imperium-loop=~/imperium-loop"`.
+A name that resolves to no existing directory falls back to `$HOME`.
+
+## Tracker config
+
+The sidebar/palette default to a built-in fixture set. Point at a live tracker
+with host config (copy `.env.example` → `.env`, which the daemon auto-loads;
+real env vars win over the file). For Switchyard:
+
+```bash
+DRYDOCK_TRACKER=switchyard
+DRYDOCK_SWITCHYARD_URL=http://localhost:4002   # REST API base; provider adds /v1
+DRYDOCK_SWITCHYARD_TOKEN=sw_…                   # sent as a Bearer token, host-side only
+```
+
+The token never reaches the browser — the shell only ever calls the daemon's
+`/api/tracker/*`. Credentials live in `.env` (gitignored), never in the repo.
 
 ## Not in this PoC
 

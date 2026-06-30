@@ -29,6 +29,10 @@ interface SwitchyardTicket {
   labels?: { name: string }[];
 }
 
+// The list endpoint has no `open` flag; "open" = every non-closed category.
+// (Verified against the live API: `open=true` is ignored, a status list filters.)
+const OPEN_CATEGORIES = "backlog,planning,in_progress,blocked";
+
 const CATEGORY_LABEL: Record<TicketCategory, string> = {
   backlog: "Backlog",
   planning: "Planning",
@@ -108,7 +112,7 @@ export class SwitchyardProvider implements TrackerProvider {
   }
 
   async listProjects(): Promise<Project[]> {
-    const body = await this.req(`/api/projects`);
+    const body = await this.req(`/v1/projects`);
     return this.items(body).map((p: any) => ({
       key: p.key,
       name: p.name ?? p.key,
@@ -120,10 +124,10 @@ export class SwitchyardProvider implements TrackerProvider {
   async listTickets(q: TicketQuery): Promise<Ticket[]> {
     const params = new URLSearchParams();
     if (q.project) params.set("project", q.project);
-    if (q.open) params.set("open", "true");
+    if (q.open) params.set("status", OPEN_CATEGORIES);
     if (q.text) params.set("text", q.text);
     params.set("limit", String(q.limit ?? 100));
-    const body = await this.req(`/api/tickets?${params}`);
+    const body = await this.req(`/v1/tickets?${params}`);
     return this.items(body).map(toTicket);
   }
 
@@ -132,7 +136,7 @@ export class SwitchyardProvider implements TrackerProvider {
   }
 
   async getTicket(key: string): Promise<TicketDetail> {
-    const t: SwitchyardTicket = await this.req(`/api/tickets/${encodeURIComponent(key)}`);
+    const t: SwitchyardTicket = await this.req(`/v1/tickets/${encodeURIComponent(key)}`);
     return {
       ...toTicket(t),
       project: t.project?.key ?? "",
@@ -141,15 +145,18 @@ export class SwitchyardProvider implements TrackerProvider {
     };
   }
 
+  // NOTE: paths verified live; the write *bodies* below are not yet exercised
+  // against the API (no UI calls them). Confirm the field names when wiring the
+  // capability-gated comment/transition UI.
   async comment(key: string, body: string): Promise<void> {
-    await this.req(`/api/tickets/${encodeURIComponent(key)}/comments`, {
+    await this.req(`/v1/tickets/${encodeURIComponent(key)}/comments`, {
       method: "POST",
       body: JSON.stringify({ body }),
     });
   }
 
   async transition(key: string, to: string): Promise<void> {
-    await this.req(`/api/tickets/${encodeURIComponent(key)}/transition`, {
+    await this.req(`/v1/tickets/${encodeURIComponent(key)}/transition`, {
       method: "POST",
       body: JSON.stringify({ status: to }),
     });

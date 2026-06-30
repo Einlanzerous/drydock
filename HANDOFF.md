@@ -40,8 +40,9 @@ so this works with no hardcoded IP.
   `src/composables/useWindowManager.ts` (Float/Tile/Focus engines), `src/components/`
   (`WindowFrame`, `TerminalPane`, `TrackerSidebar`, `QuickLaunch`, `Dock`),
   `src/lib/daemon.ts`, `src/lib/tracker.ts`.
-- `hooks/settings.snippet.json` — the `PreToolUse` hook config to drop into a target
-  repo's `.claude/settings.json`.
+- `daemon/src/hooks.ts` — `PreToolUse` + `SessionStart` hooks the daemon injects into every
+  spawned `claude` via `--settings` (no per-repo install). `hooks/settings.snippet.json` is the
+  same config as a reference/manual fallback only.
 - `examples/demo-repo/` — a repo for exercising the approval loop.
 - Bun monorepo (`daemon` + `shell` workspaces). **Note: the daemon runs on Node, not Bun**
   — `node-pty`'s native addon needs V8's C++ API, which Bun's JSC runtime lacks (it
@@ -71,22 +72,39 @@ localhost-only) and `bun run shell`.
 - Status dots — green/amber/grey derived from *live* daemon state (WS + 3s poll).
 - Window manager — Float/Tile/Focus, drag/resize, minimize→dock→restore, Ctrl+K palette.
 - Tracker plumbing — daemon `/api/tracker/*` endpoints are real HTTP; shell fetches over them.
+- **Ticket → agent spawn** (DRY-9 + DRY-12) — picking a ticket opens a detail panel with the
+  full description and the **resolved working dir** (editable: daemon resolves repo→path via
+  `DRYDOCK_REPOS_ROOT` default `~/projects` + `DRYDOCK_REPO_PATHS` overrides; a repo-less project
+  like `IDEA` resolves to `$HOME` and is flagged so you can override before spawning). **Send to
+  agent** spawns `claude` there; the ticket body is injected as context via a **`SessionStart`
+  hook** (`/hook/sessionstart`), *not* typed into the prompt, which is pre-filled and **not**
+  auto-submitted. **Hooks are injected by the daemon via `claude --settings <generated file>`
+  (`daemon/src/hooks.ts`)** — both PreToolUse + SessionStart work in any cwd with **no per-repo
+  `.claude/settings.json`** (that's why `IDEA-2` in `$HOME` previously injected nothing). Daemon
+  path verified headless. Still to do: **browser-verify** against a real `claude` — in particular
+  confirm `--settings <file>` registers the hooks for the spawned session (fallback: inline JSON,
+  or write the file per-session).
 
 **Mocked / default-to-fake:**
 - **Tracker data defaults to `FixtureProvider`** — 8 hardcoded tickets ported from the
   design prototype, served through the real endpoints so they *look* live but are static.
-- **`SwitchyardProvider`** (live REST) exists but is **off** unless `DRYDOCK_TRACKER=switchyard`
-  + `DRYDOCK_SWITCHYARD_URL`/`_TOKEN` are set, and has **not** been exercised against a live
-  Switchyard server. Treat as "written, unverified."
+  Set `DRYDOCK_TRACKER=switchyard` (+ creds, see below) to go live.
+- **`SwitchyardProvider` — now verified live (reads).** Talks to the Switchyard REST API at
+  `DRYDOCK_SWITCHYARD_URL` (the API is under **`/v1`** and listens on `:4002`; from the host use
+  `http://localhost:4002` — the `switchyard` docker hostname doesn't resolve there) with a
+  `Bearer DRYDOCK_SWITCHYARD_TOKEN`. `listProjects`/`listTickets`/`searchTickets`/`getTicket`
+  were exercised end-to-end through the daemon against real data. Two fixes were needed vs the
+  original draft: base path `/api`→`/v1`, and there's **no `open` flag** — "open" is sent as
+  `status=backlog,planning,in_progress,blocked` (a closed-excluding category list). Creds load
+  from a gitignored **`.env`** at the repo root (`.env.example` documents it; loader is
+  `daemon/src/env.ts`, real env vars still win).
 - **Jira backend** — not implemented; silently falls back to fixture.
-- **comment / transition** — capabilities defined + implemented server-side, but no UI calls them.
+- **comment / transition** — server-side + paths verified live, but the request *bodies* are
+  unverified (no UI calls them yet). Confirm field names when wiring the capability-gated UI.
 
-**Cosmetic (looks meaningful, isn't wired):**
-- **Ticket → agent spawn** creates a real session and pre-fills the prompt with `KEY: title`,
-  but **does not auto-submit** and does **not** set a real cwd/branch. The agent doesn't
-  actually start working the ticket. Ticket/repo badges are labels only.
-
-**Not built (DRY-4 leftovers):** layout persistence (resets on reload), per-repo theming.
+**Not built (leftovers):** layout persistence (resets on reload), per-repo theming, and
+**branch/worktree-per-ticket** — a ticket-spawned agent runs in the repo's *current* branch
+with no isolation yet (the obvious next increment on top of the now-real cwd resolution).
 
 ## Locked decisions — do not relitigate
 
@@ -119,21 +137,24 @@ matches the tracker:
 | DRY-6  | Embedded Chromium webview for app previews | Backlog |
 | DRY-7  | Local git diff review UI (approve agent commits) | Backlog |
 | DRY-8  | Spike: session-durability design | **Closed** (answered; implemented in DRY-3) |
-| DRY-9  | Implement Drydock web UI shell (from design prototype) | In Progress — shell browser-verified; ticket-spawn still cosmetic (next step #1) |
-| DRY-10 | Pluggable issue-tracker provider abstraction (Switchyard + Jira) | In Progress — abstraction + fixture done; Switchyard unverified; Jira TODO |
+| DRY-9  | Implement Drydock web UI shell (from design prototype) | In Progress — shell browser-verified; ticket-spawn now real (cwd + SessionStart-hook context), pending browser-verify of the panel + live hook |
+| DRY-10 | Pluggable issue-tracker provider abstraction (Switchyard + Jira) | In Progress — abstraction + fixture done; **Switchyard verified live (reads)**; Jira TODO |
 
 Before working a ticket, read its full description in Switchyard — they carry the real
 design rationale. Comment progress and transition status as you go.
 
 ## Next steps (highest value first)
 
-1. **Wire ticket-spawn for real (finishes DRY-9/DRY-4).** Today picking a ticket only
-   pre-fills a prompt line. Make it (a) spawn in the ticket's real repo cwd, and (b) decide
-   the submit behavior (auto-submit vs leave-for-review). This is what turns the sidebar from
-   a demo into a driver.
-2. **Verify `SwitchyardProvider` against a live server (DRY-10).** Stand it up with real
-   `DRYDOCK_SWITCHYARD_URL`/`_TOKEN`, confirm `listProjects`/`listTickets`/`getTicket` map
-   correctly, then exercise `comment`/`transition` and surface them in the UI (capability-gated).
+1. **Browser-verify ticket-spawn (finishes DRY-9).** The mechanism is built and the daemon
+   path is headless-verified: detail panel → Send → spawn in the ticket's real repo cwd →
+   ticket body injected via the `SessionStart` hook (decided: leave-pre-filled, no auto-submit).
+   What's left is driving it in a browser against a real `claude` in a repo that has the
+   `SessionStart` hook installed, and confirming the injected context lands. Next increment:
+   **branch/worktree-per-ticket** (the agent currently runs in the repo's current branch).
+2. **Switchyard writes + UI (DRY-10).** Reads are verified live; what's left is the
+   capability-gated **comment / transition** UI — and confirming those two request *bodies*
+   against the API (paths are right, field names aren't yet exercised). Browser-verify the live
+   sidebar/palette/detail-panel against real tickets while you're at it.
 3. **Jira backend (DRY-10).** Jira Cloud REST v3 + JQL, corp-network friendly, credentials
    host-side. Same `TrackerProvider` interface, selected by config — no UI branching.
 4. **DRY-4 leftovers.** Layout persistence across restarts (serialize window manager state)

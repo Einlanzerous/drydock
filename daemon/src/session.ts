@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import * as pty from "node-pty";
 import type { WebSocket } from "ws";
 import { CONFIG } from "./config.js";
+import { CLAUDE_SETTINGS_PATH } from "./hooks.js";
 import type {
   PermissionDecision,
   ServerMessage,
@@ -18,18 +19,25 @@ export interface SpawnOptions {
   cols?: number;
   rows?: number;
   env?: Record<string, string>;
+  /** Tracker ticket this session is scoped to; surfaced to the SessionStart hook. */
+  ticket?: string;
 }
 
 /**
  * Translate a logical command into the executable to actually spawn. "shell"
  * resolves to the host owner's own login shell ($SHELL) so their zsh/oh-my-zsh
- * config loads, rather than a hardcoded bash. Everything else spawns verbatim.
- * The logical command is kept on the session (SessionInfo.command) so the shell
- * still classifies panes by "claude" vs other — only the spawn target changes.
+ * config loads, rather than a hardcoded bash. "claude" gets `--settings` pointing
+ * at the daemon's generated hooks file, so the approval + ticket-context hooks
+ * work in any cwd with no per-repo install. The logical command is kept on the
+ * session (SessionInfo.command) so the shell still classifies panes by "claude"
+ * vs other — only the spawn target changes.
  */
 function resolveSpawn(command: string, args: string[]): { file: string; args: string[] } {
   if (command === "shell") {
     return { file: CONFIG.defaultShell, args: ["-l", ...args] };
+  }
+  if (command === "claude") {
+    return { file: "claude", args: ["--settings", CLAUDE_SETTINGS_PATH, ...args] };
   }
   return { file: command, args };
 }
@@ -54,6 +62,7 @@ export class PtySession {
   readonly command: string;
   readonly args: string[];
   readonly cwd: string;
+  readonly ticket?: string;
   title: string;
 
   private readonly pty: pty.IPty;
@@ -73,6 +82,7 @@ export class PtySession {
     this.command = opts.command;
     this.args = opts.args ?? [];
     this.cwd = opts.cwd ?? os.homedir();
+    this.ticket = opts.ticket;
     this.title = opts.title ?? opts.command;
     this.cols = opts.cols ?? 80;
     this.rows = opts.rows ?? 24;
@@ -196,6 +206,7 @@ export class PtySession {
       command: this.command,
       args: this.args,
       cwd: this.cwd,
+      ticket: this.ticket,
       status: this.status,
       exitCode: this.exitCode,
       cols: this.cols,

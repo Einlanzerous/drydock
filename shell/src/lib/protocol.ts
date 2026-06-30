@@ -27,6 +27,8 @@ export interface SessionInfo {
   command: string;
   args: string[];
   cwd: string;
+  /** Tracker ticket key this session was spawned for, if any. */
+  ticket?: string;
   status: SessionStatus;
   exitCode: number | null;
   cols: number;

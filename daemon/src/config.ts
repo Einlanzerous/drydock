@@ -1,3 +1,21 @@
+/**
+ * Parse DRYDOCK_REPO_PATHS ("name=path,other=~/other") into a name→path map.
+ * Lets a host map repos that don't live under the common root to explicit
+ * locations. Malformed entries (no `=`) are skipped rather than throwing.
+ */
+function parseRepoPaths(spec: string | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!spec) return out;
+  for (const pair of spec.split(",")) {
+    const i = pair.indexOf("=");
+    if (i === -1) continue;
+    const name = pair.slice(0, i).trim();
+    const p = pair.slice(i + 1).trim();
+    if (name && p) out[name] = p;
+  }
+  return out;
+}
+
 export const CONFIG = {
   /**
    * Bind address. Defaults to 0.0.0.0 so the daemon is reachable over the
@@ -18,6 +36,19 @@ export const CONFIG = {
    * prompt, aliases — instead of a hardcoded bash. Override with DRYDOCK_SHELL.
    */
   defaultShell: process.env.DRYDOCK_SHELL ?? process.env.SHELL ?? "bash",
+
+  /**
+   * Where a ticket's repo maps on disk (DRY-9 ticket-spawn). A tracker repo
+   * name `argosy` becomes `${root}/argosy` as the spawn cwd. Most repos live
+   * under one root (default ~/projects); repos that live elsewhere get an
+   * explicit override via DRYDOCK_REPO_PATHS="name=path,other=~/other" — this
+   * is host/profile-specific, since the layout differs per machine. A name that
+   * resolves to no existing directory falls back to $HOME (see repos.ts).
+   */
+  repos: {
+    root: process.env.DRYDOCK_REPOS_ROOT ?? "~/projects",
+    overrides: parseRepoPaths(process.env.DRYDOCK_REPO_PATHS),
+  },
 
   /**
    * How long the daemon holds a PreToolUse hook request open waiting for a

@@ -4,3 +4,6 @@ dist/
 .drydock/
 .DS_Store
 *.tsbuildinfo
+.env
+.env.*
+!.env.example
