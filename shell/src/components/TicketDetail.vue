@@ -22,6 +22,9 @@ import { resolveRepoCwd } from "../lib/daemon.js";
 const props = defineProps<{ ticket: Ticket; z: number }>();
 const emit = defineEmits<{
   (e: "send", payload: { ticket: Ticket; prompt: string; cwd: string }): void;
+  // Open the ticket as a composite workspace window (DRY-21): agent + drawer +
+  // co-located zsh, instead of a plain agent-only terminal.
+  (e: "workspace", payload: { ticket: Ticket; prompt: string; cwd: string }): void;
   (e: "focus"): void;
   (e: "close"): void;
 }>();
@@ -107,6 +110,11 @@ function send(): void {
   if (!prompt.value.trim() || !cwd.value.trim()) return;
   emit("send", { ticket: props.ticket, prompt: prompt.value, cwd: cwd.value.trim() });
 }
+
+function openWorkspace(): void {
+  if (!prompt.value.trim() || !cwd.value.trim()) return;
+  emit("workspace", { ticket: props.ticket, prompt: prompt.value, cwd: cwd.value.trim() });
+}
 </script>
 
 <template>
@@ -158,6 +166,14 @@ function send(): void {
       <span class="hint">The ticket body is attached as context via the SessionStart hook.</span>
       <span class="grow"></span>
       <button class="cancel" @click="emit('close')">Cancel</button>
+      <button
+        class="workspace"
+        title="Open a workspace: agent + this ticket in a drawer + a co-located zsh shell"
+        :disabled="!prompt.trim() || !cwd.trim()"
+        @click="openWorkspace"
+      >
+        Open workspace
+      </button>
       <button class="send" :disabled="!prompt.trim() || !cwd.trim()" @click="send">Send to agent</button>
     </div>
   </div>
@@ -334,6 +350,7 @@ function send(): void {
   color: #5a636f;
 }
 .cancel,
+.workspace,
 .send {
   padding: 7px 14px;
   border-radius: 7px;
@@ -345,6 +362,15 @@ function send(): void {
 .cancel {
   background: #1b2531;
   color: #aeb8c4;
+}
+.workspace {
+  background: #16314a;
+  border: 1px solid #2a557d;
+  color: #cfe3f5;
+}
+.workspace:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 .send {
   background: #2a6db0;

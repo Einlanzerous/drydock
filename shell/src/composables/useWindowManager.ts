@@ -10,9 +10,13 @@ import { loadLayout, saveLayout } from "./layoutStore.js";
 
 export type LayoutMode = "float" | "tile" | "focus";
 export type WinType = "agent" | "bash";
+// A plain single-terminal window, or a composite "workspace" (DRY-21): ticket
+// drawer + agent PTY + a co-located zsh PTY, all bound to one managed window.
+export type WinKind = "terminal" | "workspace";
 
 export interface Win {
-  id: string; // daemon session id
+  id: string; // daemon session id (for a workspace, the *agent* PTY)
+  kind: WinKind; // "terminal" (default) | "workspace"
   type: WinType;
   title: string; // "claude-code" | "bash"
   ticket?: string; // e.g. "ARGY-89" — badge in the title bar
@@ -24,6 +28,15 @@ export interface Win {
   h: number;
   z: number;
   minimized: boolean;
+  // --- workspace (DRY-21) only ---
+  /** The co-located zsh PTY's session id (the bottom shell pane). */
+  shellId?: string;
+  /** Ticket drawer pulled down (persisted so it survives a reload). */
+  drawerOpen?: boolean;
+  /** Bottom shell pane collapsed to reclaim height for the agent. */
+  shellCollapsed?: boolean;
+  /** Shell pane height as a fraction of the split (0..1); agent gets the rest. */
+  shellRatio?: number;
 }
 
 export interface Rect {
@@ -89,7 +102,9 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
     return { x: 90 + ((n * 30) % 240), y: 54 + ((n * 26) % 150) };
   }
 
-  function add(win: Omit<Win, "x" | "y" | "w" | "h" | "z" | "minimized"> & Partial<Win>): Win {
+  function add(
+    win: Omit<Win, "x" | "y" | "w" | "h" | "z" | "minimized" | "kind"> & Partial<Win>,
+  ): Win {
     const pos = cascade();
     const w: Win = {
       x: win.x ?? pos.x,
@@ -98,11 +113,19 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
       h: win.h ?? 462,
       z: ++z,
       minimized: win.minimized ?? false,
+      kind: win.kind ?? "terminal",
       ...win,
     } as Win;
     windows.push(w);
     focusedId.value = w.id;
     return w;
+  }
+
+  /** Patch a window's fields (used by the workspace pane to persist its own
+   *  drawer-open / shell-collapsed / split-ratio state via the deep watcher). */
+  function updateWin(id: string, patch: Partial<Win>): void {
+    const w = windows.find((x) => x.id === id);
+    if (w) Object.assign(w, patch);
   }
 
   function remove(id: string) {
@@ -277,6 +300,7 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
     desk,
     hydrate,
     add,
+    updateWin,
     remove,
     bringFront,
     allocZ,
