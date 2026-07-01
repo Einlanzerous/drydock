@@ -29,6 +29,21 @@ const SETTINGS = {
         ],
       },
     ],
+    // When the agent ends its turn, tell the daemon so the pane shows "Your turn"
+    // (DRY-18). Fire-and-forget: never block the agent from stopping. No matcher
+    // — Stop has no tool to match on.
+    Stop: [
+      {
+        hooks: [
+          {
+            type: "command",
+            timeout: 10,
+            command:
+              'curl -s -m 8 -X POST "$DRYDOCK_DAEMON_URL/hook/stop" -H "X-Drydock-Session: $DRYDOCK_SESSION_ID" >/dev/null 2>&1 || true',
+          },
+        ],
+      },
+    ],
     // On startup, pull this session's ticket body (if any) as additionalContext.
     SessionStart: [
       {

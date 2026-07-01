@@ -173,6 +173,20 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    // --- Stop hook endpoint (DRY-18 "your turn" indicator) ---
+    // The wrapped CLI's Stop hook fires when the agent ends its turn and hands
+    // control back. We flag the session idle so the pane lights a "Your turn"
+    // tag. NB: a turn ending means "done OR waiting for your reply" — we can't
+    // tell which, so we never assert "complete". Returning {} lets the agent
+    // stop normally (no block).
+    if (pathname === "/hook/stop" && req.method === "POST") {
+      const sessionId = (req.headers["x-drydock-session"] as string | undefined) ?? "";
+      const session = manager.get(sessionId);
+      await readJson(req).catch(() => ({})); // drain/ignore the hook payload
+      if (session) session.markIdle();
+      return send(res, 200, {});
+    }
+
     // --- SessionStart hook endpoint (DRY-9 ticket-spawn) ---
     // When a session was spawned for a ticket, the wrapped CLI's SessionStart
     // hook hits this and we return Claude Code's `additionalContext` schema

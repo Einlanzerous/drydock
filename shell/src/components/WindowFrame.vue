@@ -14,6 +14,8 @@ const props = defineProps<{
   statusColor: string;
   statusGlow: string;
   attention: boolean;
+  /** Centered glowing badge in the bar, e.g. "Your turn" when the agent yields. */
+  statusTag?: string;
   dragging: boolean;
 }>();
 const emit = defineEmits<{
@@ -64,6 +66,8 @@ const grab = computed(() => (props.layout === "float" ? "grab" : "default"));
       <span class="title">{{ win.title }}</span>
       <span v-if="win.ticket" class="ticket">{{ win.ticket }}</span>
       <span class="repo">~/{{ win.repo }}</span>
+      <div class="grow"></div>
+      <span v-if="statusTag" class="statustag">{{ statusTag }}</span>
       <div class="grow"></div>
       <button
         class="ctl"
@@ -152,6 +156,19 @@ const grab = computed(() => (props.layout === "float" ? "grab" : "default"));
   font-family: "JetBrains Mono", monospace;
   font-size: 11px;
   color: #56606c;
+}
+.statustag {
+  flex: 0 0 auto;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: #f0d39a;
+  background: #2a2114;
+  border-radius: 6px;
+  padding: 2px 9px;
+  white-space: nowrap;
+  animation: ddglow 1.8s ease-in-out infinite;
 }
 .grow {
   flex: 1;

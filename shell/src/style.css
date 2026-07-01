@@ -74,6 +74,17 @@ body {
     opacity: 1;
   }
 }
+/* Breathing glow for the "Your turn" badge — pulses the halo, not the text, so
+   the label stays readable while the pane calls for attention. */
+@keyframes ddglow {
+  0%,
+  100% {
+    box-shadow: 0 0 4px #d6a65133, inset 0 0 0 1px #d6a65140;
+  }
+  50% {
+    box-shadow: 0 0 12px #d6a65199, inset 0 0 0 1px #d6a65180;
+  }
+}
 @keyframes dockpop {
   from {
     transform: translateY(10px) scale(0.96);

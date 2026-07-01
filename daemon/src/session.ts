@@ -70,6 +70,13 @@ export class PtySession {
   private rows: number;
   private status: SessionStatus = "running";
   private exitCode: number | null = null;
+  /**
+   * The agent finished a turn (Stop hook) and is now waiting on the user. Unlike
+   * `status`, the process is still alive — this is "your turn", not "exited". We
+   * can't tell "task complete" from "paused to ask a question" (both just end the
+   * turn), so the UI labels it honestly as idle rather than asserting completion.
+   */
+  private idle = false;
 
   /** Capped scrollback so a next-day reattach gets full history, not a flood. */
   private scrollback: Buffer[] = [];
@@ -123,6 +130,7 @@ export class PtySession {
   private onExit(exitCode: number): void {
     this.status = "exited";
     this.exitCode = exitCode;
+    this.idle = false; // process is gone; "exited" supersedes "your turn"
     this.broadcast({ type: "status", status: "exited", exitCode });
     // Resolve any dangling permission gates so the CLI isn't left hanging.
     for (const [requestId, p] of this.pending) {
@@ -141,6 +149,7 @@ export class PtySession {
       status: this.status,
       exitCode: this.exitCode ?? undefined,
     });
+    if (this.idle) this.send(ws, { type: "idle", idle: true });
     for (const [requestId, p] of this.pending) {
       this.send(ws, { type: "permission-request", requestId, tool: p.tool, input: p.input });
     }
@@ -150,8 +159,29 @@ export class PtySession {
     this.clients.delete(ws);
   }
 
+  /**
+   * Called from the Stop hook: the agent ended its turn and is waiting on the
+   * user. No-op once exited or already idle so we don't churn broadcasts.
+   */
+  markIdle(): void {
+    if (this.status !== "running" || this.idle) return;
+    this.idle = true;
+    this.broadcast({ type: "idle", idle: true });
+  }
+
+  /** The agent is active again (user sent input). Clears the "your turn" flag. */
+  private clearIdle(): void {
+    if (!this.idle) return;
+    this.idle = false;
+    this.broadcast({ type: "idle", idle: false });
+  }
+
   write(data: string): void {
-    if (this.status === "running") this.pty.write(data);
+    if (this.status !== "running") return;
+    // Any user input means they've responded — drop the "your turn" flag so the
+    // pane stops glowing the moment they start interacting again.
+    this.clearIdle();
+    this.pty.write(data);
   }
 
   resize(cols: number, rows: number): void {
@@ -176,6 +206,9 @@ export class PtySession {
    * the CLI's normal flow).
    */
   requestPermission(tool: string, input: unknown): Promise<PermissionDecision | "timeout"> {
+    // A tool gate means the agent is mid-turn, not idle — the permission overlay
+    // is its own attention signal, so drop any stale "your turn" flag.
+    this.clearIdle();
     const requestId = randomUUID();
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
@@ -209,6 +242,7 @@ export class PtySession {
       ticket: this.ticket,
       status: this.status,
       exitCode: this.exitCode,
+      idle: this.idle,
       cols: this.cols,
       rows: this.rows,
       createdAt: this.createdAt,

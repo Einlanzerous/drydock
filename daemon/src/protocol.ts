@@ -14,6 +14,7 @@ export type ServerMessage =
   | { type: "replay"; data: string } // one-shot scrollback dump on attach
   | { type: "data"; data: string } // live PTY output
   | { type: "status"; status: SessionStatus; exitCode?: number }
+  | { type: "idle"; idle: boolean } // agent yielded its turn (Stop hook) / resumed
   | { type: "permission-request"; requestId: string; tool: string; input: unknown }
   | {
       type: "permission-resolved";
@@ -34,6 +35,8 @@ export interface SessionInfo {
   ticket?: string;
   status: SessionStatus;
   exitCode: number | null;
+  /** Agent has yielded its turn and is waiting on the user (Stop hook). */
+  idle: boolean;
   cols: number;
   rows: number;
   createdAt: number;

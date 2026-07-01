@@ -18,6 +18,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: "status", id: string, status: SessionInfo["status"]): void;
   (e: "attention", id: string, pending: boolean): void;
+  (e: "idle", id: string, idle: boolean): void; // agent yielded its turn ("your turn")
   (e: "initial-sent", id: string): void; // seed typed once; parent clears it so re-mounts don't retype
 }>();
 
@@ -81,6 +82,9 @@ function connect() {
         break;
       case "status":
         emit("status", props.session.id, msg.status);
+        break;
+      case "idle":
+        emit("idle", props.session.id, msg.idle);
         break;
       case "permission-request":
         pending.value = { requestId: msg.requestId, tool: msg.tool, input: msg.input };
