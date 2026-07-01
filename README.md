@@ -1,4 +1,6 @@
-# ⚓ Drydock
+# <img src="docs/logo.svg" alt="" height="26" align="top"> Drydock
+
+<img src="docs/screenshot.png" alt="Drydock — durable agent PTYs in a multi-pane web shell" width="900">
 
 A per-host **daemon that owns AI-CLI PTYs** (`claude`, `gemini-cli`, plain shells)
 plus a **Vue 3 + xterm.js web shell** that attaches to them. The daemon — not any
@@ -92,8 +94,12 @@ Bun. If `node-pty` ever ships a clean N-API build (no V8 C++ API), the daemon ca
 move onto Bun too.
 
 Open <http://127.0.0.1:5320>, set a working dir, and spawn a `claude` or `bash`
-session. See [`examples/demo-repo`](examples/demo-repo/README.md) to exercise the
-approval loop.
+session. To exercise the approval loop, ask the agent to run a shell command
+(e.g. *"run `ls -la` for me"*): the `Bash` tool trips the `PreToolUse` hook, the
+daemon holds the call open, the pane's border turns red, and you Approve / Deny
+in the UI — the decision pre-empting Claude's own prompt. The hooks are injected
+into every spawned session (`claude --settings`), so any working dir works with
+no per-repo setup.
 
 ## Layout
 

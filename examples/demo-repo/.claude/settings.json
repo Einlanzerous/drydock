@@ -1,3 +1,0 @@
-{
-  "_comment": "Intentionally minimal. Drydock injects its PreToolUse (approval) + SessionStart (ticket context) hooks into every claude session it spawns via `claude --settings` (see daemon/src/hooks.ts), so no per-repo hook install is needed anymore. hooks/settings.snippet.json is kept only as a reference / manual fallback."
-}
