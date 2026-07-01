@@ -121,6 +121,14 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
     focusedId.value = id;
   }
 
+  // Hand out the next z for a non-session overlay that still needs to stack
+  // against the managed windows (e.g. the floating ticket detail, DRY-20). The
+  // floor keeps it above the fixed z's the Tile/Focus layouts hardcode (50).
+  function allocZ() {
+    z = Math.max(z, 50);
+    return ++z;
+  }
+
   function minimize(id: string) {
     const w = windows.find((x) => x.id === id);
     if (w) w.minimized = true;
@@ -271,6 +279,7 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
     add,
     remove,
     bringFront,
+    allocZ,
     minimize,
     restore,
     setLayout,

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import {
   CATEGORY_COLOR,
   getTicket,
@@ -16,11 +16,46 @@ import { resolveRepoCwd } from "../lib/daemon.js";
 // so the editable prompt here is just your instruction. The working dir is
 // pre-resolved from the ticket's repo and editable — projects with no repo
 // (e.g. an ideas board) resolve to $HOME, which you can override here.
-const props = defineProps<{ ticket: Ticket }>();
+// DRY-20: this is a floating, draggable window rather than a modal — it stacks
+// against the terminals via `z` (owned by the parent's window manager) and no
+// longer dismisses on outside click, so you can work other windows with it open.
+const props = defineProps<{ ticket: Ticket; z: number }>();
 const emit = defineEmits<{
   (e: "send", payload: { ticket: Ticket; prompt: string; cwd: string }): void;
+  (e: "focus"): void;
   (e: "close"): void;
 }>();
+
+// Float position. `null` means "not dragged yet" → CSS centers it near the top;
+// the first drag pins it to explicit pixels. Reset whenever the ticket changes.
+const panelEl = ref<HTMLElement | null>(null);
+const pos = ref<{ x: number; y: number } | null>(null);
+let drag: { sx: number; sy: number; ox: number; oy: number } | null = null;
+
+function onHeaderDown(e: MouseEvent): void {
+  emit("focus");
+  const el = panelEl.value;
+  if (!el) return;
+  const r = el.getBoundingClientRect();
+  pos.value = { x: r.left, y: r.top };
+  drag = { sx: e.clientX, sy: e.clientY, ox: r.left, oy: r.top };
+  window.addEventListener("mousemove", onDragMove);
+  window.addEventListener("mouseup", onDragUp);
+  e.preventDefault();
+}
+function onDragMove(e: MouseEvent): void {
+  if (!drag) return;
+  pos.value = {
+    x: Math.max(0, drag.ox + (e.clientX - drag.sx)),
+    y: Math.max(0, drag.oy + (e.clientY - drag.sy)),
+  };
+}
+function onDragUp(): void {
+  drag = null;
+  window.removeEventListener("mousemove", onDragMove);
+  window.removeEventListener("mouseup", onDragUp);
+}
+onBeforeUnmount(onDragUp);
 
 const detail = ref<TicketDetail | null>(null);
 const loading = ref(true);
@@ -42,6 +77,7 @@ watch(
     prompt.value = defaultPrompt(t);
     cwd.value = "";
     cwdMatched.value = true;
+    pos.value = null; // re-center each freshly opened ticket
     // Resolve the spawn cwd in parallel with the description fetch.
     resolveRepoCwd(t.repo)
       .then((r) => {
@@ -60,6 +96,13 @@ watch(
   { immediate: true },
 );
 
+const winStyle = computed(() => {
+  const base = { zIndex: String(props.z) };
+  return pos.value
+    ? { ...base, left: `${pos.value.x}px`, top: `${pos.value.y}px`, transform: "none" }
+    : base; // fall back to the CSS-centered default position
+});
+
 function send(): void {
   if (!prompt.value.trim() || !cwd.value.trim()) return;
   emit("send", { ticket: props.ticket, prompt: prompt.value, cwd: cwd.value.trim() });
@@ -67,73 +110,68 @@ function send(): void {
 </script>
 
 <template>
-  <div class="overlay" @click.self="emit('close')" @keydown.esc="emit('close')">
-    <div class="panel">
-      <header class="phead">
-        <span
-          class="status"
-          :style="{
-            background: CATEGORY_COLOR[ticket.status.category].c,
-            boxShadow: `0 0 6px ${CATEGORY_COLOR[ticket.status.category].g}`,
-          }"
-        ></span>
-        <span class="key">{{ ticket.key }}</span>
-        <span class="slabel">{{ ticket.status.label }}</span>
-        <span class="repo">{{ ticket.repo }}</span>
-        <span class="grow"></span>
-        <button class="x" title="Close" @click="emit('close')">✕</button>
-      </header>
+  <div ref="panelEl" class="panel" :style="winStyle" @mousedown="emit('focus')">
+    <header class="phead" @mousedown="onHeaderDown">
+      <span
+        class="status"
+        :style="{
+          background: CATEGORY_COLOR[ticket.status.category].c,
+          boxShadow: `0 0 6px ${CATEGORY_COLOR[ticket.status.category].g}`,
+        }"
+      ></span>
+      <span class="key">{{ ticket.key }}</span>
+      <span class="slabel">{{ ticket.status.label }}</span>
+      <span class="repo">{{ ticket.repo }}</span>
+      <span class="grow"></span>
+      <button class="x" title="Close" @mousedown.stop @click="emit('close')">✕</button>
+    </header>
 
-      <h2 class="title">{{ ticket.title }}</h2>
-      <div class="tagrow" v-if="ticket.tag">
-        <span class="tag-dot" :style="{ background: tagColor(ticket.tag) }"></span>
-        <span class="tag">{{ ticket.tag }}</span>
-      </div>
+    <h2 class="title">{{ ticket.title }}</h2>
+    <div class="tagrow" v-if="ticket.tag">
+      <span class="tag-dot" :style="{ background: tagColor(ticket.tag) }"></span>
+      <span class="tag">{{ ticket.tag }}</span>
+    </div>
 
-      <div class="desc ddscroll">
-        <p v-if="loading" class="muted">Loading ticket…</p>
-        <p v-else-if="loadError" class="muted err">Couldn't load description: {{ loadError }}</p>
-        <pre v-else>{{ detail?.description }}</pre>
-      </div>
+    <div class="desc ddscroll">
+      <p v-if="loading" class="muted">Loading ticket…</p>
+      <p v-else-if="loadError" class="muted err">Couldn't load description: {{ loadError }}</p>
+      <pre v-else>{{ detail?.description }}</pre>
+    </div>
 
-      <label class="plabel">Working directory</label>
-      <input v-model="cwd" class="cwd" :class="{ warn: !cwdMatched }" spellcheck="false" />
-      <p v-if="!cwdMatched" class="cwd-note">
-        No repo set for <strong>{{ ticket.repo }}</strong> — defaulting to your home dir. Set where the agent should run.
-      </p>
+    <label class="plabel">Working directory</label>
+    <input v-model="cwd" class="cwd" :class="{ warn: !cwdMatched }" spellcheck="false" />
+    <p v-if="!cwdMatched" class="cwd-note">
+      No repo set for <strong>{{ ticket.repo }}</strong> — defaulting to your home dir. Set where the agent should run.
+    </p>
 
-      <label class="plabel">Your prompt to the agent</label>
-      <textarea
-        v-model="prompt"
-        class="prompt"
-        rows="2"
-        spellcheck="false"
-        @keydown.meta.enter="send"
-        @keydown.ctrl.enter="send"
-      ></textarea>
+    <label class="plabel">Your prompt to the agent</label>
+    <textarea
+      v-model="prompt"
+      class="prompt"
+      rows="2"
+      spellcheck="false"
+      @keydown.meta.enter="send"
+      @keydown.ctrl.enter="send"
+    ></textarea>
 
-      <div class="actions">
-        <span class="hint">The ticket body is attached as context via the SessionStart hook.</span>
-        <span class="grow"></span>
-        <button class="cancel" @click="emit('close')">Cancel</button>
-        <button class="send" :disabled="!prompt.trim() || !cwd.trim()" @click="send">Send to agent</button>
-      </div>
+    <div class="actions">
+      <span class="hint">The ticket body is attached as context via the SessionStart hook.</span>
+      <span class="grow"></span>
+      <button class="cancel" @click="emit('close')">Cancel</button>
+      <button class="send" :disabled="!prompt.trim() || !cwd.trim()" @click="send">Send to agent</button>
     </div>
   </div>
 </template>
 
 <style scoped>
-.overlay {
-  position: absolute;
-  inset: 0;
-  background: #05070ab0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  z-index: 80;
-  backdrop-filter: blur(2px);
-}
+/* Floating window (DRY-20): positioned absolutely within the app, stacked via
+   the inline z-index. The default (undragged) position centers it near the top;
+   a drag switches to explicit left/top. No backdrop — it's non-modal. */
 .panel {
+  position: absolute;
+  left: 50%;
+  top: 56px;
+  transform: translateX(-50%);
   width: min(620px, 92vw);
   max-height: 82vh;
   display: flex;
@@ -148,6 +186,8 @@ function send(): void {
   display: flex;
   align-items: center;
   gap: 9px;
+  cursor: grab;
+  user-select: none;
 }
 .status {
   width: 8px;
