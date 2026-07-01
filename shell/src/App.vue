@@ -20,6 +20,10 @@ const providerName = ref("Switchyard");
 const sidebarOpen = ref(true);
 const quickOpen = ref(false);
 const selectedTicket = ref<Ticket | null>(null);
+// Stacking order for the floating ticket detail (DRY-20). It's not a daemon
+// session so it lives outside wm.windows, but it draws its z from the same
+// counter so it layers against (and can be raised above) the terminals.
+const ticketZ = ref(0);
 const error = ref<string | null>(null);
 
 // Live per-session state. Daemon poll discovers sessions + gives a status/pending
@@ -142,6 +146,7 @@ async function spawnFresh(kind: "claude" | "shell") {
 function openTicket(t: Ticket) {
   quickOpen.value = false;
   selectedTicket.value = t;
+  ticketZ.value = wm.allocZ(); // land it on top of the current windows
 }
 
 // Spawn an agent for the reviewed ticket: real repo cwd (daemon resolves the
@@ -217,6 +222,10 @@ function onKey(e: KeyboardEvent) {
   if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
     e.preventDefault();
     quickOpen.value = !quickOpen.value;
+  }
+  // Esc closes the ticket detail (it no longer dismisses on outside click).
+  if (e.key === "Escape" && selectedTicket.value) {
+    selectedTicket.value = null;
   }
 }
 
@@ -386,6 +395,8 @@ onBeforeUnmount(() => {
     <TicketDetail
       v-if="selectedTicket"
       :ticket="selectedTicket"
+      :z="ticketZ"
+      @focus="ticketZ = wm.allocZ()"
       @send="onSendTicket"
       @close="selectedTicket = null"
     />
