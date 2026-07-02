@@ -7,7 +7,7 @@ import {
   type Ticket,
   type TicketDetail,
 } from "../lib/tracker.js";
-import { resolveRepoCwd } from "../lib/daemon.js";
+import { removeWorktree, resolveRepoCwd } from "../lib/daemon.js";
 
 // Ticket detail panel (DRY-9 ticket-spawn). Opened when a ticket is picked from
 // the sidebar or Ctrl+K palette: shows the full description for *you* to read,
@@ -20,11 +20,22 @@ import { resolveRepoCwd } from "../lib/daemon.js";
 // against the terminals via `z` (owned by the parent's window manager) and no
 // longer dismisses on outside click, so you can work other windows with it open.
 const props = defineProps<{ ticket: Ticket; z: number }>();
+// DRY-15: a ticket spawn can isolate into a git worktree. `worktree` is the path
+// to use, or `false` to run directly in `cwd`; `branch` overrides the branch name.
+type SpawnPayload = {
+  ticket: Ticket;
+  prompt: string;
+  cwd: string;
+  worktree: string | false;
+  branch?: string;
+  // DRY-22: start the agent in auto (hands-off) permission mode.
+  auto: boolean;
+};
 const emit = defineEmits<{
-  (e: "send", payload: { ticket: Ticket; prompt: string; cwd: string; auto: boolean }): void;
+  (e: "send", payload: SpawnPayload): void;
   // Open the ticket as a composite workspace window (DRY-21): agent + drawer +
   // co-located zsh, instead of a plain agent-only terminal.
-  (e: "workspace", payload: { ticket: Ticket; prompt: string; cwd: string; auto: boolean }): void;
+  (e: "workspace", payload: SpawnPayload): void;
   (e: "focus"): void;
   (e: "close"): void;
 }>();
@@ -72,8 +83,35 @@ const cwdMatched = ref(true);
 // for a ticket you want to babysit.
 const auto = ref(true);
 
+// DRY-15 worktree isolation. `isGit` gates the whole feature (repo-less tickets
+// can't isolate); `isolate` is the user's on/off toggle (default on for a git
+// repo); `branch`/`worktreePath` are the editable targets; `worktreeExists`
+// flags that a prior spawn's worktree will be reused (with a Reset affordance).
+const isGit = ref(false);
+const isolate = ref(true);
+const branch = ref("");
+const worktreePath = ref("");
+const worktreeExists = ref(false);
+const resetting = ref(false);
+
 function defaultPrompt(t: Ticket): string {
   return `Work ticket ${t.key}. Its full description is attached as context — implement it.`;
+}
+
+// Preview the spawn target (cwd + planned worktree/branch) for the current
+// ticket. Also re-run after a Reset to refresh the reuse flag.
+async function previewTarget(t: Ticket): Promise<void> {
+  try {
+    const r = await resolveRepoCwd(t.repo, t.key);
+    cwd.value = r.cwd;
+    cwdMatched.value = r.matched;
+    isGit.value = !!r.git;
+    branch.value = r.branch ?? `agent/${t.key}`;
+    worktreePath.value = r.worktree ?? "";
+    worktreeExists.value = !!r.worktreeExists;
+  } catch {
+    /* leave last-good preview */
+  }
 }
 
 watch(
@@ -85,15 +123,15 @@ watch(
     prompt.value = defaultPrompt(t);
     cwd.value = "";
     cwdMatched.value = true;
+    isGit.value = false;
+    isolate.value = true;
+    branch.value = "";
+    worktreePath.value = "";
+    worktreeExists.value = false;
     auto.value = true;
     pos.value = null; // re-center each freshly opened ticket
-    // Resolve the spawn cwd in parallel with the description fetch.
-    resolveRepoCwd(t.repo)
-      .then((r) => {
-        cwd.value = r.cwd;
-        cwdMatched.value = r.matched;
-      })
-      .catch(() => {});
+    // Resolve the spawn cwd + worktree in parallel with the description fetch.
+    void previewTarget(t);
     try {
       detail.value = await getTicket(t.key);
     } catch (e) {
@@ -112,14 +150,45 @@ const winStyle = computed(() => {
     : base; // fall back to the CSS-centered default position
 });
 
+// Build the shared spawn payload. Isolation is only offered for git repos and
+// when the toggle is on; otherwise `worktree: false` runs the agent in `cwd`.
+function payload(): SpawnPayload {
+  const on = isGit.value && isolate.value;
+  return {
+    ticket: props.ticket,
+    prompt: prompt.value,
+    cwd: cwd.value.trim(),
+    // A path string overrides where the worktree lives; `false` opts out entirely.
+    worktree: on ? worktreePath.value.trim() : false,
+    branch: on ? branch.value.trim() || undefined : undefined,
+    auto: auto.value,
+  };
+}
+
 function send(): void {
   if (!prompt.value.trim() || !cwd.value.trim()) return;
-  emit("send", { ticket: props.ticket, prompt: prompt.value, cwd: cwd.value.trim(), auto: auto.value });
+  emit("send", payload());
 }
 
 function openWorkspace(): void {
   if (!prompt.value.trim() || !cwd.value.trim()) return;
-  emit("workspace", { ticket: props.ticket, prompt: prompt.value, cwd: cwd.value.trim(), auto: auto.value });
+  emit("workspace", payload());
+}
+
+// Prune the existing worktree (DRY-15 "reset"): removes it + starts the branch
+// fresh on the next spawn. The agent's branch is kept; only the checkout is
+// dropped. Re-previews so the reuse badge clears.
+async function resetWorktree(): Promise<void> {
+  if (resetting.value || !worktreePath.value) return;
+  resetting.value = true;
+  try {
+    await removeWorktree({ repo: props.ticket.repo, worktree: worktreePath.value });
+    await previewTarget(props.ticket);
+  } catch {
+    /* surfaced via the panel staying on the reuse state */
+  } finally {
+    resetting.value = false;
+  }
 }
 </script>
 
@@ -157,6 +226,40 @@ function openWorkspace(): void {
     <p v-if="!cwdMatched" class="cwd-note">
       No repo set for <strong>{{ ticket.repo }}</strong> — defaulting to your home dir. Set where the agent should run.
     </p>
+
+    <!-- DRY-15: git worktree isolation. Off/absent for repo-less tickets. -->
+    <div class="wt">
+      <label v-if="isGit" class="wt-toggle">
+        <input type="checkbox" v-model="isolate" />
+        <span class="wt-label">Isolate in a git worktree</span>
+        <span class="wt-sub">each ticket gets its own branch — agents don't clobber each other</span>
+      </label>
+      <p v-else class="wt-none">
+        <strong>{{ ticket.repo }}</strong> isn't a git repo — the agent runs directly in the working directory.
+      </p>
+
+      <template v-if="isGit && isolate">
+        <div class="wt-fields">
+          <div class="wt-field">
+            <label class="plabel">Branch</label>
+            <input v-model="branch" class="cwd mono" spellcheck="false" />
+          </div>
+          <div class="wt-field">
+            <label class="plabel">Worktree path</label>
+            <input v-model="worktreePath" class="cwd mono" spellcheck="false" />
+          </div>
+        </div>
+        <p v-if="worktreeExists" class="wt-reuse">
+          A worktree already exists here — it'll be <strong>reused</strong> (its branch and any changes kept).
+          <button class="wt-reset" :disabled="resetting" @click="resetWorktree">
+            {{ resetting ? "Resetting…" : "Reset" }}
+          </button>
+        </p>
+      </template>
+      <p v-else-if="isGit" class="wt-warn">
+        Agent will share <strong>{{ ticket.repo }}</strong>'s working tree — a second agent here can clobber its edits.
+      </p>
+    </div>
 
     <label class="plabel">Your prompt to the agent</label>
     <textarea
@@ -331,6 +434,97 @@ function openWorkspace(): void {
   color: #d6a651;
 }
 .cwd-note strong {
+  font-family: "JetBrains Mono", monospace;
+  color: #e0b566;
+}
+/* DRY-15 worktree isolation block */
+.wt {
+  margin-bottom: 10px;
+}
+.wt-toggle {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  column-gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+.wt-toggle input {
+  grid-row: span 2;
+  margin: 0;
+  accent-color: #2a6db0;
+  cursor: pointer;
+}
+.wt-label {
+  font-size: 12.5px;
+  color: #c3ccd6;
+  font-weight: 600;
+}
+.wt-sub {
+  grid-column: 2;
+  font-size: 10.5px;
+  color: #5a636f;
+}
+.wt-none {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: #6b7682;
+}
+.wt-none strong {
+  font-family: "JetBrains Mono", monospace;
+  color: #8a94a0;
+}
+.wt-fields {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.9fr) 1.4fr;
+  gap: 8px;
+  margin-top: 9px;
+}
+.wt-field {
+  display: flex;
+  flex-direction: column;
+}
+.wt-field .cwd {
+  margin-bottom: 0;
+}
+.mono {
+  font-family: "JetBrains Mono", monospace;
+}
+.wt-reuse {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 8px 0 0;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: #7fb59a;
+}
+.wt-reuse strong {
+  color: #9fd2b8;
+}
+.wt-reset {
+  flex: 0 0 auto;
+  margin-left: auto;
+  background: #1b2531;
+  border: 1px solid #33414f;
+  border-radius: 6px;
+  color: #c3ccd6;
+  font-size: 10.5px;
+  padding: 3px 9px;
+  cursor: pointer;
+}
+.wt-reset:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.wt-warn {
+  margin: 8px 0 0;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: #d6a651;
+}
+.wt-warn strong {
   font-family: "JetBrains Mono", monospace;
   color: #e0b566;
 }

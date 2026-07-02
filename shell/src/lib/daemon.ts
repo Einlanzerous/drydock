@@ -30,6 +30,14 @@ export async function createSession(opts: {
   repo?: string;
   /** Ticket key; the daemon binds it to the session for the SessionStart hook. */
   ticket?: string;
+  /**
+   * DRY-15 worktree isolation. Omit to let a ticket spawn default to an isolated
+   * `agent/<TICKET>` worktree; pass an explicit path to override where it lives;
+   * pass `false` to opt out and run directly in the working dir.
+   */
+  worktree?: string | false;
+  /** Override the branch checked out in the worktree (default `agent/<TICKET>`). */
+  branch?: string;
   title?: string;
 }): Promise<SessionInfo> {
   const res = await fetch(`${DAEMON_HTTP}/api/sessions`, {
@@ -50,9 +58,39 @@ export function attachUrl(id: string): string {
   return `${DAEMON_WS}/api/sessions/${id}/attach`;
 }
 
-/** Preview the cwd a ticket's repo resolves to (host-side). matched=false means
- *  no repo dir was found and it fell back to $HOME — the panel lets you override. */
-export async function resolveRepoCwd(repo: string): Promise<{ cwd: string; matched: boolean }> {
-  const res = await fetch(`${DAEMON_HTTP}/api/repos/resolve?repo=${encodeURIComponent(repo)}`);
+/** Where a ticket's spawn will land (host-side preview). */
+export interface RepoResolution {
+  cwd: string;
+  /** Repo dir found; false means it fell back to $HOME — the panel lets you override. */
+  matched: boolean;
+  /** cwd is a git work tree, so DRY-15 worktree isolation is available. */
+  git?: boolean;
+  /** Planned isolated worktree path (git repos only). */
+  worktree?: string;
+  /** Planned branch (default `agent/<TICKET>`). */
+  branch?: string;
+  /** A worktree already exists here from a prior spawn → it'll be reused. */
+  worktreeExists?: boolean;
+}
+
+/** Preview the cwd + worktree/branch a ticket's repo resolves to (host-side).
+ *  Pass the ticket key to also preview the DRY-15 worktree it would isolate into. */
+export async function resolveRepoCwd(repo: string, ticket?: string): Promise<RepoResolution> {
+  const q = new URLSearchParams({ repo });
+  if (ticket) q.set("ticket", ticket);
+  const res = await fetch(`${DAEMON_HTTP}/api/repos/resolve?${q.toString()}`);
   return res.json();
+}
+
+/** Prune a ticket's worktree on demand (DRY-15). Kept on close, removed here. */
+export async function removeWorktree(opts: { repo: string; worktree: string }): Promise<void> {
+  const res = await fetch(`${DAEMON_HTTP}/api/worktrees/remove`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(opts),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error ?? "failed to remove worktree");
+  }
 }

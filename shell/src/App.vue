@@ -174,7 +174,14 @@ async function spawnFresh(kind: "claude" | "shell") {
 // instead of giving it a standalone window. Ticket-bound spawns pre-open the
 // drawer and pre-fill the agent prompt (typed once by TerminalPane).
 async function spawnWorkspace(
-  opts: { ticket?: Ticket; prompt?: string; cwd?: string; auto?: boolean } = {},
+  opts: {
+    ticket?: Ticket;
+    prompt?: string;
+    cwd?: string;
+    worktree?: string | false;
+    branch?: string;
+    auto?: boolean;
+  } = {},
 ) {
   wm.setLayout("float");
   try {
@@ -184,11 +191,15 @@ async function spawnWorkspace(
       cwd: opts.cwd,
       repo: opts.ticket?.repo,
       ticket: opts.ticket?.key,
+      // DRY-15: isolate the agent in its own worktree (or opt out via `false`).
+      worktree: opts.worktree,
+      branch: opts.branch,
       // Ticket-driven spawns can opt into hands-off "auto" permission mode.
       args: opts.auto ? ["--permission-mode", "auto"] : undefined,
     });
-    // Co-locate the human's shell in the agent's resolved cwd (not just the repo
-    // name) so both panes start in exactly the same directory.
+    // Co-locate the human's shell in the agent's *resolved* cwd — which is the
+    // worktree when isolated — so both panes start in exactly the same directory.
+    // It passes no ticket, so it just runs there and never makes a second worktree.
     const shell = await createSession({ command: "shell", title: "shell", cwd: agent.cwd });
     if (opts.ticket) ticketById[agent.id] = opts.ticket.key;
     if (opts.prompt) initialInputById[agent.id] = opts.prompt;
@@ -234,18 +245,30 @@ async function onSendTicket({
   ticket,
   prompt,
   cwd,
+  worktree,
+  branch,
   auto,
-}: { ticket: Ticket; prompt: string; cwd: string; auto: boolean }) {
+}: {
+  ticket: Ticket;
+  prompt: string;
+  cwd: string;
+  worktree: string | false;
+  branch?: string;
+  auto: boolean;
+}) {
   selectedTicket.value = null;
   wm.setLayout("float");
   try {
     // cwd comes from the panel (resolved from the repo, possibly overridden); an
-    // explicit cwd takes precedence over repo resolution on the daemon.
+    // explicit cwd takes precedence over repo resolution on the daemon. When the
+    // panel opts into isolation the daemon spawns in a per-ticket worktree (DRY-15).
     const s = await createSession({
       command: "claude",
       title: "claude-code",
       cwd,
       ticket: ticket.key,
+      worktree,
+      branch,
       // Auto mode → spawn claude hands-off; the daemon auto-approves its tools.
       args: auto ? ["--permission-mode", "auto"] : undefined,
     });
@@ -264,10 +287,19 @@ function onOpenWorkspace({
   ticket,
   prompt,
   cwd,
+  worktree,
+  branch,
   auto,
-}: { ticket: Ticket; prompt: string; cwd: string; auto: boolean }) {
+}: {
+  ticket: Ticket;
+  prompt: string;
+  cwd: string;
+  worktree: string | false;
+  branch?: string;
+  auto: boolean;
+}) {
   selectedTicket.value = null;
-  spawnWorkspace({ ticket, prompt, cwd, auto });
+  spawnWorkspace({ ticket, prompt, cwd, worktree, branch, auto });
 }
 
 // Seed consumed once: TerminalPane fires this after typing the pre-filled prompt,

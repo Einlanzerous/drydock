@@ -129,6 +129,17 @@ Repo→directory mapping is host config on the daemon: `DRYDOCK_REPOS_ROOT`
 overrides via `DRYDOCK_REPO_PATHS="construct-server=~/construct-server,imperium-loop=~/imperium-loop"`.
 A name that resolves to no existing directory falls back to `$HOME`.
 
+**Worktree isolation (DRY-15).** When that repo is a git work tree, the agent
+doesn't run in your checkout — it gets its own **git worktree** on branch
+`agent/<TICKET>` under `~/.drydock/worktrees/<repo>-<TICKET>` (configurable via
+`DRYDOCK_WORKTREES_ROOT`; set `DRYDOCK_WORKTREES=0` to disable). So two agents on
+the same repo never clobber each other's working tree. The panel previews the
+worktree/branch and lets you edit or opt out before spawning. Worktrees are
+**kept when you close the session** — the agent's branch may hold work you want to
+merge or inspect, and re-spawning the same ticket reuses the worktree — so removal
+is on demand (the panel's **Reset**, or `POST /api/worktrees/remove`). Repo-less
+projects (e.g. an ideas board) have no worktree and run directly in the cwd.
+
 ## Tracker config
 
 The sidebar/palette default to a built-in fixture set. Point at a live tracker
