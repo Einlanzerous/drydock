@@ -28,6 +28,8 @@ type SpawnPayload = {
   cwd: string;
   worktree: string | false;
   branch?: string;
+  // DRY-22: start the agent in auto (hands-off) permission mode.
+  auto: boolean;
 };
 const emit = defineEmits<{
   (e: "send", payload: SpawnPayload): void;
@@ -75,6 +77,11 @@ const loadError = ref<string | null>(null);
 const prompt = ref("");
 const cwd = ref("");
 const cwdMatched = ref(true);
+// Spawn the agent already in "auto" (hands-off) permission mode so tools run
+// without approval prompts. Passed to claude as `--permission-mode auto`, which
+// the daemon's PreToolUse hook treats as hands-off. On by default; toggle off
+// for a ticket you want to babysit.
+const auto = ref(true);
 
 // DRY-15 worktree isolation. `isGit` gates the whole feature (repo-less tickets
 // can't isolate); `isolate` is the user's on/off toggle (default on for a git
@@ -121,6 +128,7 @@ watch(
     branch.value = "";
     worktreePath.value = "";
     worktreeExists.value = false;
+    auto.value = true;
     pos.value = null; // re-center each freshly opened ticket
     // Resolve the spawn cwd + worktree in parallel with the description fetch.
     void previewTarget(t);
@@ -153,6 +161,7 @@ function payload(): SpawnPayload {
     // A path string overrides where the worktree lives; `false` opts out entirely.
     worktree: on ? worktreePath.value.trim() : false,
     branch: on ? branch.value.trim() || undefined : undefined,
+    auto: auto.value,
   };
 }
 
@@ -265,6 +274,10 @@ async function resetWorktree(): Promise<void> {
     <div class="actions">
       <span class="hint">The ticket body is attached as context via the SessionStart hook.</span>
       <span class="grow"></span>
+      <label class="autotoggle" title="Start the agent in auto (hands-off) permission mode — tools run without approval prompts">
+        <input type="checkbox" v-model="auto" />
+        Auto
+      </label>
       <button class="cancel" @click="emit('close')">Cancel</button>
       <button
         class="workspace"
@@ -272,9 +285,9 @@ async function resetWorktree(): Promise<void> {
         :disabled="!prompt.trim() || !cwd.trim()"
         @click="openWorkspace"
       >
-        Open workspace
+        Workspace
       </button>
-      <button class="send" :disabled="!prompt.trim() || !cwd.trim()" @click="send">Send to agent</button>
+      <button class="send" :disabled="!prompt.trim() || !cwd.trim()" @click="send">Spawn Agent</button>
     </div>
   </div>
 </template>
@@ -540,13 +553,36 @@ async function resetWorktree(): Promise<void> {
   font-size: 10.5px;
   color: #5a636f;
 }
+.autotoggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: #8a94a0;
+  cursor: pointer;
+  user-select: none;
+}
+.autotoggle input {
+  margin: 0;
+  accent-color: #2a6db0;
+  cursor: pointer;
+}
+/* One shared box model + explicit height so all three action buttons render at
+   the same size — with box-sizing:border-box the 1px border on .workspace stays
+   inside the 32px, so bordered and borderless buttons line up. */
 .cancel,
 .workspace,
 .send {
-  padding: 7px 14px;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  height: 32px;
+  padding: 0 14px;
   border-radius: 7px;
   font-size: 12.5px;
   font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
   border: none;
 }

@@ -180,6 +180,7 @@ async function spawnWorkspace(
     cwd?: string;
     worktree?: string | false;
     branch?: string;
+    auto?: boolean;
   } = {},
 ) {
   wm.setLayout("float");
@@ -193,6 +194,8 @@ async function spawnWorkspace(
       // DRY-15: isolate the agent in its own worktree (or opt out via `false`).
       worktree: opts.worktree,
       branch: opts.branch,
+      // Ticket-driven spawns can opt into hands-off "auto" permission mode.
+      args: opts.auto ? ["--permission-mode", "auto"] : undefined,
     });
     // Co-locate the human's shell in the agent's *resolved* cwd — which is the
     // worktree when isolated — so both panes start in exactly the same directory.
@@ -244,12 +247,14 @@ async function onSendTicket({
   cwd,
   worktree,
   branch,
+  auto,
 }: {
   ticket: Ticket;
   prompt: string;
   cwd: string;
   worktree: string | false;
   branch?: string;
+  auto: boolean;
 }) {
   selectedTicket.value = null;
   wm.setLayout("float");
@@ -264,6 +269,8 @@ async function onSendTicket({
       ticket: ticket.key,
       worktree,
       branch,
+      // Auto mode → spawn claude hands-off; the daemon auto-approves its tools.
+      args: auto ? ["--permission-mode", "auto"] : undefined,
     });
     ticketById[s.id] = ticket.key;
     initialInputById[s.id] = prompt;
@@ -282,15 +289,17 @@ function onOpenWorkspace({
   cwd,
   worktree,
   branch,
+  auto,
 }: {
   ticket: Ticket;
   prompt: string;
   cwd: string;
   worktree: string | false;
   branch?: string;
+  auto: boolean;
 }) {
   selectedTicket.value = null;
-  spawnWorkspace({ ticket, prompt, cwd, worktree, branch });
+  spawnWorkspace({ ticket, prompt, cwd, worktree, branch, auto });
 }
 
 // Seed consumed once: TerminalPane fires this after typing the pre-filled prompt,
@@ -637,7 +646,7 @@ onBeforeUnmount(() => {
   color: #9aa6b2;
 }
 .new {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 8px;
   height: 34px;
@@ -648,6 +657,7 @@ onBeforeUnmount(() => {
   color: #cfe3f5;
   font-size: 13px;
   font-weight: 600;
+  line-height: 1;
   cursor: pointer;
 }
 .kbd {
@@ -659,6 +669,8 @@ onBeforeUnmount(() => {
   border-radius: 4px;
 }
 .ghost {
+  display: inline-flex;
+  align-items: center;
   height: 34px;
   padding: 0 11px;
   background: #13171c;
@@ -667,6 +679,7 @@ onBeforeUnmount(() => {
   color: #b9c3cf;
   font-size: 12.5px;
   font-family: "JetBrains Mono", monospace;
+  line-height: 1;
   cursor: pointer;
 }
 .error {
