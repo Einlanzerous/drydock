@@ -173,7 +173,9 @@ async function spawnFresh(kind: "claude" | "shell") {
 // window is registered *before* the next poll so reconcile claims the shell PTY
 // instead of giving it a standalone window. Ticket-bound spawns pre-open the
 // drawer and pre-fill the agent prompt (typed once by TerminalPane).
-async function spawnWorkspace(opts: { ticket?: Ticket; prompt?: string; cwd?: string } = {}) {
+async function spawnWorkspace(
+  opts: { ticket?: Ticket; prompt?: string; cwd?: string; auto?: boolean } = {},
+) {
   wm.setLayout("float");
   try {
     const agent = await createSession({
@@ -182,6 +184,8 @@ async function spawnWorkspace(opts: { ticket?: Ticket; prompt?: string; cwd?: st
       cwd: opts.cwd,
       repo: opts.ticket?.repo,
       ticket: opts.ticket?.key,
+      // Ticket-driven spawns can opt into hands-off "auto" permission mode.
+      args: opts.auto ? ["--permission-mode", "auto"] : undefined,
     });
     // Co-locate the human's shell in the agent's resolved cwd (not just the repo
     // name) so both panes start in exactly the same directory.
@@ -226,7 +230,12 @@ function openTicket(t: Ticket) {
 // Spawn an agent for the reviewed ticket: real repo cwd (daemon resolves the
 // repo name → host path) and the ticket key (so the SessionStart hook injects
 // the body as context). The editable prompt is pre-filled, not auto-submitted.
-async function onSendTicket({ ticket, prompt, cwd }: { ticket: Ticket; prompt: string; cwd: string }) {
+async function onSendTicket({
+  ticket,
+  prompt,
+  cwd,
+  auto,
+}: { ticket: Ticket; prompt: string; cwd: string; auto: boolean }) {
   selectedTicket.value = null;
   wm.setLayout("float");
   try {
@@ -237,6 +246,8 @@ async function onSendTicket({ ticket, prompt, cwd }: { ticket: Ticket; prompt: s
       title: "claude-code",
       cwd,
       ticket: ticket.key,
+      // Auto mode → spawn claude hands-off; the daemon auto-approves its tools.
+      args: auto ? ["--permission-mode", "auto"] : undefined,
     });
     ticketById[s.id] = ticket.key;
     initialInputById[s.id] = prompt;
@@ -249,9 +260,14 @@ async function onSendTicket({ ticket, prompt, cwd }: { ticket: Ticket; prompt: s
 
 // "Open workspace" from the ticket detail: spawn the composite workspace
 // instead of a plain agent window, with the ticket bound to the drawer.
-function onOpenWorkspace({ ticket, prompt, cwd }: { ticket: Ticket; prompt: string; cwd: string }) {
+function onOpenWorkspace({
+  ticket,
+  prompt,
+  cwd,
+  auto,
+}: { ticket: Ticket; prompt: string; cwd: string; auto: boolean }) {
   selectedTicket.value = null;
-  spawnWorkspace({ ticket, prompt, cwd });
+  spawnWorkspace({ ticket, prompt, cwd, auto });
 }
 
 // Seed consumed once: TerminalPane fires this after typing the pre-filled prompt,
@@ -598,7 +614,7 @@ onBeforeUnmount(() => {
   color: #9aa6b2;
 }
 .new {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 8px;
   height: 34px;
@@ -609,6 +625,7 @@ onBeforeUnmount(() => {
   color: #cfe3f5;
   font-size: 13px;
   font-weight: 600;
+  line-height: 1;
   cursor: pointer;
 }
 .kbd {
@@ -620,6 +637,8 @@ onBeforeUnmount(() => {
   border-radius: 4px;
 }
 .ghost {
+  display: inline-flex;
+  align-items: center;
   height: 34px;
   padding: 0 11px;
   background: #13171c;
@@ -628,6 +647,7 @@ onBeforeUnmount(() => {
   color: #b9c3cf;
   font-size: 12.5px;
   font-family: "JetBrains Mono", monospace;
+  line-height: 1;
   cursor: pointer;
 }
 .error {
