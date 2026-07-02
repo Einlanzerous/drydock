@@ -14,7 +14,10 @@
 import type { LayoutMode, Win } from "./useWindowManager.js";
 
 const PREFIX = "drydock.layout";
-export const LAYOUT_VERSION = 1;
+// v2 (DRY-21): Win gained `kind` + workspace fields (shellId / drawerOpen /
+// shellCollapsed / shellRatio). A v1 blob has no `kind`, so it's discarded on
+// load rather than restoring workspace windows with a dangling agent-only PTY.
+export const LAYOUT_VERSION = 2;
 
 export interface PersistedLayout {
   version: number;

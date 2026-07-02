@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import TerminalPane from "./components/TerminalPane.vue";
+import WorkspacePane from "./components/WorkspacePane.vue";
 import WindowFrame from "./components/WindowFrame.vue";
 import TrackerSidebar from "./components/TrackerSidebar.vue";
 import TicketDetail from "./components/TicketDetail.vue";
 import QuickLaunch from "./components/QuickLaunch.vue";
 import Dock from "./components/Dock.vue";
-import { useWindowManager, type LayoutMode } from "./composables/useWindowManager.js";
+import { useWindowManager, type LayoutMode, type Win } from "./composables/useWindowManager.js";
 import { DAEMON_HTTP, createSession, killSession, listSessions } from "./lib/daemon.js";
 import { getTrackerInfo, listTickets, type Ticket } from "./lib/tracker.js";
 import type { SessionInfo } from "./lib/protocol.js";
@@ -58,13 +59,34 @@ function basename(p: string): string {
   return p.split("/").filter(Boolean).pop() ?? "~";
 }
 
+// A workspace window (DRY-21) owns a second, "claimed" PTY — its bottom zsh
+// shell — that must never get its own standalone window. Collect those ids so
+// reconcile skips them (and cleans up any stray window that raced onto one).
+function claimedShellIds(): Set<string> {
+  const s = new Set<string>();
+  for (const w of wm.windows) if (w.kind === "workspace" && w.shellId) s.add(w.shellId);
+  return s;
+}
+
+// Drop a window from the desk. For a workspace, its co-located shell PTY has no
+// window of its own, so kill it here too rather than leaking an orphan session.
+function dropWindow(id: string) {
+  const w = wm.windows.find((x) => x.id === id);
+  if (w?.kind === "workspace" && w.shellId) killSession(w.shellId).catch(() => {});
+  wm.remove(id);
+}
+
 // --- session discovery / reconciliation ---
 function reconcile(list: SessionInfo[]) {
   const ids = new Set(list.map((s) => s.id));
+  const claimed = claimedShellIds();
   for (const k of Object.keys(sessionsById)) if (!ids.has(k)) delete sessionsById[k];
   for (const s of list) sessionsById[s.id] = s;
 
   for (const s of list) {
+    // A workspace's shell PTY is rendered inside its workspace window, not as a
+    // window of its own — don't cascade-add a standalone terminal for it.
+    if (claimed.has(s.id)) continue;
     if (!wm.windows.find((w) => w.id === s.id)) {
       wm.add({
         id: s.id,
@@ -77,7 +99,12 @@ function reconcile(list: SessionInfo[]) {
       });
     }
   }
-  for (const w of [...wm.windows]) if (!ids.has(w.id)) wm.remove(w.id);
+  for (const w of [...wm.windows]) {
+    // A plain window that landed on a now-claimed shell id (spawn/poll race):
+    // drop the duplicate, but leave the PTY alive — its workspace owns it.
+    if (w.kind !== "workspace" && claimed.has(w.id)) wm.remove(w.id);
+    else if (!ids.has(w.id)) dropWindow(w.id);
+  }
 }
 
 async function refresh() {
@@ -141,6 +168,53 @@ async function spawnFresh(kind: "claude" | "shell") {
   }
 }
 
+// Spawn a composite workspace (DRY-21): one managed window binding a ticket +
+// two PTYs — the agent (claude) and a co-located zsh shell sharing its cwd. The
+// window is registered *before* the next poll so reconcile claims the shell PTY
+// instead of giving it a standalone window. Ticket-bound spawns pre-open the
+// drawer and pre-fill the agent prompt (typed once by TerminalPane).
+async function spawnWorkspace(opts: { ticket?: Ticket; prompt?: string; cwd?: string } = {}) {
+  wm.setLayout("float");
+  try {
+    const agent = await createSession({
+      command: "claude",
+      title: "workspace",
+      cwd: opts.cwd,
+      repo: opts.ticket?.repo,
+      ticket: opts.ticket?.key,
+    });
+    // Co-locate the human's shell in the agent's resolved cwd (not just the repo
+    // name) so both panes start in exactly the same directory.
+    const shell = await createSession({ command: "shell", title: "shell", cwd: agent.cwd });
+    if (opts.ticket) ticketById[agent.id] = opts.ticket.key;
+    if (opts.prompt) initialInputById[agent.id] = opts.prompt;
+    wm.add({
+      id: agent.id,
+      kind: "workspace",
+      type: "agent",
+      title: "workspace",
+      ticket: opts.ticket?.key,
+      repo: basename(agent.cwd),
+      shellId: shell.id,
+      drawerOpen: !!opts.ticket, // pre-open the drawer for a ticket-bound workspace
+      shellCollapsed: false,
+      shellRatio: 0.2,
+      w: 760,
+      h: 620,
+    });
+    await refresh();
+    wm.bringFront(agent.id);
+  } catch (e) {
+    error.value = String(e);
+  }
+}
+
+// Persist the workspace pane's own UI state (drawer/shell collapse, split ratio)
+// back onto the Win so the DRY-14 layout watcher writes it through.
+function onWorkspacePatch(id: string, patch: Partial<Win>) {
+  wm.updateWin(id, patch);
+}
+
 // Picking a ticket (sidebar or palette) opens its detail panel; the actual
 // spawn happens from there once you've read it and hit "Send to agent".
 function openTicket(t: Ticket) {
@@ -173,6 +247,13 @@ async function onSendTicket({ ticket, prompt, cwd }: { ticket: Ticket; prompt: s
   }
 }
 
+// "Open workspace" from the ticket detail: spawn the composite workspace
+// instead of a plain agent window, with the ticket bound to the drawer.
+function onOpenWorkspace({ ticket, prompt, cwd }: { ticket: Ticket; prompt: string; cwd: string }) {
+  selectedTicket.value = null;
+  spawnWorkspace({ ticket, prompt, cwd });
+}
+
 // Seed consumed once: TerminalPane fires this after typing the pre-filled prompt,
 // so a re-mount (restore from dock, poll re-add) doesn't retype it.
 function onInitialSent(id: string) {
@@ -183,8 +264,13 @@ function onInitialSent(id: string) {
 // the still-alive daemon session and re-adds the window (and the pane re-typed
 // the seed) — minimize→dock is the "keep running" path, the X means done.
 async function closeWindow(id: string) {
+  // A workspace also owns a co-located shell PTY with no window of its own —
+  // kill it alongside the agent so closing the window leaves nothing running.
+  const w = wm.windows.find((x) => x.id === id);
+  const shellId = w?.kind === "workspace" ? w.shellId : undefined;
   try {
     await killSession(id);
+    if (shellId) await killSession(shellId);
   } catch (e) {
     error.value = String(e);
   }
@@ -202,7 +288,14 @@ const dockItems = computed(() =>
     .filter((w) => w.minimized)
     .map((w) => {
       const st = winStatus(w.id);
-      const sub = w.type === "bash" ? "shell session" : ticketById[w.id] ? "agent session" : "claude session";
+      const sub =
+        w.kind === "workspace"
+          ? "workspace"
+          : w.type === "bash"
+            ? "shell session"
+            : ticketById[w.id]
+              ? "agent session"
+              : "claude session";
       return { win: w, statusColor: st.c, statusGlow: st.g, attention: st.attention, sub };
     }),
 );
@@ -327,6 +420,9 @@ onBeforeUnmount(() => {
         </button>
         <button class="ghost" @click="spawnFresh('claude')">+ claude</button>
         <button class="ghost" @click="spawnFresh('shell')">+ shell</button>
+        <button class="ghost" title="Ticket drawer + agent + zsh in one window" @click="spawnWorkspace()">
+          + workspace
+        </button>
       </div>
     </header>
 
@@ -367,8 +463,21 @@ onBeforeUnmount(() => {
           @minimize="minimizeWindow(w.id)"
           @close="closeWindow(w.id)"
         >
+          <WorkspacePane
+            v-if="w.kind === 'workspace' && sessionsById[w.id]"
+            :win="w"
+            :agent-session="sessionsById[w.id]"
+            :shell-session="w.shellId ? sessionsById[w.shellId] : undefined"
+            :active="wm.focusedId.value === w.id"
+            :initial-input="initialInputById[w.id]"
+            @status="onStatus"
+            @attention="onAttention"
+            @idle="onIdle"
+            @initial-sent="onInitialSent"
+            @patch="onWorkspacePatch"
+          />
           <TerminalPane
-            v-if="sessionsById[w.id]"
+            v-else-if="sessionsById[w.id]"
             :session="sessionsById[w.id]"
             :active="wm.focusedId.value === w.id"
             :initial-input="initialInputById[w.id]"
@@ -398,6 +507,7 @@ onBeforeUnmount(() => {
       :z="ticketZ"
       @focus="ticketZ = wm.allocZ()"
       @send="onSendTicket"
+      @workspace="onOpenWorkspace"
       @close="selectedTicket = null"
     />
   </div>
