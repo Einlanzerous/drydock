@@ -3,6 +3,13 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { CONFIG } from "./config.js";
 import { SessionManager } from "./manager.js";
 import { resolveRepoCwd } from "./repos.js";
+import {
+  ensureWorktree,
+  isGitWorkTree,
+  planWorktree,
+  removeWorktree,
+  worktreeExists,
+} from "./worktree.js";
 import type { ClientMessage } from "./protocol.js";
 import { createTracker, trackerInfo } from "./tracker/index.js";
 
@@ -65,11 +72,39 @@ const server = http.createServer(async (req, res) => {
           );
         }
       }
+      const ticket = typeof body.ticket === "string" ? body.ticket : undefined;
+
+      // Worktree isolation (DRY-15). A ticket-bound spawn in a git repo runs in
+      // its own worktree/branch unless the client opts out (`worktree: false`)
+      // or the daemon has it disabled. Explicit `worktree`(path)/`branch` strings
+      // override the derived defaults. Any git hiccup falls back to the plain
+      // cwd so a spawn never hard-fails on isolation.
+      let worktree: string | undefined;
+      let branch: string | undefined;
+      const optOut = body.worktree === false;
+      if (CONFIG.worktrees.enabled && !optOut && ticket && cwd && isGitWorkTree(cwd)) {
+        try {
+          const wt = ensureWorktree(cwd, ticket, {
+            path: typeof body.worktree === "string" ? body.worktree : undefined,
+            branch: typeof body.branch === "string" ? body.branch : undefined,
+          });
+          cwd = wt.cwd;
+          worktree = wt.cwd;
+          branch = wt.branch;
+        } catch (err) {
+          console.warn(
+            `[drydock] worktree for ${ticket} failed (${String(err)}) — spawning in ${cwd}`,
+          );
+        }
+      }
+
       const session = manager.create({
         command: body.command,
         args: Array.isArray(body.args) ? body.args : [],
         cwd,
-        ticket: typeof body.ticket === "string" ? body.ticket : undefined,
+        ticket,
+        worktree,
+        branch,
         title: typeof body.title === "string" ? body.title : undefined,
         cols: typeof body.cols === "number" ? body.cols : undefined,
         rows: typeof body.rows === "number" ? body.rows : undefined,
@@ -80,8 +115,45 @@ const server = http.createServer(async (req, res) => {
     // Resolve a ticket's repo name to the cwd it would spawn in (DRY-12). Lets
     // the detail panel preview the working dir and flag a repo-less project
     // (matched=false → fell back to $HOME) so the user can override before spawn.
+    // With `?ticket=`, also previews the DRY-15 worktree/branch the agent will
+    // use: `git` says isolation is possible, `worktree`/`branch` are the planned
+    // targets, and `worktreeExists` flags a reuse of a prior spawn's worktree.
     if (pathname === "/api/repos/resolve" && req.method === "GET") {
-      return send(res, 200, resolveRepoCwd(url.searchParams.get("repo") ?? undefined));
+      const base = resolveRepoCwd(url.searchParams.get("repo") ?? undefined);
+      const ticket = url.searchParams.get("ticket") ?? undefined;
+      const git = isGitWorkTree(base.cwd);
+      const out: Record<string, unknown> = { ...base, git };
+      if (git && ticket && CONFIG.worktrees.enabled) {
+        const plan = planWorktree(base.cwd, ticket);
+        if (plan) {
+          out.worktree = plan.path;
+          out.branch = plan.branch;
+          out.worktreeExists = worktreeExists(plan.path);
+        }
+      }
+      return send(res, 200, out);
+    }
+
+    // Prune a worktree on demand (DRY-15 cleanup policy). Worktrees are kept on
+    // session close; this is the explicit removal path — e.g. the panel's "Reset"
+    // when reusing a stale worktree. The branch is left for the human to merge.
+    if (pathname === "/api/worktrees/remove" && req.method === "POST") {
+      const body = await readJson(req);
+      const repoDir =
+        typeof body.cwd === "string"
+          ? body.cwd
+          : typeof body.repo === "string"
+            ? resolveRepoCwd(body.repo).cwd
+            : undefined;
+      if (!repoDir || typeof body.worktree !== "string") {
+        return send(res, 400, { error: "repo (or cwd) and worktree are required" });
+      }
+      try {
+        removeWorktree(repoDir, body.worktree);
+        return send(res, 200, { ok: true });
+      } catch (err) {
+        return send(res, 500, { error: `worktree remove: ${String(err)}` });
+      }
     }
 
     const killMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/kill$/);

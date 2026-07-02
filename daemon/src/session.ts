@@ -21,6 +21,10 @@ export interface SpawnOptions {
   env?: Record<string, string>;
   /** Tracker ticket this session is scoped to; surfaced to the SessionStart hook. */
   ticket?: string;
+  /** Isolated git worktree the session runs in (DRY-15); equals cwd when set. */
+  worktree?: string;
+  /** Branch checked out in that worktree. */
+  branch?: string;
 }
 
 /**
@@ -63,6 +67,8 @@ export class PtySession {
   readonly args: string[];
   readonly cwd: string;
   readonly ticket?: string;
+  readonly worktree?: string;
+  readonly branch?: string;
   title: string;
 
   private readonly pty: pty.IPty;
@@ -90,6 +96,8 @@ export class PtySession {
     this.args = opts.args ?? [];
     this.cwd = opts.cwd ?? os.homedir();
     this.ticket = opts.ticket;
+    this.worktree = opts.worktree;
+    this.branch = opts.branch;
     this.title = opts.title ?? opts.command;
     this.cols = opts.cols ?? 80;
     this.rows = opts.rows ?? 24;
@@ -240,6 +248,8 @@ export class PtySession {
       args: this.args,
       cwd: this.cwd,
       ticket: this.ticket,
+      worktree: this.worktree,
+      branch: this.branch,
       status: this.status,
       exitCode: this.exitCode,
       idle: this.idle,

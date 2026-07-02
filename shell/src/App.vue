@@ -173,7 +173,15 @@ async function spawnFresh(kind: "claude" | "shell") {
 // window is registered *before* the next poll so reconcile claims the shell PTY
 // instead of giving it a standalone window. Ticket-bound spawns pre-open the
 // drawer and pre-fill the agent prompt (typed once by TerminalPane).
-async function spawnWorkspace(opts: { ticket?: Ticket; prompt?: string; cwd?: string } = {}) {
+async function spawnWorkspace(
+  opts: {
+    ticket?: Ticket;
+    prompt?: string;
+    cwd?: string;
+    worktree?: string | false;
+    branch?: string;
+  } = {},
+) {
   wm.setLayout("float");
   try {
     const agent = await createSession({
@@ -182,9 +190,13 @@ async function spawnWorkspace(opts: { ticket?: Ticket; prompt?: string; cwd?: st
       cwd: opts.cwd,
       repo: opts.ticket?.repo,
       ticket: opts.ticket?.key,
+      // DRY-15: isolate the agent in its own worktree (or opt out via `false`).
+      worktree: opts.worktree,
+      branch: opts.branch,
     });
-    // Co-locate the human's shell in the agent's resolved cwd (not just the repo
-    // name) so both panes start in exactly the same directory.
+    // Co-locate the human's shell in the agent's *resolved* cwd — which is the
+    // worktree when isolated — so both panes start in exactly the same directory.
+    // It passes no ticket, so it just runs there and never makes a second worktree.
     const shell = await createSession({ command: "shell", title: "shell", cwd: agent.cwd });
     if (opts.ticket) ticketById[agent.id] = opts.ticket.key;
     if (opts.prompt) initialInputById[agent.id] = opts.prompt;
@@ -226,17 +238,32 @@ function openTicket(t: Ticket) {
 // Spawn an agent for the reviewed ticket: real repo cwd (daemon resolves the
 // repo name → host path) and the ticket key (so the SessionStart hook injects
 // the body as context). The editable prompt is pre-filled, not auto-submitted.
-async function onSendTicket({ ticket, prompt, cwd }: { ticket: Ticket; prompt: string; cwd: string }) {
+async function onSendTicket({
+  ticket,
+  prompt,
+  cwd,
+  worktree,
+  branch,
+}: {
+  ticket: Ticket;
+  prompt: string;
+  cwd: string;
+  worktree: string | false;
+  branch?: string;
+}) {
   selectedTicket.value = null;
   wm.setLayout("float");
   try {
     // cwd comes from the panel (resolved from the repo, possibly overridden); an
-    // explicit cwd takes precedence over repo resolution on the daemon.
+    // explicit cwd takes precedence over repo resolution on the daemon. When the
+    // panel opts into isolation the daemon spawns in a per-ticket worktree (DRY-15).
     const s = await createSession({
       command: "claude",
       title: "claude-code",
       cwd,
       ticket: ticket.key,
+      worktree,
+      branch,
     });
     ticketById[s.id] = ticket.key;
     initialInputById[s.id] = prompt;
@@ -249,9 +276,21 @@ async function onSendTicket({ ticket, prompt, cwd }: { ticket: Ticket; prompt: s
 
 // "Open workspace" from the ticket detail: spawn the composite workspace
 // instead of a plain agent window, with the ticket bound to the drawer.
-function onOpenWorkspace({ ticket, prompt, cwd }: { ticket: Ticket; prompt: string; cwd: string }) {
+function onOpenWorkspace({
+  ticket,
+  prompt,
+  cwd,
+  worktree,
+  branch,
+}: {
+  ticket: Ticket;
+  prompt: string;
+  cwd: string;
+  worktree: string | false;
+  branch?: string;
+}) {
   selectedTicket.value = null;
-  spawnWorkspace({ ticket, prompt, cwd });
+  spawnWorkspace({ ticket, prompt, cwd, worktree, branch });
 }
 
 // Seed consumed once: TerminalPane fires this after typing the pre-filled prompt,

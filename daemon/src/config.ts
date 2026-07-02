@@ -51,6 +51,19 @@ export const CONFIG = {
   },
 
   /**
+   * Per-ticket git worktree isolation (DRY-15). When a ticket-spawned agent's
+   * repo is a git work tree, it runs in its own worktree at
+   * `${root}/<repo>-<TICKET>` on branch `agent/<TICKET>` instead of the human's
+   * checkout, so concurrent agents don't clobber each other. Set DRYDOCK_WORKTREES=0
+   * to disable (agents fall back to the plain repo cwd). Worktrees are kept on
+   * close and pruned on demand — see worktree.ts.
+   */
+  worktrees: {
+    enabled: process.env.DRYDOCK_WORKTREES !== "0",
+    root: process.env.DRYDOCK_WORKTREES_ROOT ?? "~/.drydock/worktrees",
+  },
+
+  /**
    * How long the daemon holds a PreToolUse hook request open waiting for a
    * human decision before giving up. Claude Code's own hook timeout (default
    * ~600s) is the hard ceiling; we stay under it so we resolve first and the

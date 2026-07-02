@@ -33,6 +33,10 @@ export interface SessionInfo {
   cwd: string;
   /** Tracker ticket key this session was spawned for, if any. */
   ticket?: string;
+  /** Isolated git worktree path this session runs in (DRY-15), if any. */
+  worktree?: string;
+  /** Branch checked out in that worktree (e.g. `agent/DRY-15`). */
+  branch?: string;
   status: SessionStatus;
   exitCode: number | null;
   /** Agent has yielded its turn and is waiting on the user (Stop hook). */
