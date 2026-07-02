@@ -21,10 +21,10 @@ import { resolveRepoCwd } from "../lib/daemon.js";
 // longer dismisses on outside click, so you can work other windows with it open.
 const props = defineProps<{ ticket: Ticket; z: number }>();
 const emit = defineEmits<{
-  (e: "send", payload: { ticket: Ticket; prompt: string; cwd: string }): void;
+  (e: "send", payload: { ticket: Ticket; prompt: string; cwd: string; auto: boolean }): void;
   // Open the ticket as a composite workspace window (DRY-21): agent + drawer +
   // co-located zsh, instead of a plain agent-only terminal.
-  (e: "workspace", payload: { ticket: Ticket; prompt: string; cwd: string }): void;
+  (e: "workspace", payload: { ticket: Ticket; prompt: string; cwd: string; auto: boolean }): void;
   (e: "focus"): void;
   (e: "close"): void;
 }>();
@@ -66,6 +66,11 @@ const loadError = ref<string | null>(null);
 const prompt = ref("");
 const cwd = ref("");
 const cwdMatched = ref(true);
+// Spawn the agent already in "auto" (hands-off) permission mode so tools run
+// without approval prompts. Passed to claude as `--permission-mode auto`, which
+// the daemon's PreToolUse hook treats as hands-off. On by default; toggle off
+// for a ticket you want to babysit.
+const auto = ref(true);
 
 function defaultPrompt(t: Ticket): string {
   return `Work ticket ${t.key}. Its full description is attached as context — implement it.`;
@@ -80,6 +85,7 @@ watch(
     prompt.value = defaultPrompt(t);
     cwd.value = "";
     cwdMatched.value = true;
+    auto.value = true;
     pos.value = null; // re-center each freshly opened ticket
     // Resolve the spawn cwd in parallel with the description fetch.
     resolveRepoCwd(t.repo)
@@ -108,12 +114,12 @@ const winStyle = computed(() => {
 
 function send(): void {
   if (!prompt.value.trim() || !cwd.value.trim()) return;
-  emit("send", { ticket: props.ticket, prompt: prompt.value, cwd: cwd.value.trim() });
+  emit("send", { ticket: props.ticket, prompt: prompt.value, cwd: cwd.value.trim(), auto: auto.value });
 }
 
 function openWorkspace(): void {
   if (!prompt.value.trim() || !cwd.value.trim()) return;
-  emit("workspace", { ticket: props.ticket, prompt: prompt.value, cwd: cwd.value.trim() });
+  emit("workspace", { ticket: props.ticket, prompt: prompt.value, cwd: cwd.value.trim(), auto: auto.value });
 }
 </script>
 
@@ -165,6 +171,10 @@ function openWorkspace(): void {
     <div class="actions">
       <span class="hint">The ticket body is attached as context via the SessionStart hook.</span>
       <span class="grow"></span>
+      <label class="autotoggle" title="Start the agent in auto (hands-off) permission mode — tools run without approval prompts">
+        <input type="checkbox" v-model="auto" />
+        Auto
+      </label>
       <button class="cancel" @click="emit('close')">Cancel</button>
       <button
         class="workspace"
@@ -172,9 +182,9 @@ function openWorkspace(): void {
         :disabled="!prompt.trim() || !cwd.trim()"
         @click="openWorkspace"
       >
-        Open workspace
+        Workspace
       </button>
-      <button class="send" :disabled="!prompt.trim() || !cwd.trim()" @click="send">Send to agent</button>
+      <button class="send" :disabled="!prompt.trim() || !cwd.trim()" @click="send">Spawn Agent</button>
     </div>
   </div>
 </template>
@@ -349,13 +359,36 @@ function openWorkspace(): void {
   font-size: 10.5px;
   color: #5a636f;
 }
+.autotoggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: #8a94a0;
+  cursor: pointer;
+  user-select: none;
+}
+.autotoggle input {
+  margin: 0;
+  accent-color: #2a6db0;
+  cursor: pointer;
+}
+/* One shared box model + explicit height so all three action buttons render at
+   the same size — with box-sizing:border-box the 1px border on .workspace stays
+   inside the 32px, so bordered and borderless buttons line up. */
 .cancel,
 .workspace,
 .send {
-  padding: 7px 14px;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  height: 32px;
+  padding: 0 14px;
   border-radius: 7px;
   font-size: 12.5px;
   font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
   cursor: pointer;
   border: none;
 }
