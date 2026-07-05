@@ -7,6 +7,9 @@
   </head>
   <body>
     <div id="app"></div>
+    <!-- Runtime daemon endpoint config; must load before the bundle. Dev serves
+         the inert default from public/, the prod image regenerates it from env. -->
+    <script src="/config.js"></script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
