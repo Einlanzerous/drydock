@@ -73,15 +73,21 @@ export const CONFIG = {
 
   /**
    * Issue-tracker backend for the sidebar + Ctrl+K palette (DRY-10). Defaults
-   * to `fixture` so the shell works with no credentials. Set `switchyard` (or
-   * `jira`, once built) plus the matching credentials to go live. Credentials
-   * stay here on the host — they never reach the browser.
+   * to `fixture` so the shell works with no credentials. Set `switchyard` or
+   * `jira` plus the matching credentials to go live. Credentials stay here on
+   * the host — they never reach the browser.
    */
   tracker: {
     kind: (process.env.DRYDOCK_TRACKER ?? "fixture") as "fixture" | "switchyard" | "jira",
     switchyard: {
       url: process.env.DRYDOCK_SWITCHYARD_URL,
       token: process.env.DRYDOCK_SWITCHYARD_TOKEN,
+    },
+    jira: {
+      url: process.env.DRYDOCK_JIRA_URL,
+      // Cloud: email + API token (Basic). Server/DC: token only (Bearer PAT).
+      email: process.env.DRYDOCK_JIRA_EMAIL,
+      token: process.env.DRYDOCK_JIRA_TOKEN,
     },
   },
 };
