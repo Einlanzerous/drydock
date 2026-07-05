@@ -64,7 +64,9 @@ than a Node + native-addon deploy, so the daemon is the most likely thing to por
 
 ## Run it
 
-Two terminals (this is a PoC; no packaging yet). [Bun](https://bun.sh) is the
+Two terminals for dev. For a stable prod instance (systemd daemon on `:4318` +
+nginx shell container on `:5321`, immune to dev's `--watch` restarts) see
+[docs/deploy.md](docs/deploy.md). [Bun](https://bun.sh) is the
 package manager + task runner; `bun install` also compiles the `node-pty` addon
 (via `scripts/build-native.mjs`):
 

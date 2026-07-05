@@ -1,0 +1,29 @@
+# Drydock prod daemon — systemd USER unit template (DRY-19).
+#
+# Do not install this file directly: deploy/install-prod.sh renders it
+# (substituting __APP_DIR__ / __NODE__ / __PATH__) into
+# ~/.config/systemd/user/drydock-daemon.service and (re)starts it.
+#
+# All config lives in __APP_DIR__/.env (the daemon's env.ts loads it from the
+# checkout root) — the unit deliberately sets no DRYDOCK_* vars so prod config
+# has exactly one home.
+#
+# To survive logout/reboot without an active session, enable lingering once:
+#   sudo loginctl enable-linger $USER
+
+[Unit]
+Description=Drydock daemon (prod, port from .env — default 4318)
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__APP_DIR__/daemon
+ExecStart=__NODE__ --import tsx src/index.ts
+Restart=always
+RestartSec=2
+# Spawned agents and shells inherit this environment; keep the installing
+# user's real PATH so `claude`, git, bun, etc. resolve as in a login shell.
+Environment=PATH=__PATH__
+
+[Install]
+WantedBy=default.target
