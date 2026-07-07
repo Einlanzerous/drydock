@@ -79,6 +79,17 @@ export const CONFIG = {
    */
   tracker: {
     kind: (process.env.DRYDOCK_TRACKER ?? "fixture") as "fixture" | "switchyard" | "jira",
+    /**
+     * Default project scope for ticket list/search (DRY-30), comma-separated
+     * keys (e.g. "SRE,SREREV,SREDESK"). Against a corporate tracker an
+     * unscoped "all open tickets" pull is the whole instance — set this
+     * wherever the tracker is bigger than yours. Empty = unscoped. The UI can
+     * add keys per browser on top of these, but can't remove them.
+     */
+    projects: (process.env.DRYDOCK_TRACKER_PROJECTS ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
     switchyard: {
       url: process.env.DRYDOCK_SWITCHYARD_URL,
       token: process.env.DRYDOCK_SWITCHYARD_TOKEN,

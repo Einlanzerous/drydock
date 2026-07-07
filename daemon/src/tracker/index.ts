@@ -41,5 +41,10 @@ export function createTracker(): TrackerProvider {
 }
 
 export function trackerInfo(t: TrackerProvider): TrackerInfo {
-  return { id: t.id, name: t.name, capabilities: t.capabilities };
+  return {
+    id: t.id,
+    name: t.name,
+    capabilities: t.capabilities,
+    projects: CONFIG.tracker.projects,
+  };
 }

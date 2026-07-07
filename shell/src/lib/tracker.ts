@@ -33,6 +33,8 @@ export interface TrackerInfo {
   id: string;
   name: string;
   capabilities: { comment: boolean; transition: boolean };
+  /** Host-configured default project scope (DRY-30); empty = unscoped. */
+  projects: string[];
 }
 
 /** Status-dot colors, keyed by normalized category (design tokens from DRY-9). */
@@ -63,13 +65,29 @@ export async function getTrackerInfo(): Promise<TrackerInfo> {
   return res.json();
 }
 
-export async function listTickets(open = true): Promise<Ticket[]> {
-  const res = await fetch(`${DAEMON_HTTP}/api/tracker/tickets?open=${open}`);
+export interface TicketScope {
+  /**
+   * Project keys to pull (DRY-30). Omitted/empty = let the daemon apply its
+   * host default (DRYDOCK_TRACKER_PROJECTS); passing keys overrides it, so the
+   * caller sends the FULL effective list (host defaults + user-added).
+   */
+  projects?: string[];
+  /** Pull backlog-bucket tickets too. Off by default (DRY-30). */
+  backlog?: boolean;
+}
+
+export async function listTickets(open = true, scope: TicketScope = {}): Promise<Ticket[]> {
+  const params = new URLSearchParams({ open: String(open) });
+  if (scope.projects?.length) params.set("projects", scope.projects.join(","));
+  if (scope.backlog) params.set("backlog", "true");
+  const res = await fetch(`${DAEMON_HTTP}/api/tracker/tickets?${params}`);
   return (await res.json()).tickets;
 }
 
-export async function searchTickets(q: string): Promise<Ticket[]> {
-  const res = await fetch(`${DAEMON_HTTP}/api/tracker/search?q=${encodeURIComponent(q)}`);
+export async function searchTickets(q: string, projects?: string[]): Promise<Ticket[]> {
+  const params = new URLSearchParams({ q });
+  if (projects?.length) params.set("projects", projects.join(","));
+  const res = await fetch(`${DAEMON_HTTP}/api/tracker/search?${params}`);
   return (await res.json()).tickets;
 }
 

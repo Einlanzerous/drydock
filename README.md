@@ -223,6 +223,21 @@ cwd mapping — map it with `DRYDOCK_REPO_PATHS="myproj=~/work/myproj"`. Status:
 implemented but not yet exercised against a live Jira instance; the
 verification checklist is in [CLAUDE.md](CLAUDE.md).
 
+**Scope the pull (DRY-30).** Unscoped, "all open tickets" against a corporate
+tracker is the whole instance. Two safeguards, both applied in the upstream
+query (JQL / status params) — the tickets are never pulled, not pulled-then-hidden:
+
+```bash
+DRYDOCK_TRACKER_PROJECTS=SRE,SREREV,SREDESK    # default project scope for list + search
+```
+
+and **backlog-status tickets are excluded from the pull by default**. The
+sidebar renders the scope as chips: host-default keys are fixed, extra project
+keys can be added/removed per browser, and a `backlog` toggle opts the backlog
+bucket back in — both persist per daemon host, alongside the layout. Leaving
+`DRYDOCK_TRACKER_PROJECTS` unset keeps the old pull-everything behavior, fine
+at fixture/home scale (the 2000-ticket backstop still applies either way).
+
 Tokens never reach the browser — the shell only ever calls the daemon's
 `/api/tracker/*`. Credentials live in `.env` (gitignored), never in the repo.
 
