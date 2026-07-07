@@ -30,6 +30,12 @@ export interface JiraConfig {
   email?: string;
   /** Cloud API token (with email) or DC personal access token (alone). */
   token: string;
+  /**
+   * Repo names with an explicit DRYDOCK_REPO_PATHS override (DRY-31), used to
+   * pick among multiple components on one ticket. Injected (not read from
+   * CONFIG) so the provider stays constructible in isolation.
+   */
+  repoOverrides?: string[];
 }
 
 // Subset of a Jira issue we consume (fields= keeps responses to exactly this).
@@ -42,11 +48,12 @@ interface JiraIssue {
     issuetype?: { name?: string };
     status?: { name?: string; statusCategory?: { key?: string } };
     project?: { key?: string; name?: string };
+    components?: { name?: string }[];
     assignee?: { accountId?: string; name?: string; displayName?: string } | null;
   };
 }
 
-const FIELDS = "summary,status,issuetype,labels,assignee,project";
+const FIELDS = "summary,status,issuetype,labels,assignee,project,components";
 
 // Same backstop as the Switchyard provider: the sidebar's unbounded list never
 // pulls more than this many issues out of a huge corporate Jira.
@@ -81,6 +88,15 @@ function jqlQuote(s: string): string {
   return `"${s.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
 }
 
+/**
+ * Component name → repo slug (DRY-31): lowercase, whitespace runs → single
+ * dash. This is the rule DRYDOCK_REPO_PATHS keys must follow — "My Service"
+ * becomes `my-service` — documented in .env.example.
+ */
+function componentSlug(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, "-");
+}
+
 export class JiraProvider implements TrackerProvider {
   readonly id = "jira";
   readonly name = "Jira";
@@ -88,6 +104,7 @@ export class JiraProvider implements TrackerProvider {
 
   private readonly baseUrl: string;
   private readonly auth: string;
+  private readonly repoOverrides: Set<string>;
   /** Resolved on first search: true = Cloud (`/search/jql`), false = DC (`/search`). */
   private cloudSearch: boolean | undefined;
 
@@ -96,6 +113,23 @@ export class JiraProvider implements TrackerProvider {
     this.auth = cfg.email
       ? `Basic ${Buffer.from(`${cfg.email}:${cfg.token}`).toString("base64")}`
       : `Bearer ${cfg.token}`;
+    this.repoOverrides = new Set(cfg.repoOverrides ?? []);
+  }
+
+  /**
+   * Ticket → repo bucket (DRY-31). A corporate Jira project is a TEAM (SRE),
+   * not a service — the component names the service/repo. Component slug wins;
+   * project key (lowercased) is the fallback for component-less tickets, which
+   * is also the pre-DRY-31 behavior. Multi-component tickets prefer a
+   * component with a configured DRYDOCK_REPO_PATHS override — the one the host
+   * demonstrably knows — else the first listed.
+   */
+  private repoOf(i: JiraIssue): string {
+    const slugs = (i.fields.components ?? [])
+      .map((c) => (c.name ? componentSlug(c.name) : undefined))
+      .filter((s): s is string => !!s);
+    const preferred = slugs.find((s) => this.repoOverrides.has(s));
+    return preferred ?? slugs[0] ?? (i.fields.project?.key ?? i.key.split("-")[0]).toLowerCase();
   }
 
   private async req(path: string, init?: RequestInit): Promise<any> {
@@ -119,9 +153,10 @@ export class JiraProvider implements TrackerProvider {
       key: i.key,
       title: f.summary,
       status: { category, label: f.status?.name ?? category },
-      // Jira knows nothing about repos; the project key is the grouping bucket,
-      // and repos.ts maps it to a real path (DRYDOCK_REPO_PATHS) like any other.
-      repo: (f.project?.key ?? i.key.split("-")[0]).toLowerCase(),
+      // Component (or project-key fallback) is the grouping bucket; repos.ts
+      // maps it to a real path (DRYDOCK_REPOS_ROOT / DRYDOCK_REPO_PATHS) like
+      // any other repo name. See repoOf (DRY-31).
+      repo: this.repoOf(i),
       type: f.issuetype?.name,
       tag: f.labels?.[0],
       assignee: f.assignee

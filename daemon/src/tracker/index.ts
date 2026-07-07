@@ -34,7 +34,14 @@ export function createTracker(): TrackerProvider {
       );
       return new FixtureProvider();
     }
-    return new JiraProvider({ baseUrl: url, email, token });
+    return new JiraProvider({
+      baseUrl: url,
+      email,
+      token,
+      // For multi-component tickets: prefer the component this host has an
+      // explicit repo path for (DRY-31).
+      repoOverrides: Object.keys(CONFIG.repos.overrides),
+    });
   }
 
   return new FixtureProvider();
