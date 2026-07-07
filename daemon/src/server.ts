@@ -169,11 +169,27 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, trackerInfo(tracker));
     }
 
+    // Project scope for list/search (DRY-30): an explicit `projects=` param
+    // (comma-separated keys; UI chips) wins, otherwise the host default
+    // (DRYDOCK_TRACKER_PROJECTS). Only when both are empty is the pull
+    // unscoped — acceptable at fixture/home scale, ruinous on a corporate
+    // tracker, hence the env default.
+    const scopedProjects = (): string[] | undefined => {
+      const raw = url.searchParams.get("projects");
+      const list = (raw !== null ? raw.split(",") : CONFIG.tracker.projects)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      return list.length ? list : undefined;
+    };
+
     if (pathname === "/api/tracker/tickets" && req.method === "GET") {
       try {
         const tickets = await tracker.listTickets({
           project: url.searchParams.get("project") ?? undefined,
+          projects: scopedProjects(),
           open: url.searchParams.get("open") === "true",
+          // Backlog stays out of the pull unless asked for (DRY-30).
+          includeBacklog: url.searchParams.get("backlog") === "true",
           text: url.searchParams.get("text") ?? undefined,
         });
         return send(res, 200, { tickets });
@@ -184,7 +200,10 @@ const server = http.createServer(async (req, res) => {
 
     if (pathname === "/api/tracker/search" && req.method === "GET") {
       try {
-        const tickets = await tracker.searchTickets(url.searchParams.get("q") ?? "");
+        const tickets = await tracker.searchTickets(
+          url.searchParams.get("q") ?? "",
+          scopedProjects(),
+        );
         return send(res, 200, { tickets });
       } catch (err) {
         return send(res, 502, { error: `tracker: ${String(err)}` });

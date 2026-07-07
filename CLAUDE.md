@@ -67,21 +67,32 @@ Checklist, using the second-instance pattern above with the provider's env:
 DRYDOCK_PORT=4399 DRYDOCK_TRACKER=jira \
   DRYDOCK_JIRA_URL=https://yourco.atlassian.net \
   DRYDOCK_JIRA_EMAIL=you@yourco.com DRYDOCK_JIRA_TOKEN=... \
+  DRYDOCK_TRACKER_PROJECTS=SRE,SREREV,SREDESK \
   node --import tsx src/index.ts
 
 # Jira Server/DC: personal access token ALONE (Bearer) — no email
 ```
 
-1. `curl -s localhost:4399/api/tracker/info` — provider id/name/capabilities.
-2. `curl -s "localhost:4399/api/tracker/tickets?open=1"` — the sidebar query;
-   exercises search pagination (Cloud `/search/jql` + nextPageToken vs DC
-   `/search` + startAt — the probe/fallback and every other Cloud/DC divergence
-   is documented in `daemon/src/tracker/jira.ts`'s comments; read them before
-   debugging).
-3. `curl -s "localhost:4399/api/tracker/search?q=<text>"` — palette query.
-4. `curl -s "localhost:4399/api/tracker/tickets?project=<KEY>&open=1"` — JQL
-   project clause.
-5. End-to-end: point a browser at the dev shell, switch it to the throwaway
+Always set `DRYDOCK_TRACKER_PROJECTS` against a corporate tracker (DRY-30) —
+unscoped, the sidebar query pulls every open ticket in the instance. Note the
+boolean params are literal `true`, not `1`.
+
+1. `curl -s localhost:4399/api/tracker/info` — provider id/name/capabilities +
+   the configured default `projects`.
+2. `curl -s "localhost:4399/api/tracker/tickets?open=true"` — the sidebar
+   query: scoped to the default projects, backlog excluded; exercises search
+   pagination (Cloud `/search/jql` + nextPageToken vs DC `/search` + startAt —
+   the probe/fallback and every other Cloud/DC divergence is documented in
+   `daemon/src/tracker/jira.ts`'s comments; read them before debugging).
+3. `curl -s "localhost:4399/api/tracker/tickets?open=true&backlog=true"` — now
+   backlog-bucket tickets appear too (the sidebar's `backlog` toggle).
+4. `curl -s "localhost:4399/api/tracker/tickets?open=true&projects=SRE,FOO"` —
+   explicit scope overrides the env default (the sidebar's added chips).
+5. `curl -s "localhost:4399/api/tracker/search?q=<text>"` — palette/search
+   query; project-scoped, but spans all statuses.
+6. `curl -s "localhost:4399/api/tracker/tickets?project=<KEY>&open=true"` —
+   single-project JQL clause.
+7. End-to-end: point a browser at the dev shell, switch it to the throwaway
    daemon port, open a ticket, **Send to agent** — verifies repo→cwd resolution
    (`DRYDOCK_REPOS_ROOT` / `DRYDOCK_REPO_PATHS`; Jira "repo" = lowercased
    project key) and the SessionStart context injection.

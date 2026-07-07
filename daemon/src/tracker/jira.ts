@@ -137,7 +137,16 @@ export class JiraProvider implements TrackerProvider {
   private buildJql(q: TicketQuery): string {
     const clauses: string[] = [];
     if (q.project) clauses.push(`project = ${jqlQuote(q.project)}`);
-    if (q.open) clauses.push(`statusCategory != Done`);
+    if (q.projects?.length) clauses.push(`project in (${q.projects.map(jqlQuote).join(", ")})`);
+    if (q.open) {
+      // Backlog-excluded is the default (DRY-30): only the "In Progress"
+      // statusCategory (key `indeterminate` — the middle bucket every workflow
+      // has). `!= Done` would also pull the "To Do" category, which on a
+      // corporate Jira is the mountain of backlog this scoping exists to
+      // avoid. Trade-off: statuses that *name-map* to planning/blocked but sit
+      // in "To Do" are hidden too — that's what the includeBacklog toggle is for.
+      clauses.push(q.includeBacklog ? `statusCategory != Done` : `statusCategory = "In Progress"`);
+    }
     if (q.text) clauses.push(`text ~ ${jqlQuote(q.text)}`);
     return `${clauses.join(" AND ")}${clauses.length ? " " : ""}ORDER BY updated DESC`;
   }
@@ -212,8 +221,10 @@ export class JiraProvider implements TrackerProvider {
     return out;
   }
 
-  async searchTickets(text: string): Promise<Ticket[]> {
-    return this.listTickets({ text, limit: 50 });
+  async searchTickets(text: string, projects?: string[]): Promise<Ticket[]> {
+    // Search spans all statuses (incl. backlog/done) — you're looking for a
+    // specific ticket — but stays inside the project scope (DRY-30).
+    return this.listTickets({ text, projects, limit: 50 });
   }
 
   async getTicket(key: string): Promise<TicketDetail> {

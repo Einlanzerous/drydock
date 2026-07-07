@@ -18,6 +18,51 @@ const wm = useWindowManager({ persistKey: DAEMON_HTTP });
 
 const tickets = ref<Ticket[]>([]);
 const providerName = ref("Switchyard");
+
+// Tracker pull scope (DRY-30). Host defaults come from /api/tracker/info
+// (DRYDOCK_TRACKER_PROJECTS — fixed chips); user-added keys and the backlog
+// toggle are per-browser, persisted per daemon host like the layout. The
+// effective list rides on every tickets fetch so the daemon only pulls what's
+// scoped — against a corporate tracker "everything" is not an option.
+const SCOPE_KEY = `drydock:tracker-scope:${DAEMON_HTTP}`;
+const scopeProjects = ref<string[]>([]);
+const userProjects = ref<string[]>([]);
+const showBacklog = ref(false);
+
+function loadScope(): void {
+  try {
+    const raw = localStorage.getItem(SCOPE_KEY);
+    if (!raw) return;
+    const s = JSON.parse(raw);
+    if (Array.isArray(s.projects)) userProjects.value = s.projects.filter((p: unknown) => typeof p === "string");
+    showBacklog.value = !!s.backlog;
+  } catch {
+    /* corrupt scope state → defaults */
+  }
+}
+function saveScope(): void {
+  localStorage.setItem(
+    SCOPE_KEY,
+    JSON.stringify({ projects: userProjects.value, backlog: showBacklog.value }),
+  );
+}
+
+function addScopeProject(key: string): void {
+  if (scopeProjects.value.includes(key) || userProjects.value.includes(key)) return;
+  userProjects.value = [...userProjects.value, key];
+  saveScope();
+  void loadTickets();
+}
+function removeScopeProject(key: string): void {
+  userProjects.value = userProjects.value.filter((k) => k !== key);
+  saveScope();
+  void loadTickets();
+}
+function toggleBacklog(show: boolean): void {
+  showBacklog.value = show;
+  saveScope();
+  void loadTickets();
+}
 const sidebarOpen = ref(true);
 const quickOpen = ref(false);
 const selectedTicket = ref<Ticket | null>(null);
@@ -47,7 +92,10 @@ const refreshingTickets = ref(false);
 async function loadTickets() {
   refreshingTickets.value = true;
   try {
-    tickets.value = await listTickets(true);
+    tickets.value = await listTickets(true, {
+      projects: [...scopeProjects.value, ...userProjects.value],
+      backlog: showBacklog.value,
+    });
   } catch {
     /* keep last-good list */
   } finally {
@@ -371,9 +419,11 @@ function onKey(e: KeyboardEvent) {
 }
 
 onMounted(async () => {
+  loadScope();
   try {
     const info = await getTrackerInfo();
     providerName.value = info.name;
+    scopeProjects.value = info.projects ?? [];
   } catch {
     /* provider name stays default if the tracker info call is unreachable */
   }
@@ -483,8 +533,14 @@ onBeforeUnmount(() => {
         :name="providerName"
         :tickets="tickets"
         :refreshing="refreshingTickets"
+        :scope-projects="scopeProjects"
+        :user-projects="userProjects"
+        :show-backlog="showBacklog"
         @launch="openTicket"
         @refresh="loadTickets"
+        @add-project="addScopeProject"
+        @remove-project="removeScopeProject"
+        @toggle-backlog="toggleBacklog"
       />
 
       <div ref="deskEl" class="desk">

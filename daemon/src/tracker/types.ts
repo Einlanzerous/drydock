@@ -54,8 +54,22 @@ export interface Project {
 
 export interface TicketQuery {
   project?: string;
+  /**
+   * Scope to these project keys (DRY-30). Unset/empty = no project filter —
+   * which against a corporate tracker means "everything"; the server layer
+   * defaults this from DRYDOCK_TRACKER_PROJECTS so an unscoped pull only
+   * happens when the host explicitly configured none.
+   */
+  projects?: string[];
   /** Only non-closed tickets (the default for the sidebar). */
   open?: boolean;
+  /**
+   * Include backlog-bucket tickets in an `open` query. OFF by default
+   * (DRY-30): a big tracker's backlog dwarfs the actionable set, so providers
+   * must exclude it in the upstream query (JQL / status param), not
+   * post-filter what was already pulled.
+   */
+  includeBacklog?: boolean;
   text?: string;
   limit?: number;
 }
@@ -77,7 +91,7 @@ export interface TrackerProvider {
 
   listProjects(): Promise<Project[]>;
   listTickets(q: TicketQuery): Promise<Ticket[]>; // sidebar (grouped by repo in the shell)
-  searchTickets(text: string): Promise<Ticket[]>; // Ctrl+K palette
+  searchTickets(text: string, projects?: string[]): Promise<Ticket[]>; // Ctrl+K palette / search endpoint
   getTicket(key: string): Promise<TicketDetail>; // pulled into the spawned agent
 
   comment?(key: string, body: string): Promise<void>;
@@ -89,4 +103,9 @@ export interface TrackerInfo {
   id: string;
   name: string;
   capabilities: TrackerCapabilities;
+  /**
+   * Host-configured default project scope (DRYDOCK_TRACKER_PROJECTS, DRY-30).
+   * The sidebar renders these as fixed chips; empty = unscoped.
+   */
+  projects: string[];
 }

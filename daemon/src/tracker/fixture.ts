@@ -66,9 +66,18 @@ export class FixtureProvider implements TrackerProvider {
     return repos.map((r) => ({ key: r.toUpperCase(), name: r, repo: r }));
   }
 
+  // A fixture "project" matches by repo name or key prefix, so both `ARGY`
+  // and `argosy` scope correctly (live trackers use real project keys).
+  private inProject(f: Fixture, p: string): boolean {
+    return f.repo === p.toLowerCase() || f.key.startsWith(p.toUpperCase());
+  }
+
   async listTickets(q: TicketQuery): Promise<Ticket[]> {
-    let out = FIXTURES.filter((f) => (q.open ? f.category !== "done" : true));
-    if (q.project) out = out.filter((f) => f.repo === q.project || f.key.startsWith(q.project!));
+    let out = FIXTURES.filter((f) =>
+      q.open ? f.category !== "done" && (q.includeBacklog || f.category !== "backlog") : true,
+    );
+    if (q.project) out = out.filter((f) => this.inProject(f, q.project!));
+    if (q.projects?.length) out = out.filter((f) => q.projects!.some((p) => this.inProject(f, p)));
     if (q.text) {
       const t = q.text.toLowerCase();
       out = out.filter((f) => f.key.toLowerCase().includes(t) || f.title.toLowerCase().includes(t));
@@ -76,15 +85,20 @@ export class FixtureProvider implements TrackerProvider {
     return out.map(toTicket);
   }
 
-  async searchTickets(text: string): Promise<Ticket[]> {
+  async searchTickets(text: string, projects?: string[]): Promise<Ticket[]> {
     const t = text.trim().toLowerCase();
-    if (!t) return FIXTURES.map(toTicket);
-    return FIXTURES.filter(
-      (f) =>
-        f.key.toLowerCase().includes(t) ||
-        f.title.toLowerCase().includes(t) ||
-        f.repo.includes(t),
-    ).map(toTicket);
+    const pool = projects?.length
+      ? FIXTURES.filter((f) => projects.some((p) => this.inProject(f, p)))
+      : FIXTURES;
+    if (!t) return pool.map(toTicket);
+    return pool
+      .filter(
+        (f) =>
+          f.key.toLowerCase().includes(t) ||
+          f.title.toLowerCase().includes(t) ||
+          f.repo.includes(t),
+      )
+      .map(toTicket);
   }
 
   async getTicket(key: string): Promise<TicketDetail> {

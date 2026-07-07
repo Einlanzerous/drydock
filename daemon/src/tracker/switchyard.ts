@@ -32,7 +32,10 @@ interface SwitchyardTicket {
 
 // The list endpoint has no `open` flag; "open" = every non-closed category.
 // (Verified against the live API: `open=true` is ignored, a status list filters.)
-const OPEN_CATEGORIES = "backlog,planning,in_progress,blocked";
+// Backlog is requested only when the query opts in (DRY-30) — excluded at the
+// API level so it's never pulled, not hidden client-side.
+const OPEN_CATEGORIES = "planning,in_progress,blocked";
+const OPEN_CATEGORIES_WITH_BACKLOG = `backlog,${OPEN_CATEGORIES}`;
 
 // The API caps a page at ~100; an unbounded list (the sidebar) follows the
 // cursor until exhausted, but never past this many tickets — a backstop so a
@@ -129,6 +132,15 @@ export class SwitchyardProvider implements TrackerProvider {
   }
 
   async listTickets(q: TicketQuery): Promise<Ticket[]> {
+    // The API filters by a single `project` param, so a multi-project scope
+    // (DRY-30) fans out one query per key and concatenates — projects are
+    // disjoint, so no dedupe needed.
+    if (q.projects?.length) {
+      const per = await Promise.all(
+        q.projects.map((p) => this.listTickets({ ...q, projects: undefined, project: p })),
+      );
+      return per.flat();
+    }
     // No explicit limit (the sidebar) means "all open tickets" — a single page
     // caps at ~100, so follow `next_cursor` until exhausted (bounded by
     // MAX_TICKETS). A caller that passes a limit (e.g. the palette) gets one page.
@@ -139,7 +151,9 @@ export class SwitchyardProvider implements TrackerProvider {
     do {
       const params = new URLSearchParams();
       if (q.project) params.set("project", q.project);
-      if (q.open) params.set("status", OPEN_CATEGORIES);
+      if (q.open) {
+        params.set("status", q.includeBacklog ? OPEN_CATEGORIES_WITH_BACKLOG : OPEN_CATEGORIES);
+      }
       if (q.text) params.set("text", q.text);
       params.set("limit", String(pageSize));
       if (cursor) params.set("cursor", cursor);
@@ -150,8 +164,10 @@ export class SwitchyardProvider implements TrackerProvider {
     return out;
   }
 
-  async searchTickets(text: string): Promise<Ticket[]> {
-    return this.listTickets({ text, limit: 50 });
+  async searchTickets(text: string, projects?: string[]): Promise<Ticket[]> {
+    // Search spans all statuses (you're looking for a specific ticket) but
+    // stays inside the project scope (DRY-30).
+    return this.listTickets({ text, projects, limit: 50 });
   }
 
   async getTicket(key: string): Promise<TicketDetail> {
