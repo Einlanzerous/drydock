@@ -119,7 +119,7 @@ onBeforeUnmount(onSplitUp);
     <div ref="panesEl" class="panes">
       <!-- Drawer content overlays the top of the panes; doesn't resize the PTYs -->
       <transition name="drawer">
-        <div v-if="win.ticket && drawerOpen" class="drawer ddscroll">
+        <div v-if="win.ticket && drawerOpen" class="drawer">
           <p v-if="loading" class="muted">Loading ticket…</p>
           <p v-else-if="loadError" class="muted err">Couldn't load ticket: {{ loadError }}</p>
           <template v-else-if="detail">

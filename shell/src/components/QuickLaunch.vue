@@ -70,7 +70,7 @@ function onKey(e: KeyboardEvent) {
         />
         <span class="esc">esc</span>
       </div>
-      <div class="results ddscroll">
+      <div class="results">
         <div
           v-for="(t, i) in matches"
           :key="t.key"
