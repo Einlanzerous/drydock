@@ -163,10 +163,11 @@ onBeforeUnmount(onSplitUp);
             <button class="scollapse" title="Collapse shell" @click="toggleShell">▾</button>
           </div>
           <div class="sbody">
+            <!-- No :active — the agent and shell panes mount together, and only
+                 the agent may claim keyboard focus on mount (DRY-40). -->
             <TerminalPane
               v-if="shellSession"
               :session="shellSession"
-              :active="active"
               @open-file="(id, p) => emit('open-file', id, p)"
             />
             <p v-else class="muted starting">starting shell…</p>

@@ -224,6 +224,13 @@ function minimizeWindow(id: string) {
 }
 
 // --- spawning ---
+// DRY-40: a clicked spawn button keeps keyboard focus, so an Enter meant for
+// the new pane's CLI (e.g. its trust prompt) re-clicked the button and spawned
+// a duplicate. Blur on click; the new pane's terminal takes focus on mount.
+function blurSpawn(e: Event) {
+  (e.currentTarget as HTMLElement | null)?.blur();
+}
+
 async function spawnFresh(kind: "claude" | "shell") {
   wm.setLayout("float");
   try {
@@ -492,8 +499,14 @@ onBeforeUnmount(() => {
         </button>
         <!-- Plain shells spawn from the palette (⇧↵) — a header button here
              duplicated the "New session (Ctrl K)" pill (DRY-39). -->
-        <button class="ghost" title="Bare claude agent" @click="spawnFresh('claude')">+ claude</button>
-        <button class="ghost" title="Ticket drawer + agent + zsh in one window" @click="spawnWorkspace()">
+        <button class="ghost" title="Bare claude agent" @click="blurSpawn($event), spawnFresh('claude')">
+          + claude
+        </button>
+        <button
+          class="ghost"
+          title="Ticket drawer + agent + zsh in one window"
+          @click="blurSpawn($event), spawnWorkspace()"
+        >
           + workspace
         </button>
       </div>

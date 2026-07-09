@@ -167,6 +167,12 @@ onMounted(async () => {
   term.value = t;
   fit.value = f;
 
+  // DRY-40: xterm never takes keyboard focus on its own, so after a header
+  // spawn the clicked button kept focus and the user's Enter (aimed at the new
+  // CLI's trust prompt) re-clicked it, spawning a duplicate. A pane that mounts
+  // as the focused window claims the keyboard immediately.
+  if (props.active) t.focus();
+
   resizeObserver = new ResizeObserver(() => doFit());
   resizeObserver.observe(termEl.value!);
 
