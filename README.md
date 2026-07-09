@@ -132,8 +132,9 @@ no per-repo setup.
   (DRY-20) — read the (markdown-rendered) description, adjust
   cwd/worktree/prompt, then **Spawn Agent**.
 - **`Ctrl K` quick-launch.** Fuzzy-search tickets by key/title/repo; `↵` opens
-  the selection's ticket panel, or a blank `claude` session when nothing
-  matches.
+  the selection's ticket panel (or a blank `claude` session when nothing
+  matches), `⇧↵` spawns a plain shell — the palette is the one entry point for
+  blank sessions (DRY-39).
 - **Markdown doc viewer (DRY-35).** Ctrl/Cmd-click a `*.md` path in any
   terminal pane and it opens rendered (sanitized `marked` + DOMPurify) in a
   floating window; relative links inside a doc navigate in place, and a refresh
