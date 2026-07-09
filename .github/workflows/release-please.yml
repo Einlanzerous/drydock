@@ -1,0 +1,23 @@
+# Automated releases (DRY-38): release-please maintains a rolling release PR
+# from Conventional Commits on main; merging it bumps package.json + CHANGELOG
+# and tags a GitHub release. Commits that don't follow Conventional Commits
+# (the old "DRY-NN: ..." style) are ignored for version math — see CLAUDE.md
+# conventions.
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

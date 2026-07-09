@@ -124,6 +124,12 @@ restart it to test things.
 
 - Branch `dry-NN-short-slug` off `main`; PR to `main` on
   `Einlanzerous/drydock` (public).
+- **Conventional Commits** (DRY-38): release-please computes versions from
+  them, so commit subjects must be `feat:` / `fix:` / `docs:` / `chore:` /
+  `refactor:` (optionally scoped: `feat(daemon): …`) with the ticket in the
+  subject tail — e.g. `feat(daemon): resolve repo from Jira component (DRY-31)`.
+  Breaking change → `feat!:` or a `BREAKING CHANGE:` footer. Non-CC subjects
+  are invisible to release math.
 - Tickets live in the DRY project (Switchyard at home; fixture data otherwise).
   When the tracker is reachable, attach the PR URL to its DRY ticket on open —
   the poller auto-closes the ticket on merge, so don't close it by hand.
