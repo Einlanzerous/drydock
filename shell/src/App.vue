@@ -89,17 +89,25 @@ const refreshingTickets = ref(false);
 // Replaces the data only — TrackerSidebar keeps its own search/filter/expand
 // state, so a refresh doesn't disturb what the user is looking at. A tracker
 // hiccup keeps the last-good list rather than blanking the sidebar.
+// Epoch guard: scope changes (backlog toggle, chips) refetch immediately, so a
+// slow older request can resolve AFTER a newer one — without the guard it
+// overwrites the fresh list and the sidebar looks "stuck" on the old scope.
+// Only the latest in-flight load may commit its result or clear the spinner
+// (the sidebar disables the scope controls while refreshing is true).
+let loadEpoch = 0;
 async function loadTickets() {
+  const epoch = ++loadEpoch;
   refreshingTickets.value = true;
   try {
-    tickets.value = await listTickets(true, {
+    const list = await listTickets(true, {
       projects: [...scopeProjects.value, ...userProjects.value],
       backlog: showBacklog.value,
     });
+    if (epoch === loadEpoch) tickets.value = list;
   } catch {
     /* keep last-good list */
   } finally {
-    refreshingTickets.value = false;
+    if (epoch === loadEpoch) refreshingTickets.value = false;
   }
 }
 

@@ -86,7 +86,7 @@ const grab = computed(() => (props.layout === "float" ? "grab" : "default"));
       </button>
     </div>
 
-    <div class="body ddscroll">
+    <div class="body">
       <slot></slot>
     </div>
 

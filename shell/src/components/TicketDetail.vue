@@ -215,7 +215,7 @@ async function resetWorktree(): Promise<void> {
       <span class="tag">{{ ticket.tag }}</span>
     </div>
 
-    <div class="desc ddscroll">
+    <div class="desc">
       <p v-if="loading" class="muted">Loading ticket…</p>
       <p v-else-if="loadError" class="muted err">Couldn't load description: {{ loadError }}</p>
       <pre v-else>{{ detail?.description }}</pre>

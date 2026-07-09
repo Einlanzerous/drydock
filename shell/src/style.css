@@ -106,21 +106,30 @@ body {
   }
 }
 
-/* Slim scrollbars on scrollable surfaces */
-.ddscroll::-webkit-scrollbar {
+/* Slim dark scrollbars EVERYWHERE (DRY-33) — a global default, not an opt-in
+   class, so late-added surfaces (and xterm's injected .xterm-viewport) can't
+   regress to bright browser chrome. Standard properties carry Firefox and
+   modern Chromium (which prefers them over ::-webkit-scrollbar when set); the
+   ::-webkit-* rules cover Safari/older Chromium. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2b333d transparent;
+}
+*::-webkit-scrollbar {
   width: 9px;
   height: 9px;
 }
-.ddscroll::-webkit-scrollbar-thumb {
+*::-webkit-scrollbar-thumb {
   background: #2b333d;
   border-radius: 6px;
   border: 2px solid transparent;
   background-clip: padding-box;
 }
-.ddscroll::-webkit-scrollbar-thumb:hover {
+*::-webkit-scrollbar-thumb:hover {
   background: #3a444f;
   background-clip: padding-box;
 }
-.ddscroll::-webkit-scrollbar-track {
+*::-webkit-scrollbar-track,
+*::-webkit-scrollbar-corner {
   background: transparent;
 }
