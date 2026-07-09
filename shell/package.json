@@ -12,6 +12,8 @@
   "dependencies": {
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
+    "dompurify": "^3.4.11",
+    "marked": "^18.0.5",
     "vue": "^3.5.13"
   },
   "devDependencies": {

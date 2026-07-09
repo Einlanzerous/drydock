@@ -1,8 +1,10 @@
+import * as fs from "node:fs";
 import * as http from "node:http";
+import * as path from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import { CONFIG } from "./config.js";
 import { SessionManager } from "./manager.js";
-import { resolveRepoCwd } from "./repos.js";
+import { expandHome, resolveRepoCwd } from "./repos.js";
 import {
   ensureWorktree,
   isGitWorkTree,
@@ -160,6 +162,40 @@ const server = http.createServer(async (req, res) => {
     if (killMatch && req.method === "POST") {
       manager.remove(killMatch[1]);
       return send(res, 200, { ok: true });
+    }
+
+    // --- Session-relative file read (DRY-35 markdown viewer) ---
+    // Resolves ?path= against the SESSION's cwd (its worktree when isolated) —
+    // the browser only knows the token it clicked in the terminal; the daemon
+    // knows where that session actually runs. The daemon is UNAUTHENTICATED,
+    // so this must not become an arbitrary-file-read primitive: realpath both
+    // ends (no symlink escapes), confine to the session's cwd subtree, allow
+    // only renderable text extensions, cap the size. Revisit with daemon auth.
+    const fileMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/file$/);
+    if (fileMatch && req.method === "GET") {
+      const session = manager.get(fileMatch[1]);
+      if (!session) return send(res, 404, { error: `unknown session ${fileMatch[1]}` });
+      const rel = url.searchParams.get("path") ?? "";
+      if (!rel) return send(res, 400, { error: "path is required" });
+      if (!/\.(md|markdown|txt)$/i.test(rel)) {
+        return send(res, 403, { error: "only .md/.markdown/.txt files can be viewed" });
+      }
+      try {
+        const base = await fs.promises.realpath(expandHome(session.cwd));
+        // realpath also fails on nonexistence, so a traversal probe and a
+        // missing file are indistinguishable to the caller — intentionally.
+        const real = await fs.promises.realpath(path.resolve(base, expandHome(rel)));
+        if (real !== base && !real.startsWith(base + path.sep)) {
+          return send(res, 403, { error: "path escapes the session's working directory" });
+        }
+        const st = await fs.promises.stat(real);
+        if (!st.isFile()) return send(res, 404, { error: "not a file" });
+        if (st.size > 1_048_576) return send(res, 413, { error: "file exceeds the 1 MiB view cap" });
+        const content = await fs.promises.readFile(real, "utf8");
+        return send(res, 200, { path: real, content });
+      } catch {
+        return send(res, 404, { error: `no readable file at ${rel}` });
+      }
     }
 
     // --- Tracker API (DRY-10) ---
