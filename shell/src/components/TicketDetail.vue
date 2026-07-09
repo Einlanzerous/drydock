@@ -8,14 +8,17 @@ import {
   type TicketDetail,
 } from "../lib/tracker.js";
 import { removeWorktree, resolveRepoCwd } from "../lib/daemon.js";
+import { renderMarkdown } from "../lib/markdown.js";
 
 // Ticket detail panel (DRY-9 ticket-spawn). Opened when a ticket is picked from
 // the sidebar or Ctrl+K palette: shows the full description for *you* to read,
-// then "Send to agent" spawns claude in the chosen working dir. The ticket body
-// is delivered to the agent as context via the SessionStart hook (not typed in),
-// so the editable prompt here is just your instruction. The working dir is
-// pre-resolved from the ticket's repo and editable — projects with no repo
-// (e.g. an ideas board) resolve to $HOME, which you can override here.
+// then "Spawn Agent" opens the ticket as a composite WORKSPACE (DRY-36 made
+// that the single spawn path — agent + ticket drawer + co-located zsh, drawer
+// and shell starting minimized). The ticket body is delivered to the agent as
+// context via the SessionStart hook (not typed in), so the editable prompt
+// here is just your instruction. The working dir is pre-resolved from the
+// ticket's repo and editable — projects with no repo (e.g. an ideas board)
+// resolve to $HOME, which you can override here.
 // DRY-20: this is a floating, draggable window rather than a modal — it stacks
 // against the terminals via `z` (owned by the parent's window manager) and no
 // longer dismisses on outside click, so you can work other windows with it open.
@@ -32,10 +35,7 @@ type SpawnPayload = {
   auto: boolean;
 };
 const emit = defineEmits<{
-  (e: "send", payload: SpawnPayload): void;
-  // Open the ticket as a composite workspace window (DRY-21): agent + drawer +
-  // co-located zsh, instead of a plain agent-only terminal.
-  (e: "workspace", payload: SpawnPayload): void;
+  (e: "send", payload: SpawnPayload): void; // App opens a workspace (DRY-36)
   (e: "focus"): void;
   (e: "close"): void;
 }>();
@@ -170,11 +170,6 @@ function send(): void {
   emit("send", payload());
 }
 
-function openWorkspace(): void {
-  if (!prompt.value.trim() || !cwd.value.trim()) return;
-  emit("workspace", payload());
-}
-
 // Prune the existing worktree (DRY-15 "reset"): removes it + starts the branch
 // fresh on the next spawn. The agent's branch is kept; only the checkout is
 // dropped. Re-previews so the reuse badge clears.
@@ -218,7 +213,8 @@ async function resetWorktree(): Promise<void> {
     <div class="desc">
       <p v-if="loading" class="muted">Loading ticket…</p>
       <p v-else-if="loadError" class="muted err">Couldn't load description: {{ loadError }}</p>
-      <pre v-else>{{ detail?.description }}</pre>
+      <!-- Rendered + sanitized markdown (DRY-35); shared .mdbody pipeline. -->
+      <div v-else class="mdbody" v-html="renderMarkdown(detail?.description ?? '')"></div>
     </div>
 
     <label class="plabel">Working directory</label>
@@ -280,14 +276,13 @@ async function resetWorktree(): Promise<void> {
       </label>
       <button class="cancel" @click="emit('close')">Cancel</button>
       <button
-        class="workspace"
-        title="Open a workspace: agent + this ticket in a drawer + a co-located zsh shell"
+        class="send"
+        title="Open a workspace: agent + this ticket in a drawer + a co-located zsh shell (both minimized)"
         :disabled="!prompt.trim() || !cwd.trim()"
-        @click="openWorkspace"
+        @click="send"
       >
-        Workspace
+        Spawn Agent
       </button>
-      <button class="send" :disabled="!prompt.trim() || !cwd.trim()" @click="send">Spawn Agent</button>
     </div>
   </div>
 </template>
@@ -387,15 +382,7 @@ async function resetWorktree(): Promise<void> {
   border-radius: 8px;
   padding: 10px 12px;
 }
-.desc pre {
-  margin: 0;
-  font-family: "JetBrains Mono", monospace;
-  font-size: 12px;
-  line-height: 1.5;
-  color: #aeb8c4;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
+/* Description typography comes from the shared .mdbody rules (style.css, DRY-35). */
 .muted {
   margin: 0;
   font-size: 12.5px;
@@ -567,11 +554,9 @@ async function resetWorktree(): Promise<void> {
   accent-color: #2a6db0;
   cursor: pointer;
 }
-/* One shared box model + explicit height so all three action buttons render at
-   the same size — with box-sizing:border-box the 1px border on .workspace stays
-   inside the 32px, so bordered and borderless buttons line up. */
+/* One shared box model + explicit height so both action buttons render at the
+   same size (DRY-36 collapsed the third, workspace, button into Spawn Agent). */
 .cancel,
-.workspace,
 .send {
   display: inline-flex;
   align-items: center;
@@ -589,15 +574,6 @@ async function resetWorktree(): Promise<void> {
 .cancel {
   background: #1b2531;
   color: #aeb8c4;
-}
-.workspace {
-  background: #16314a;
-  border: 1px solid #2a557d;
-  color: #cfe3f5;
-}
-.workspace:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 .send {
   background: #2a6db0;

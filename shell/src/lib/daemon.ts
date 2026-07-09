@@ -107,3 +107,21 @@ export async function removeWorktree(opts: { repo: string; worktree: string }): 
     throw new Error(body.error ?? "failed to remove worktree");
   }
 }
+
+/**
+ * Read a text/markdown file relative to a session's cwd (DRY-35 doc viewer).
+ * The daemon confines the read to the session's working tree; `path` in the
+ * result is the resolved absolute path (for the viewer's title + relative-link
+ * navigation).
+ */
+export async function sessionFile(
+  id: string,
+  path: string,
+): Promise<{ path: string; content: string }> {
+  const res = await fetch(
+    `${DAEMON_HTTP}/api/sessions/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`,
+  );
+  const body = await res.json();
+  if (!res.ok) throw new Error(body.error ?? "file not readable");
+  return body;
+}

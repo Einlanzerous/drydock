@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, ref, shallowRef } from "vue";
-import { Terminal } from "@xterm/xterm";
+import { Terminal, type ILink } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { attachUrl } from "../lib/daemon.js";
 import type { ClientMessage, ServerMessage, SessionInfo } from "../lib/protocol.js";
@@ -20,7 +20,37 @@ const emit = defineEmits<{
   (e: "attention", id: string, pending: boolean): void;
   (e: "idle", id: string, idle: boolean): void; // agent yielded its turn ("your turn")
   (e: "initial-sent", id: string): void; // seed typed once; parent clears it so re-mounts don't retype
+  (e: "open-file", id: string, path: string): void; // Ctrl/Cmd-clicked a file token (DRY-35 doc viewer)
 }>();
+
+// File-ish tokens ending .md/.markdown become links (DRY-35). Custom provider
+// because xterm's WebLinksAddon only matches URLs. Matches within one buffer
+// line — a long path wrapped across lines loses its tail, acceptable for v1.
+const MD_TOKEN = /(?:~\/|\.{0,2}\/)?[\w@%+=,.-]+(?:\/[\w@%+=,.-]+)*\.(?:md|markdown)\b/g;
+
+function registerMdLinks(t: Terminal): void {
+  t.registerLinkProvider({
+    provideLinks(y, cb) {
+      const line = t.buffer.active.getLine(y - 1);
+      if (!line) return cb(undefined);
+      const text = line.translateToString(true);
+      const links: ILink[] = [];
+      for (const m of text.matchAll(MD_TOKEN)) {
+        links.push({
+          // xterm link ranges are 1-based and end-inclusive.
+          range: { start: { x: m.index + 1, y }, end: { x: m.index + m[0].length, y } },
+          text: m[0],
+          activate: (ev, token) => {
+            // Modifier-gated so plain clicks keep doing selection; the terminal
+            // itself is full of dots-and-slashes text you don't want hijacked.
+            if (ev.ctrlKey || ev.metaKey) emit("open-file", props.session.id, token);
+          },
+        });
+      }
+      cb(links.length ? links : undefined);
+    },
+  });
+}
 
 const termEl = ref<HTMLDivElement | null>(null);
 const term = shallowRef<Terminal | null>(null);
@@ -133,6 +163,7 @@ onMounted(async () => {
   t.loadAddon(f);
   t.open(termEl.value!);
   t.onData((data) => sendWs({ type: "input", data }));
+  registerMdLinks(t);
   term.value = t;
   fit.value = f;
 

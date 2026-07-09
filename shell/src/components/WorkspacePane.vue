@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref, watch } from "vue";
 import TerminalPane from "./TerminalPane.vue";
+import { renderMarkdown } from "../lib/markdown.js";
 import { getTicket, type TicketDetail } from "../lib/tracker.js";
 import type { Win } from "../composables/useWindowManager.js";
 import type { SessionInfo } from "../lib/protocol.js";
@@ -33,6 +34,8 @@ const emit = defineEmits<{
   (e: "initial-sent", id: string): void;
   // Persist workspace UI state back onto the Win (App → wm.updateWin).
   (e: "patch", id: string, patch: Partial<Win>): void;
+  // Ctrl/Cmd-clicked file token in either pane → App's doc viewer (DRY-35).
+  (e: "open-file", id: string, path: string): void;
 }>();
 
 // Local UI state seeded from the persisted Win. These are authoritative for the
@@ -129,7 +132,8 @@ onBeforeUnmount(onSplitUp);
               <span class="mrepo">{{ detail.repo }}</span>
             </div>
             <h3 class="dh">{{ detail.title }}</h3>
-            <pre class="dbody">{{ detail.description }}</pre>
+            <!-- Rendered + sanitized (DRY-35); shared pipeline with the doc viewer. -->
+            <div class="dbody mdbody" v-html="renderMarkdown(detail.description)"></div>
           </template>
         </div>
       </transition>
@@ -144,6 +148,7 @@ onBeforeUnmount(onSplitUp);
           @attention="(id, p) => emit('attention', id, p)"
           @idle="(id, i) => emit('idle', id, i)"
           @initial-sent="(id) => emit('initial-sent', id)"
+          @open-file="(id, p) => emit('open-file', id, p)"
         />
       </div>
 
@@ -158,7 +163,12 @@ onBeforeUnmount(onSplitUp);
             <button class="scollapse" title="Collapse shell" @click="toggleShell">▾</button>
           </div>
           <div class="sbody">
-            <TerminalPane v-if="shellSession" :session="shellSession" :active="active" />
+            <TerminalPane
+              v-if="shellSession"
+              :session="shellSession"
+              :active="active"
+              @open-file="(id, p) => emit('open-file', id, p)"
+            />
             <p v-else class="muted starting">starting shell…</p>
           </div>
         </div>
@@ -277,12 +287,10 @@ onBeforeUnmount(onSplitUp);
 }
 .dbody {
   margin: 0;
-  font-family: "JetBrains Mono", monospace;
-  font-size: 11.5px;
-  line-height: 1.5;
+  font-size: 12px;
   color: #aeb8c4;
-  white-space: pre-wrap;
   word-break: break-word;
+  /* Typography comes from the shared .mdbody rules (style.css, DRY-35). */
 }
 .drawer-enter-active,
 .drawer-leave-active {

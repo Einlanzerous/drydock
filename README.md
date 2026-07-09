@@ -120,16 +120,26 @@ no per-repo setup.
   to a macOS-style **dock** — the daemon owns the PTY, so a hidden pane costs
   nothing; a pending approval keeps the dock dot pulsing so a gated session
   can't get lost.
-- **Composite ticket workspace (DRY-21).** Spawning from a ticket opens one
-  window binding the ticket and two independent PTYs — the agent on top, a
-  co-located `zsh` below — with a pull-down ticket drawer that overlays the
-  panes instead of resizing them. Split ratio and collapse state persist.
+- **Composite ticket workspace (DRY-21).** *The* way a ticket spawns (DRY-36
+  collapsed the old separate agent-window path): one window binding the ticket
+  and two independent PTYs — the agent on top, a co-located `zsh` below — with
+  a pull-down ticket drawer that overlays the panes instead of resizing them.
+  It opens in its most-agent state: drawer closed and shell collapsed, each one
+  click away. Split ratio and collapse state persist.
 - **Live tracker sidebar (DRY-11/17).** Open tickets from the active tracker,
   grouped by repo, with search, project/status/assignee filters, and collapsible
   groups. Picking one opens the ticket detail as a floating, raiseable window
-  (DRY-20) — read the description, adjust cwd/worktree/prompt, then spawn.
-- **`Ctrl K` quick-launch.** Fuzzy-search tickets by key/title/repo; `↵` spawns
-  an agent on the selection, or a blank `claude` session when nothing matches.
+  (DRY-20) — read the (markdown-rendered) description, adjust
+  cwd/worktree/prompt, then **Spawn Agent**.
+- **`Ctrl K` quick-launch.** Fuzzy-search tickets by key/title/repo; `↵` opens
+  the selection's ticket panel, or a blank `claude` session when nothing
+  matches.
+- **Markdown doc viewer (DRY-35).** Ctrl/Cmd-click a `*.md` path in any
+  terminal pane and it opens rendered (sanitized `marked` + DOMPurify) in a
+  floating window; relative links inside a doc navigate in place, and a refresh
+  button re-reads files agents rewrite mid-session. The daemon serves the file
+  confined to that session's working tree (`/api/sessions/:id/file`). Ticket
+  descriptions render through the same pipeline.
 - **In-place approval loop.** A `PreToolUse` gate lights the pane (border turns
   red) and Approve/Deny in the UI pre-empts the CLI's own prompt. Ticket spawns
   default to the **Auto** toggle (DRY-22), starting the agent in hands-off

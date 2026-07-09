@@ -2,6 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
 import TerminalPane from "./components/TerminalPane.vue";
 import WorkspacePane from "./components/WorkspacePane.vue";
+import MarkdownPane from "./components/MarkdownPane.vue";
 import WindowFrame from "./components/WindowFrame.vue";
 import TrackerSidebar from "./components/TrackerSidebar.vue";
 import TicketDetail from "./components/TicketDetail.vue";
@@ -71,6 +72,16 @@ const selectedTicket = ref<Ticket | null>(null);
 // counter so it layers against (and can be raised above) the terminals.
 const ticketZ = ref(0);
 const error = ref<string | null>(null);
+
+// Markdown doc viewer (DRY-35): opened by Ctrl/Cmd-clicking a file token in
+// any terminal pane. Like the ticket detail it's a floating non-window (no
+// daemon session), drawing z from the same counter to stack correctly.
+const doc = ref<{ sessionId: string; path: string } | null>(null);
+const docZ = ref(0);
+function openSessionFile(sessionId: string, path: string) {
+  doc.value = { sessionId, path };
+  docZ.value = wm.allocZ();
+}
 
 // Live per-session state. Daemon poll discovers sessions + gives a status/pending
 // fallback; TerminalPane emits override it instantly over the WebSocket.
@@ -267,8 +278,11 @@ async function spawnWorkspace(
       ticket: opts.ticket?.key,
       repo: basename(agent.cwd),
       shellId: shell.id,
-      drawerOpen: !!opts.ticket, // pre-open the drawer for a ticket-bound workspace
-      shellCollapsed: false,
+      // DRY-36: a ticket spawn opens in its most-agent state — drawer closed
+      // and shell collapsed, each one click away. The bare "+ workspace"
+      // (no ticket) keeps the shell visible; it exists to pair agent + zsh.
+      drawerOpen: false,
+      shellCollapsed: !!opts.ticket,
       shellRatio: 0.2,
       w: 760,
       h: 620,
@@ -294,17 +308,11 @@ function openTicket(t: Ticket) {
   ticketZ.value = wm.allocZ(); // land it on top of the current windows
 }
 
-// Spawn an agent for the reviewed ticket: real repo cwd (daemon resolves the
-// repo name → host path) and the ticket key (so the SessionStart hook injects
-// the body as context). The editable prompt is pre-filled, not auto-submitted.
-async function onSendTicket({
-  ticket,
-  prompt,
-  cwd,
-  worktree,
-  branch,
-  auto,
-}: {
+// "Spawn Agent" from the ticket detail (DRY-36: the single ticket-spawn path):
+// open the composite workspace — agent in the resolved cwd/worktree, ticket
+// bound to the (closed) drawer, shell collapsed. The panel's prompt is
+// pre-filled by TerminalPane, not auto-submitted.
+function onSendTicket(payload: {
   ticket: Ticket;
   prompt: string;
   cwd: string;
@@ -313,49 +321,7 @@ async function onSendTicket({
   auto: boolean;
 }) {
   selectedTicket.value = null;
-  wm.setLayout("float");
-  try {
-    // cwd comes from the panel (resolved from the repo, possibly overridden); an
-    // explicit cwd takes precedence over repo resolution on the daemon. When the
-    // panel opts into isolation the daemon spawns in a per-ticket worktree (DRY-15).
-    const s = await createSession({
-      command: "claude",
-      title: "claude-code",
-      cwd,
-      ticket: ticket.key,
-      worktree,
-      branch,
-      // Auto mode → spawn claude hands-off; the daemon auto-approves its tools.
-      args: auto ? ["--permission-mode", "auto"] : undefined,
-    });
-    ticketById[s.id] = ticket.key;
-    initialInputById[s.id] = prompt;
-    await refresh();
-    wm.bringFront(s.id);
-  } catch (e) {
-    error.value = String(e);
-  }
-}
-
-// "Open workspace" from the ticket detail: spawn the composite workspace
-// instead of a plain agent window, with the ticket bound to the drawer.
-function onOpenWorkspace({
-  ticket,
-  prompt,
-  cwd,
-  worktree,
-  branch,
-  auto,
-}: {
-  ticket: Ticket;
-  prompt: string;
-  cwd: string;
-  worktree: string | false;
-  branch?: string;
-  auto: boolean;
-}) {
-  selectedTicket.value = null;
-  spawnWorkspace({ ticket, prompt, cwd, worktree, branch, auto });
+  void spawnWorkspace(payload);
 }
 
 // Seed consumed once: TerminalPane fires this after typing the pre-filled prompt,
@@ -524,8 +490,8 @@ onBeforeUnmount(() => {
           New session
           <span class="kbd">Ctrl K</span>
         </button>
-        <button class="ghost" @click="spawnFresh('claude')">+ claude</button>
-        <button class="ghost" @click="spawnFresh('shell')">+ shell</button>
+        <button class="ghost" title="Plain shell session" @click="spawnFresh('shell')">+ New Session</button>
+        <button class="ghost" title="Bare claude agent" @click="spawnFresh('claude')">+ claude</button>
         <button class="ghost" title="Ticket drawer + agent + zsh in one window" @click="spawnWorkspace()">
           + workspace
         </button>
@@ -587,6 +553,7 @@ onBeforeUnmount(() => {
             @idle="onIdle"
             @initial-sent="onInitialSent"
             @patch="onWorkspacePatch"
+            @open-file="openSessionFile"
           />
           <TerminalPane
             v-else-if="sessionsById[w.id]"
@@ -597,6 +564,7 @@ onBeforeUnmount(() => {
             @attention="onAttention"
             @idle="onIdle"
             @initial-sent="onInitialSent"
+            @open-file="openSessionFile"
           />
         </WindowFrame>
 
@@ -619,8 +587,16 @@ onBeforeUnmount(() => {
       :z="ticketZ"
       @focus="ticketZ = wm.allocZ()"
       @send="onSendTicket"
-      @workspace="onOpenWorkspace"
       @close="selectedTicket = null"
+    />
+
+    <MarkdownPane
+      v-if="doc"
+      :session-id="doc.sessionId"
+      :path="doc.path"
+      :z="docZ"
+      @focus="docZ = wm.allocZ()"
+      @close="doc = null"
     />
   </div>
 </template>
