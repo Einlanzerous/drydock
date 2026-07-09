@@ -218,9 +218,14 @@ DRYDOCK_JIRA_TOKEN=…                            # Cloud API token; or DC perso
 The provider speaks the v2 REST API to both deployments and probes the one real
 divergence (Cloud's `/search/jql` vs DC's `/search`) at runtime — the notes in
 `daemon/src/tracker/jira.ts` document every Cloud/DC quirk. Jira has no repo
-field, so a ticket's *project key* (lowercased) acts as its repo name for the
-cwd mapping — map it with `DRYDOCK_REPO_PATHS="myproj=~/work/myproj"`. Status:
-implemented but not yet exercised against a live Jira instance; the
+field, and a corporate Jira *project* is usually a team, not a service — so a
+ticket's **component** names its repo (DRY-31): slugged lowercase with
+spaces→dashes (`My Service` → `my-service`), falling back to the lowercased
+project key when a ticket has none. Those slugs are what `DRYDOCK_REPOS_ROOT` /
+`DRYDOCK_REPO_PATHS="my-service=~/work/my-service"` map to paths, and the
+sidebar groups by them, so an `SRE` project splits into its services. A
+multi-component ticket prefers a component with a configured path override.
+Status: implemented but not yet exercised against a live Jira instance; the
 verification checklist is in [CLAUDE.md](CLAUDE.md).
 
 **Scope the pull (DRY-30).** Unscoped, "all open tickets" against a corporate

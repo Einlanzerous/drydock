@@ -92,10 +92,14 @@ boolean params are literal `true`, not `1`.
    query; project-scoped, but spans all statuses.
 6. `curl -s "localhost:4399/api/tracker/tickets?project=<KEY>&open=true"` —
    single-project JQL clause.
-7. End-to-end: point a browser at the dev shell, switch it to the throwaway
+7. `curl -s "localhost:4399/api/tracker/ticket/<KEY>"` for a ticket that HAS a
+   component — `repo` must be the component slug (lowercase, spaces→dashes,
+   DRY-31), not the project key; a component-less ticket falls back to the
+   lowercased project key.
+8. End-to-end: point a browser at the dev shell, switch it to the throwaway
    daemon port, open a ticket, **Send to agent** — verifies repo→cwd resolution
-   (`DRYDOCK_REPOS_ROOT` / `DRYDOCK_REPO_PATHS`; Jira "repo" = lowercased
-   project key) and the SessionStart context injection.
+   (`DRYDOCK_REPOS_ROOT` / `DRYDOCK_REPO_PATHS`, keyed by component slug for
+   Jira) and the SessionStart context injection.
 
 There are no automated tests yet — these curls plus a ticket-spawn are the
 regression suite. Don't claim a provider works until they all pass against a
