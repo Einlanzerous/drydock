@@ -2,18 +2,24 @@
 import { computed, nextTick, ref, watch } from "vue";
 import { CATEGORY_COLOR, type Ticket } from "../lib/tracker.js";
 
-// Ctrl+K quick-launch palette. Fuzzy-search the active tracker's tickets by
-// key / title / repo; ↵ spawns an agent on the selected ticket, or a blank
-// claude session when nothing matches.
+// Ctrl+K quick-launch palette. A pinned "blank shell" row sits above the
+// ticket list (DRY-39: the palette is the ONLY entry point for plain shells —
+// a header button for them duplicated this pill). Fuzzy-search tickets by
+// key / title / repo; ↵ activates the selected row (shell row → shell, ticket
+// row → ticket panel), ⇧↵ is the shell shortcut from anywhere. Blank claude
+// agents live on the header's "+ claude", not here.
 const props = defineProps<{ open: boolean; tickets: Ticket[]; providerName: string }>();
 const emit = defineEmits<{
   (e: "close"): void;
   (e: "launch", t: Ticket): void;
-  (e: "spawnBlank"): void;
+  (e: "spawnShell"): void;
 }>();
 
 const query = ref("");
-const idx = ref(0);
+// Row index across the whole list: 0 = the pinned shell row, tickets follow at
+// idx-1. Opens at 1 (first ticket) so the muscle-memory "Ctrl+K, ↵ on a
+// ticket" flow is unchanged; ↑ from there reaches the shell row.
+const idx = ref(1);
 const inputEl = ref<HTMLInputElement | null>(null);
 
 const matches = computed(() => {
@@ -27,28 +33,33 @@ const matches = computed(() => {
   );
 });
 
+/** Selected row, clamped to what's actually rendered (shell row + matches). */
+const sel = computed(() => Math.min(idx.value, matches.value.length));
+
 watch(
   () => props.open,
   (o) => {
     if (o) {
       query.value = "";
-      idx.value = 0;
+      idx.value = props.tickets.length ? 1 : 0;
       nextTick(() => inputEl.value?.focus());
     }
   },
 );
-watch(query, () => (idx.value = 0));
+watch(query, () => (idx.value = matches.value.length ? 1 : 0));
 
 function onKey(e: KeyboardEvent) {
   if (e.key === "ArrowDown") {
     e.preventDefault();
-    idx.value = Math.min(idx.value + 1, matches.value.length - 1);
+    idx.value = Math.min(sel.value + 1, matches.value.length);
   } else if (e.key === "ArrowUp") {
     e.preventDefault();
-    idx.value = Math.max(idx.value - 1, 0);
+    idx.value = Math.max(sel.value - 1, 0);
+  } else if (e.key === "Enter" && e.shiftKey) {
+    emit("spawnShell");
   } else if (e.key === "Enter") {
-    if (matches.value.length) emit("launch", matches.value[Math.min(idx.value, matches.value.length - 1)]);
-    else emit("spawnBlank");
+    if (sel.value === 0) emit("spawnShell");
+    else emit("launch", matches.value[sel.value - 1]);
   } else if (e.key === "Escape") {
     emit("close");
   }
@@ -71,12 +82,26 @@ function onKey(e: KeyboardEvent) {
         <span class="esc">esc</span>
       </div>
       <div class="results">
+        <!-- Pinned blank-shell row (DRY-39): always present, above the tickets. -->
+        <div
+          class="row shellrow"
+          :class="{ active: sel === 0 }"
+          @mouseenter="idx = 0"
+          @click="emit('spawnShell')"
+        >
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#7a9e6b" stroke-width="1.5" stroke-linecap="round">
+            <path d="M3 5l3 3-3 3M8 11h5" />
+          </svg>
+          <span class="key">shell</span>
+          <span class="title">Blank shell session — your login shell, no agent</span>
+          <span v-if="sel === 0" class="spawn">↵ spawn</span>
+        </div>
         <div
           v-for="(t, i) in matches"
           :key="t.key"
           class="row"
-          :class="{ active: i === Math.min(idx, matches.length - 1) }"
-          @mouseenter="idx = i"
+          :class="{ active: i + 1 === sel }"
+          @mouseenter="idx = i + 1"
           @click="emit('launch', t)"
         >
           <span
@@ -89,15 +114,14 @@ function onKey(e: KeyboardEvent) {
           <span class="key">{{ t.key }}</span>
           <span class="title">{{ t.title }}</span>
           <span class="repo">~/{{ t.repo }}</span>
-          <span v-if="i === Math.min(idx, matches.length - 1)" class="spawn">↵ spawn</span>
+          <span v-if="i + 1 === sel" class="spawn">↵ spawn</span>
         </div>
-        <div v-if="!matches.length" class="empty">
-          No matching tickets. Press ↵ for a blank claude session.
-        </div>
+        <div v-if="!matches.length" class="empty">No matching tickets.</div>
       </div>
       <div class="footer">
         <span><b>↑↓</b> navigate</span>
-        <span><b>↵</b> spawn agent</span>
+        <span><b>↵</b> spawn</span>
+        <span><b>⇧↵</b> shell</span>
         <span class="src">pulled live from {{ providerName }}</span>
       </div>
     </div>

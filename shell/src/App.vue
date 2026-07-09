@@ -490,7 +490,8 @@ onBeforeUnmount(() => {
           New session
           <span class="kbd">Ctrl K</span>
         </button>
-        <button class="ghost" title="Plain shell session" @click="spawnFresh('shell')">+ New Session</button>
+        <!-- Plain shells spawn from the palette (⇧↵) — a header button here
+             duplicated the "New session (Ctrl K)" pill (DRY-39). -->
         <button class="ghost" title="Bare claude agent" @click="spawnFresh('claude')">+ claude</button>
         <button class="ghost" title="Ticket drawer + agent + zsh in one window" @click="spawnWorkspace()">
           + workspace
@@ -579,6 +580,7 @@ onBeforeUnmount(() => {
       @close="quickOpen = false"
       @launch="openTicket"
       @spawn-blank="(quickOpen = false), spawnFresh('claude')"
+      @spawn-shell="(quickOpen = false), spawnFresh('shell')"
     />
 
     <TicketDetail
