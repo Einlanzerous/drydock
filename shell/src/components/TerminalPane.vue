@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, shallowRef } from "vue";
+import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { Terminal, type ILink } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { attachUrl } from "../lib/daemon.js";
@@ -62,6 +62,31 @@ let sentInitial = false;
 const connected = ref(false);
 const pending = ref<{ requestId: string; tool: string; input: unknown } | null>(null);
 
+// DRY-41: a dead PTY's pane is otherwise a frozen frame of whatever the CLI
+// last drew (often claude's slash menu after /exit) — indistinguishable from a
+// live-but-quiet session. The daemon keeps exited sessions listed, so the
+// window survives (a workspace's zsh may still be running); this banner is the
+// in-pane truth. Seeded from the poll's SessionInfo so a re-mount (dock
+// restore, reload) shows it before the WS status replay lands.
+const exited = ref(props.session.status === "exited");
+const exitCode = ref<number | null>(props.session.exitCode ?? null);
+
+function markExited(code?: number) {
+  exited.value = true;
+  if (code !== undefined) exitCode.value = code;
+  // A blinking cursor on a dead PTY is what made /exit read as "stalled".
+  if (term.value) term.value.options.cursorBlink = false;
+}
+
+// The WS broadcast covers an attached pane; the 3s poll (session prop) covers
+// one whose exit happened while it wasn't listening (detached / just restored).
+watch(
+  () => props.session.status,
+  (s) => {
+    if (s === "exited") markExited(props.session.exitCode ?? undefined);
+  },
+);
+
 function sendWs(msg: ClientMessage) {
   const sock = ws.value;
   if (sock && sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify(msg));
@@ -111,6 +136,7 @@ function connect() {
         term.value?.write(msg.data);
         break;
       case "status":
+        if (msg.status === "exited") markExited(msg.exitCode);
         emit("status", props.session.id, msg.status);
         break;
       case "idle":
@@ -172,6 +198,7 @@ onMounted(async () => {
   // CLI's trust prompt) re-clicked it, spawning a duplicate. A pane that mounts
   // as the focused window claims the keyboard immediately.
   if (props.active) t.focus();
+  if (exited.value) t.options.cursorBlink = false; // mounted onto a dead session
 
   resizeObserver = new ResizeObserver(() => doFit());
   resizeObserver.observe(termEl.value!);
@@ -191,6 +218,13 @@ onBeforeUnmount(() => {
   <div class="pane-body" :class="{ attention: !!pending }">
     <div ref="termEl" class="term"></div>
     <span v-if="!connected" class="detached">detached</span>
+
+    <!-- DRY-41: dead PTY — the scrollback above is a frozen transcript. -->
+    <div v-if="exited" class="exited">
+      <span class="exited-dot"></span>
+      <strong>{{ session.command }}</strong> exited{{ exitCode !== null ? ` (code ${exitCode})` : "" }}
+      <span class="exited-hint">output preserved — close the window when done</span>
+    </div>
 
     <div v-if="pending" class="permission">
       <div class="permission-text">
@@ -230,6 +264,39 @@ onBeforeUnmount(() => {
   border-radius: 5px;
   font-family: "JetBrains Mono", monospace;
   z-index: 4;
+}
+.exited {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #14181ef2;
+  border: 1px solid #3a4655;
+  border-radius: 10px;
+  padding: 8px 13px;
+  color: #9aa6b2;
+  font-size: 12px;
+  z-index: 5;
+}
+.exited strong {
+  color: #c3ccd6;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11.5px;
+}
+.exited-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #6a737f;
+  flex: 0 0 auto;
+}
+.exited-hint {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: #5a636f;
 }
 .permission {
   position: absolute;
