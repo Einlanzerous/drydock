@@ -13,9 +13,9 @@ own live PTYs. Stand up a throwaway pair instead:
 # 1. Throwaway daemon (second-instance pattern, CLAUDE.md). Real env beats .env.
 cd daemon && DRYDOCK_PORT=4399 DRYDOCK_HOST=127.0.0.1 node --import tsx src/index.ts &
 
-# 2. Dev shell on a spare port. VITE_DAEMON_URL is baked at server start, but
-#    the Playwright script below overrides it at runtime anyway.
-bunx vite --port 5399 --strictPort &   # run from shell/
+# 2. Dev shell on a spare port. VITE_DAEMON_URL is REQUIRED — it's baked in at
+#    vite server start and is the only override that survives (see below).
+VITE_DAEMON_URL=http://127.0.0.1:4399 bunx vite --port 5399 --strictPort &   # run from shell/
 
 curl -s localhost:4399/healthz         # {ok:true, sessions:N} → ready
 ```
@@ -24,14 +24,16 @@ curl -s localhost:4399/healthz         # {ok:true, sessions:N} → ready
 
 Install the library into a scratch dir (`npm i playwright`; if the launch
 errors with "Executable doesn't exist", run `npx playwright install chromium`).
-Point the page at the throwaway daemon with an init script — this beats every
-other config source (see `shell/src/lib/daemon.ts`):
+⚠️ Do NOT rely on `page.addInitScript` to set `window.__DRYDOCK__` — dev serves
+`public/config.js`, which loads after any init script and resets it to `{}`,
+silently pointing the page at the default :4317 — the LIVE daemon. The
+`VITE_DAEMON_URL` on the vite command above is the override that works. Before
+driving anything, spawn one session and confirm it landed on :4399.
 
 ```js
 import { chromium } from "playwright";
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1600, height: 900 } });
-await page.addInitScript(() => { window.__DRYDOCK__ = { daemonPort: 4399 }; });
 await page.goto("http://127.0.0.1:5399");
 await page.waitForSelector(".topbar");
 ```
