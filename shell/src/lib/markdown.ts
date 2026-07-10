@@ -20,10 +20,20 @@ DOMPurify.addHook("afterSanitizeAttributes", (node) => {
 });
 
 export function renderMarkdown(md: string): string {
-  const html = marked.parse(md, { async: false });
-  return DOMPurify.sanitize(html, {
-    // Markdown needs nothing exotic; forbid the classic vectors outright.
-    FORBID_TAGS: ["style", "form", "input", "iframe", "object", "embed"],
-    FORBID_ATTR: ["onerror", "onload", "style"],
-  });
+  // This runs inside component renders (ticket drawer, detail panel, doc
+  // viewer). A parser throw would abort the Vue patch mid-tree and cascade
+  // into follow-on null-deref errors on every later re-render (DRY-42), so
+  // degrade to escaped plaintext instead of trusting marked on every input a
+  // corp tracker can produce.
+  try {
+    const html = marked.parse(md, { async: false });
+    return DOMPurify.sanitize(html, {
+      // Markdown needs nothing exotic; forbid the classic vectors outright.
+      FORBID_TAGS: ["style", "form", "input", "iframe", "object", "embed"],
+      FORBID_ATTR: ["onerror", "onload", "style"],
+    });
+  } catch {
+    const esc = md.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return `<pre>${esc}</pre>`;
+  }
 }
