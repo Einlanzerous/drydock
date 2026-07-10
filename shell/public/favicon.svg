@@ -1,0 +1,19 @@
+<!-- The topbar/docs crane logo (48x34), centered on the app background in a
+     rounded square so it reads at tab size (DRY-44). -->
+<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
+  <rect width="48" height="48" rx="9" fill="#0e1116" />
+  <g transform="translate(0 7)">
+    <g stroke="#3f5468" stroke-width="1" fill="none" stroke-linecap="round">
+      <path d="M5 6 V20 H2 V28 H46 V20 H43 V6" />
+      <line x1="2" y1="28" x2="46" y2="28" />
+    </g>
+    <g fill="#5b7794">
+      <rect x="13" y="25" width="3" height="3" />
+      <rect x="22" y="25" width="3" height="3" />
+      <rect x="31" y="25" width="3" height="3" />
+    </g>
+    <path fill="#7aa6cc" d="M9 15 L9 21 Q9 25 13 25 L34 25 L41 18 L41 16 L13 16 Z" />
+    <path fill="#7aa6cc" d="M19 16 L19 9 L22 9 L22 16 Z M24 16 L24 11 L29 11 L29 16 Z" />
+    <line x1="20.5" y1="9" x2="20.5" y2="4" stroke="#7aa6cc" stroke-width="1" />
+  </g>
+</svg>
