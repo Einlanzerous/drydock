@@ -69,7 +69,16 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
     if (!opts.persistKey) return;
     const saved = loadLayout(opts.persistKey);
     if (!saved) return;
-    windows.splice(0, windows.length, ...saved.windows);
+    // DRY-42: heal layouts persisted while a duplicate-id window existed (the
+    // spawn-vs-poll race wrote both copies, and the deep watcher made the
+    // corruption survive reloads). Prefer the workspace-kind entry — it
+    // carries shellId and the richer pane state; otherwise last write wins.
+    const byId = new Map<string, Win>();
+    for (const w of saved.windows) {
+      const prev = byId.get(w.id);
+      byId.set(w.id, prev && prev.kind === "workspace" && w.kind !== "workspace" ? prev : w);
+    }
+    windows.splice(0, windows.length, ...byId.values());
     layout.value = saved.layout;
     // Keep the z counter above every restored window so new spawns land on top.
     z = windows.reduce((m, w) => Math.max(m, w.z), z);
@@ -105,6 +114,20 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
   function add(
     win: Omit<Win, "x" | "y" | "w" | "h" | "z" | "minimized" | "kind"> & Partial<Win>,
   ): Win {
+    // DRY-42: adds must be idempotent per session id. spawnWorkspace registers
+    // its window only after two awaited spawns, so a 3s poll tick in that gap
+    // lets reconcile add a plain window for the agent session first; a second
+    // push would give the WindowFrame v-for duplicate keys (Vue's keyed diff
+    // corrupts — prod spams "emitsOptions of null") and every .find()-based op
+    // (bringFront/updateWin/remove) only ever sees the first copy, leaving the
+    // real window un-raisable. Merge in place instead: the raced plain window
+    // upgrades to the workspace, keeping its slot in the array.
+    const existing = windows.find((w) => w.id === win.id);
+    if (existing) {
+      Object.assign(existing, win, { z: ++z, minimized: false });
+      focusedId.value = existing.id;
+      return existing;
+    }
     const pos = cascade();
     const w: Win = {
       x: win.x ?? pos.x,
