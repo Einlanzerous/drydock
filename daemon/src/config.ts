@@ -16,6 +16,22 @@ function parseRepoPaths(spec: string | undefined): Record<string, string> {
   return out;
 }
 
+/**
+ * Numeric knob with a NaN-safe fallback. `Number("8mb")` is NaN, and NaN loses
+ * every comparison — so an unparseable value doesn't fall back, it silently
+ * switches the feature OFF (no rotation, no scrollback trimming) and the failure
+ * only shows up as a disk or heap that won't stop growing. `port` deliberately
+ * isn't routed through here: a bad port should fail loudly at bind rather than
+ * quietly serve on a different one.
+ */
+function num(raw: string | undefined, fallback: number): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+/** Read once: the default log path is per-port so concurrent daemons don't share a file. */
+const PORT = Number(process.env.DRYDOCK_PORT ?? 4317);
+
 export const CONFIG = {
   /**
    * Bind address. Defaults to 0.0.0.0 so the daemon is reachable over the
@@ -25,10 +41,10 @@ export const CONFIG = {
    * back to localhost. Real auth is the first thing to add past PoC.
    */
   host: process.env.DRYDOCK_HOST ?? "0.0.0.0",
-  port: Number(process.env.DRYDOCK_PORT ?? 4317),
+  port: PORT,
 
   /** Scrollback ring-buffer cap per session, in bytes (~1 MiB). */
-  scrollbackBytes: Number(process.env.DRYDOCK_SCROLLBACK_BYTES ?? 1_048_576),
+  scrollbackBytes: num(process.env.DRYDOCK_SCROLLBACK_BYTES, 1_048_576),
 
   /**
    * Daemon log (DRY-45). Session/client lifecycle and crash traces go here as
@@ -36,10 +52,16 @@ export const CONFIG = {
    * which is exactly what nobody still has open when they come asking why their
    * agents vanished. Rotates one generation at maxBytes. Set DRYDOCK_LOG_FILE=
    * (empty) to disable the file sink.
+   *
+   * The default path carries the PORT because the documented workflow runs a
+   * second (and third) daemon on a spare port — CLAUDE.md's whole verification
+   * story — and a shared file would interleave their lines and race their
+   * rotations. Point DRYDOCK_LOG_FILE at one path deliberately if you'd rather
+   * have them merged.
    */
   log: {
-    file: process.env.DRYDOCK_LOG_FILE ?? "~/.drydock/daemon.log",
-    maxBytes: Number(process.env.DRYDOCK_LOG_MAX_BYTES ?? 8_388_608),
+    file: process.env.DRYDOCK_LOG_FILE ?? `~/.drydock/daemon-${PORT}.log`,
+    maxBytes: num(process.env.DRYDOCK_LOG_MAX_BYTES, 8_388_608),
     /**
      * An uncaught exception normally kills Node — and here that means killing
      * every live agent PTY, unrecoverably, because a session's lifetime IS the
@@ -47,6 +69,12 @@ export const CONFIG = {
      * questionable state strictly beats exiting cleanly: the other N agents stay
      * reachable. We log loudly and carry on. Set DRYDOCK_EXIT_ON_UNCAUGHT=1 to
      * restore Node's default (e.g. under a supervisor, once sessions are durable).
+     *
+     * PROD IS THE SAME BY DEFAULT, and that is a decision, not an oversight: the
+     * systemd unit is Restart=always, so exiting there would mean a restarted
+     * daemon with zero sessions, every agent gone. Wedged-but-attached beats
+     * restarted-and-empty while sessions can't outlive the process. Flip it in
+     * prod's .env (the unit deliberately sets no DRYDOCK_* vars) once they can.
      */
     exitOnUncaught: process.env.DRYDOCK_EXIT_ON_UNCAUGHT === "1",
   },

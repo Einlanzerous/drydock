@@ -1,4 +1,5 @@
 import { CONFIG } from "../config.js";
+import { log } from "../log.js";
 import { FixtureProvider } from "./fixture.js";
 import { JiraProvider } from "./jira.js";
 import { SwitchyardProvider } from "./switchyard.js";
@@ -18,8 +19,8 @@ export function createTracker(): TrackerProvider {
   if (kind === "switchyard") {
     const { url, token } = CONFIG.tracker.switchyard;
     if (!url) {
-      console.warn(
-        "[drydock] DRYDOCK_TRACKER=switchyard but DRYDOCK_SWITCHYARD_URL is unset — falling back to fixture data.",
+      log.warn(
+        "DRYDOCK_TRACKER=switchyard but DRYDOCK_SWITCHYARD_URL is unset — falling back to fixture data",
       );
       return new FixtureProvider();
     }
@@ -29,8 +30,8 @@ export function createTracker(): TrackerProvider {
   if (kind === "jira") {
     const { url, email, token } = CONFIG.tracker.jira;
     if (!url || !token) {
-      console.warn(
-        "[drydock] DRYDOCK_TRACKER=jira but DRYDOCK_JIRA_URL/DRYDOCK_JIRA_TOKEN are unset — falling back to fixture data.",
+      log.warn(
+        "DRYDOCK_TRACKER=jira but DRYDOCK_JIRA_URL/DRYDOCK_JIRA_TOKEN are unset — falling back to fixture data",
       );
       return new FixtureProvider();
     }

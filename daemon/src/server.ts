@@ -3,7 +3,7 @@ import * as http from "node:http";
 import * as path from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import { CONFIG } from "./config.js";
-import { log, type LogFields } from "./log.js";
+import { describe, log, type LogFields } from "./log.js";
 import { SessionManager } from "./manager.js";
 import { expandHome, resolveRepoCwd } from "./repos.js";
 import {
@@ -354,6 +354,26 @@ const server = http.createServer(async (req, res) => {
 const wss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
+  try {
+    upgrade(req, socket, head);
+  } catch (err) {
+    // Same bug class this ticket is about: an unguarded throw inside a socket
+    // handler. `new URL(…, "http://" + req.headers.host)` throws "Invalid URL"
+    // on a malformed Host header — and Node's HTTP parser passes those straight
+    // through (verified with `]bad[`, `a b`, empty, `x:99999999`, `[::1`). It
+    // throws BEFORE the session lookup, so on a daemon that binds 0.0.0.0 with
+    // no auth, one malformed request from anything that could reach the port
+    // used to take out every session on the host.
+    log.warn("upgrade failed — closing socket", describe(err));
+    socket.destroy();
+  }
+});
+
+function upgrade(
+  req: http.IncomingMessage,
+  socket: import("node:stream").Duplex,
+  head: Buffer,
+): void {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const match = url.pathname.match(/^\/api\/sessions\/([^/]+)\/attach$/);
   if (!match) {
@@ -375,13 +395,17 @@ server.on("upgrade", (req, socket, head) => {
     // every live agent PTY with it. Reproduced: one unmasked frame →
     // "RangeError: Invalid WebSocket frame: MASK must be set" → process exit.
     ws.on("error", (err: Error & { code?: string }) => {
+      // `id=` deliberately, matching every line session.ts writes — one grep key
+      // has to recover a session's whole timeline.
       log.warn("client socket error — dropping that client", {
-        session: session.id,
+        id: session.id,
         code: err.code,
         err: err.message,
       });
+      // No terminate() here. For a frame error ws has already called
+      // close(1002) before emitting, so tearing the socket down on top of that
+      // replaces a status code the client could act on with an opaque 1006.
       session.detach(ws as WebSocket);
-      ws.terminate();
     });
     ws.on("message", (raw) => {
       let msg: ClientMessage;
@@ -404,9 +428,18 @@ server.on("upgrade", (req, socket, head) => {
     });
     ws.on("close", () => session.detach(ws as WebSocket));
   });
-});
+}
 
-wss.on("error", (err) => log.error("websocket server error", { err: String(err) }));
+// NOT wss.on("error"): with `noServer: true` this WebSocketServer owns no http
+// server, so it never emits 'error' — that listener would be decoration. The
+// event that actually fires on this path is 'wsClientError' (a bad handshake
+// inside handleUpgrade). Note the ownership rule: ws aborts the handshake
+// itself ONLY while nothing is listening, so attaching a log-only listener here
+// would silently leak every rejected socket. Hence the destroy.
+wss.on("wsClientError", (err, socket) => {
+  log.warn("websocket handshake rejected", { err: err.message });
+  socket.destroy();
+});
 
 // --- Crash containment (DRY-45) ---
 // Everything below exists because this process IS the lifetime of every agent
@@ -414,23 +447,31 @@ wss.on("error", (err) => log.error("websocket server error", { err: String(err) 
 // no way to get it back. What we can do is (a) never die for a reason that only
 // concerns one client, and (b) leave a trace when we do die.
 
-/** One-line census of what's at stake, for the log lines that precede a death. */
+/**
+ * One-line census of what's at stake, for the log lines that precede a death.
+ * Reads the cheap `running` getter rather than building a SessionInfo per
+ * session — this runs inside crash handlers, where the less work between the
+ * fault and the line hitting disk, the better.
+ */
 function inventory(): LogFields {
   const sessions = manager.list();
   return {
     sessions: sessions.length,
-    live: sessions.filter((s) => s.info().status === "running").length,
+    live: sessions.filter((s) => s.running).length,
     ids: sessions.map((s) => s.id).join(",") || undefined,
   };
 }
 
 process.on("uncaughtException", (err) => {
+  // describe() rather than err.message: `throw null` makes that dereference a
+  // TypeError, and a TypeError raised INSIDE this handler is fatal (Node exits
+  // 7) — a crash handler with its own crash path is worse than no handler.
+  // Stack goes in as a field so the record stays one greppable line.
   log.error("UNCAUGHT EXCEPTION", {
-    err: err.message,
+    ...describe(err),
     ...inventory(),
     action: CONFIG.log.exitOnUncaught ? "exiting" : "staying up",
   });
-  log.error(err.stack ?? "(no stack)");
   // Node's default here is to die. For a PTY-owning daemon that trade is bad:
   // exiting cleanly still destroys every agent, while staying up in a suspect
   // state at least keeps the other N sessions reachable. Opt back into the
@@ -439,11 +480,7 @@ process.on("uncaughtException", (err) => {
 });
 
 process.on("unhandledRejection", (reason) => {
-  log.error("UNHANDLED REJECTION", {
-    err: reason instanceof Error ? reason.message : String(reason),
-    ...inventory(),
-  });
-  if (reason instanceof Error && reason.stack) log.error(reason.stack);
+  log.error("UNHANDLED REJECTION", { ...describe(reason), ...inventory() });
 });
 
 // Log what a shutdown is about to destroy before it happens. This is also what
@@ -457,15 +494,23 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
   });
 }
 
+let listening = false;
+
 server.on("error", (err: Error & { code?: string }) => {
-  // A listen failure (EADDRINUSE) is fatal and there is nothing to lose yet.
-  log.error("http server error", { code: err.code, err: err.message });
-  if (err.code === "EADDRINUSE") process.exit(1);
+  log.error("http server error", { code: err.code, err: err.message, listening });
+  // Any failure before we're listening is fatal — there are no sessions yet, so
+  // nothing to preserve, and a daemon that isn't bound is no daemon. Exit
+  // explicitly rather than letting the event loop drain: that path exits 0,
+  // which reads as a clean shutdown in whatever is watching us. EADDRINUSE is
+  // just the common case; EACCES and EADDRNOTAVAIL are equally terminal.
+  if (!listening) process.exit(1);
 });
 
 server.listen(CONFIG.port, CONFIG.host, () => {
+  listening = true;
   log.info("daemon listening", {
     url: `http://${CONFIG.host}:${CONFIG.port}`,
+    pid: process.pid,
     log: log.file() || "(stdout only)",
   });
 });

@@ -226,8 +226,19 @@ export class PtySession {
     }
   }
 
+  /** Cheap liveness check — avoids building a SessionInfo just to read status. */
+  get running(): boolean {
+    return this.status === "running";
+  }
+
   kill(): void {
-    if (this.status !== "running") return;
+    if (!this.running) {
+      log.info("kill requested for an already-exited session", {
+        id: this.id,
+        status: this.status,
+      });
+      return;
+    }
     log.info("session kill requested", { id: this.id, command: this.command });
     this.pty.kill();
   }
