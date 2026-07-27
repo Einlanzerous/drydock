@@ -22,10 +22,9 @@ services:
     image: postgres:16-alpine
     container_name: drydock-db
     restart: unless-stopped
-    # Loopback-bound on purpose. This database holds window positions, but it
-    # is still a database with a weak default password — it must not be
-    # reachable from the LAN or Tailscale. Set DRYDOCK_DB_PASSWORD in .env if
-    # that bothers you; nothing here is a secret worth protecting yet.
+    # Loopback-bound on purpose: it must not be reachable from the LAN or
+    # Tailscale. That is a second line of defence, not the first — see the
+    # password below.
     ports:
       - "127.0.0.1:${DRYDOCK_DB_PORT:-5433}:5432"
     # 5433, not 5432: a dev box with any other Postgres — construct-server's
@@ -33,7 +32,13 @@ services:
     # `up` time with an error nobody connects to workspace state.
     environment:
       POSTGRES_USER: drydock
-      POSTGRES_PASSWORD: ${DRYDOCK_DB_PASSWORD:-drydock}
+      # Required, with deliberately no default. A committed fallback would give
+      # every Drydock install the same database password — "it's only window
+      # positions" and "it's only on loopback" are both true, and neither makes
+      # a shared credential a good idea. `bun run up` / `bun run db:up`
+      # generate one into the gitignored .env on first use, so there is nothing
+      # to remember and nothing to commit; scripts/up.mjs is where that lives.
+      POSTGRES_PASSWORD: ${DRYDOCK_DB_PASSWORD:?run `bun run db:up`, which generates one into .env}
       POSTGRES_DB: drydock
     volumes:
       - drydock_pgdata:/var/lib/postgresql/data

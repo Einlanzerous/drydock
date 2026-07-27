@@ -92,7 +92,7 @@ export const CONFIG = {
    * work with no database to install.
    */
   state: {
-    /** postgres://user:pass@host:port/db — unset selects the file store. */
+    /** postgres://<user>:<password>@<host>:<port>/db — unset selects the file store. */
     databaseUrl: process.env.DRYDOCK_DATABASE_URL || undefined,
     /**
      * Per-port like the log file, and for the same reason: the documented way

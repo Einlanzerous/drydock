@@ -17,6 +17,7 @@
 // hands off to `bun run --filter '*' dev`, so the daemon's "must be real node"
 // invocation stays defined in one place.
 import { spawn, spawnSync } from "node:child_process";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -52,6 +53,66 @@ function loadEnv() {
   console.log(`[up] loaded env from ${file}`);
 }
 
+/** Append `KEY=value` to the root `.env`, creating the file if it isn't there. */
+function appendEnv(key, value) {
+  const file = path.join(ROOT, ".env");
+  const existing = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+  const sep = !existing || existing.endsWith("\n") ? "" : "\n";
+  fs.appendFileSync(file, `${sep}${key}=${value}\n`, { mode: 0o600 });
+  process.env[key] = value;
+}
+
+/**
+ * Make sure the local database has a password, generating one on first use.
+ *
+ * Nothing in this repo ships a default. A committed fallback would mean every
+ * Drydock install on earth shares one password on a port that anything else on
+ * the host can reach — "it's only window positions" and "it's only bound to
+ * loopback" are both true and neither is a reason to hand out the same
+ * credential to everyone. It also, correctly, trips secret scanners.
+ *
+ * The generated value lands in the gitignored `.env` alongside a
+ * DRYDOCK_DATABASE_URL, so every way of starting the daemon agrees about where
+ * state lives — `bun run up`, `bun run daemon`, and a manually launched
+ * verification instance included.
+ */
+function ensureDbCredentials() {
+  const port = process.env.DRYDOCK_DB_PORT ?? "5433";
+  let generated = false;
+  if (!process.env.DRYDOCK_DB_PASSWORD) {
+    // base64url so the value needs no escaping in a URL, a .env line, or YAML.
+    appendEnv("DRYDOCK_DB_PASSWORD", crypto.randomBytes(24).toString("base64url"));
+    generated = true;
+    console.log("[up] generated a database password into .env");
+  }
+  if (!process.env.DRYDOCK_DATABASE_URL) {
+    // encodeURIComponent even though generated values are URL-safe: this also
+    // runs over a password a human chose, where @ : / # are ordinary.
+    const pw = encodeURIComponent(process.env.DRYDOCK_DB_PASSWORD);
+    appendEnv("DRYDOCK_DATABASE_URL", `postgres://drydock:${pw}@127.0.0.1:${port}/drydock`);
+    console.log("[up] wrote DRYDOCK_DATABASE_URL into .env");
+  }
+  // Postgres only reads POSTGRES_PASSWORD at initdb, so an existing volume
+  // keeps whatever it was created with — a freshly generated password would
+  // then fail to authenticate against it, which reads as a config error.
+  if (generated && volumeExists()) {
+    console.warn(
+      "[up] NOTE: an existing drydock database volume was found. It keeps the\n" +
+        "     password it was created with, so the new one may not authenticate.\n" +
+        "     Reset it with: bun run db:down -- -v   (destroys saved workspaces)",
+    );
+  }
+}
+
+function volumeExists() {
+  // Project name is pinned to `drydock` in the compose file, so the volume is
+  // predictable rather than derived from whatever directory this checkout is in.
+  const out = spawnSync("docker", ["volume", "inspect", "drydock_drydock_pgdata"], {
+    stdio: "ignore",
+  });
+  return out.status === 0;
+}
+
 function composeCmd() {
   const probe = spawnSync("docker", ["compose", "version"], { stdio: "ignore" });
   if (probe.status === 0) return ["docker", ["compose"]];
@@ -68,25 +129,30 @@ function composeCmd() {
  * a connection error in the log at startup, which is indistinguishable from a
  * genuinely wrong DRYDOCK_DATABASE_URL. Better to be slow and unambiguous.
  */
-function startDb() {
-  const compose = composeCmd();
-  if (!compose) {
+function compose(...argv) {
+  const cmd = composeCmd();
+  if (!cmd) {
     console.error(
-      "[up] DRYDOCK_DB_LOCAL is set but no `docker compose` found.\n" +
-        "     Install Docker, or unset it to use the file store, or point\n" +
-        "     DRYDOCK_DATABASE_URL at a Postgres that already exists.",
+      "[up] no `docker compose` found.\n" +
+        "     Install Docker, unset DRYDOCK_DB_LOCAL to use the file store, or\n" +
+        "     point DRYDOCK_DATABASE_URL at a Postgres that already exists.",
     );
     process.exit(1);
   }
-  const [bin, base] = compose;
+  const [bin, base] = cmd;
   // --project-directory is not cosmetic: Compose takes the project directory
   // from the first -f file, so without it the project root is deploy/ and the
   // repo-root .env is never read — DRYDOCK_DB_PASSWORD and DRYDOCK_DB_PORT
   // would silently take their compose defaults while the daemon honoured the
   // real values, producing a container it cannot authenticate against.
-  const composeArgs = [...base, "--project-directory", ROOT, "-f", COMPOSE_FILE, "up", "-d"];
-  console.log(`[up] starting local postgres (${bin} ${composeArgs.join(" ")})`);
-  const up = spawnSync(bin, composeArgs, { stdio: "inherit", cwd: ROOT, env: process.env });
+  const args = [...base, "--project-directory", ROOT, "-f", COMPOSE_FILE, ...argv];
+  return spawnSync(bin, args, { stdio: "inherit", cwd: ROOT, env: process.env });
+}
+
+function startDb() {
+  ensureDbCredentials();
+  console.log("[up] starting local postgres");
+  const up = compose("up", "-d");
   if (up.status !== 0) process.exit(up.status ?? 1);
 
   const deadline = Date.now() + 60_000;
@@ -119,6 +185,19 @@ function startDb() {
 
 loadEnv();
 
+// `bun run db:up` / `db:down` route through here rather than calling docker
+// compose directly, so the project directory, the pinned project name and the
+// credential bootstrap are defined once. Extra argv is passed through, which is
+// what makes `bun run db:down -- -v` (drop the volume) work.
+const passthrough = args.filter((a) => a !== "--db-only" && a !== "--db-down");
+if (has("--db-only")) {
+  startDb();
+  process.exit(0);
+}
+if (has("--db-down")) {
+  process.exit(compose("down", ...passthrough).status ?? 0);
+}
+
 // --local narrows the daemon's bind address. The daemon defaults to 0.0.0.0 so
 // it's reachable over Tailscale/LAN, and it has NO authentication (config.ts) —
 // on an untrusted network, or a work laptop, this flag is the difference
@@ -127,20 +206,9 @@ if (has("--local")) process.env.DRYDOCK_HOST = "127.0.0.1";
 
 const wantDb = has("--db") || (process.env.DRYDOCK_DB_LOCAL === "1" && !has("--no-db"));
 if (wantDb) {
+  // startDb() writes DRYDOCK_DATABASE_URL into .env if it isn't set, so the
+  // daemon picks it up on its own — including when started some other way.
   startDb();
-  // Only fill this in if the operator hasn't. Someone who set both a local
-  // container and an explicit URL means the URL — it's how you point at the
-  // container from a different host, or at a central database while still
-  // keeping the local one running.
-  if (!process.env.DRYDOCK_DATABASE_URL) {
-    // encodeURIComponent because this is a URL, not a string template: a
-    // password containing @ : / ? # — all of them ordinary in a generated
-    // password — otherwise produces a URL that parses to the wrong host, or
-    // doesn't parse at all.
-    const pw = encodeURIComponent(process.env.DRYDOCK_DB_PASSWORD ?? "drydock");
-    const port = process.env.DRYDOCK_DB_PORT ?? "5433";
-    process.env.DRYDOCK_DATABASE_URL = `postgres://drydock:${pw}@127.0.0.1:${port}/drydock`;
-  }
 } else if (!process.env.DRYDOCK_DATABASE_URL) {
   console.log("[up] no database configured — workspace state goes to a JSON file");
 }

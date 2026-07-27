@@ -68,10 +68,11 @@ one that gets forgotten:
 ```sh
 # file store (the default)
 DRYDOCK_PORT=4399 DRYDOCK_STATE_FILE=/tmp/state.json node --import tsx src/index.ts
-# postgres — same code path a central database uses
+# postgres — same code path a central database uses. db:up generates a password
+# into .env on first run and writes DRYDOCK_DATABASE_URL beside it, which the
+# daemon reads on its own (env.ts walks up), so no credential is typed here.
 bun run db:up      # loopback :5433, deploy/compose.db.yml
-DRYDOCK_PORT=4399 DRYDOCK_DATABASE_URL=postgres://drydock:drydock@127.0.0.1:5433/drydock \
-  node --import tsx src/index.ts
+DRYDOCK_PORT=4399 node --import tsx src/index.ts
 ```
 
 ```sh
