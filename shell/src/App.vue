@@ -8,6 +8,8 @@ import TrackerSidebar from "./components/TrackerSidebar.vue";
 import TicketDetail from "./components/TicketDetail.vue";
 import QuickLaunch from "./components/QuickLaunch.vue";
 import Dock from "./components/Dock.vue";
+import GateTray from "./components/GateTray.vue";
+import { startGateStream, stopGateStream } from "./composables/gateStore.js";
 import { useWindowManager, type LayoutMode, type Win } from "./composables/useWindowManager.js";
 import { DAEMON_HTTP, createSession, killSession, listSessions } from "./lib/daemon.js";
 import { getTrackerInfo, listTickets, type Ticket } from "./lib/tracker.js";
@@ -360,6 +362,13 @@ async function closeWindow(id: string) {
 const rects = computed(() => wm.computeRects());
 const visible = computed(() => wm.windows.filter((w) => !w.minimized));
 
+// Sessions with a live pane. Everything NOT in here is a session whose gates
+// have nowhere to render, which is exactly what GateTray picks up (DRY-50).
+// A workspace window hosts two sessions, so it contributes both.
+const panedSessionIds = computed(() =>
+  visible.value.flatMap((w) => (w.shellId ? [w.id, w.shellId] : [w.id])),
+);
+
 const dockItems = computed(() =>
   wm.windows
     .filter((w) => w.minimized)
@@ -465,6 +474,10 @@ function onKey(e: KeyboardEvent) {
 
 onMounted(async () => {
   loadScope();
+  // Opened before anything else awaits: a gate raised while the tracker call is
+  // still in flight has to land somewhere, and the daemon replays whatever is
+  // already pending on connect anyway (DRY-50).
+  startGateStream();
   try {
     const info = await getTrackerInfo();
     providerName.value = info.name;
@@ -510,6 +523,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   if (poll) clearInterval(poll);
   if (ticketPoll) clearInterval(ticketPoll);
+  stopGateStream();
   deskObs?.disconnect();
   window.removeEventListener("keydown", onKey, true);
 });
@@ -655,6 +669,13 @@ onBeforeUnmount(() => {
         </WindowFrame>
 
         <Dock :items="dockItems" @restore="wm.restore" />
+
+        <!-- Gates for sessions with no pane to show them in (DRY-50). -->
+        <GateTray
+          :paned-session-ids="panedSessionIds"
+          :sessions="Object.values(sessionsById)"
+          @open="wm.restore"
+        />
       </div>
     </div>
 
