@@ -3,6 +3,7 @@ import * as http from "node:http";
 import * as path from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import { CONFIG } from "./config.js";
+import { describe, log, type LogFields } from "./log.js";
 import { SessionManager } from "./manager.js";
 import { expandHome, resolveRepoCwd } from "./repos.js";
 import {
@@ -69,9 +70,10 @@ const server = http.createServer(async (req, res) => {
         const r = resolveRepoCwd(body.repo);
         cwd = r.cwd;
         if (!r.matched) {
-          console.warn(
-            `[drydock] repo "${body.repo}" not found under repos root or overrides — spawning in ${r.cwd}`,
-          );
+          log.warn("repo not found under repos root or overrides — spawning in fallback", {
+            repo: body.repo,
+            cwd: r.cwd,
+          });
         }
       }
       const ticket = typeof body.ticket === "string" ? body.ticket : undefined;
@@ -94,9 +96,11 @@ const server = http.createServer(async (req, res) => {
           worktree = wt.cwd;
           branch = wt.branch;
         } catch (err) {
-          console.warn(
-            `[drydock] worktree for ${ticket} failed (${String(err)}) — spawning in ${cwd}`,
-          );
+          log.warn("worktree setup failed — spawning in the plain repo cwd", {
+            ticket,
+            cwd,
+            err: String(err),
+          });
         }
       }
 
@@ -350,19 +354,98 @@ const server = http.createServer(async (req, res) => {
 const wss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
+  try {
+    upgrade(req, socket, head);
+  } catch (err) {
+    // Same bug class this ticket is about: an unguarded throw inside a socket
+    // handler. `new URL(…, "http://" + req.headers.host)` throws "Invalid URL"
+    // on a malformed Host header — and Node's HTTP parser passes those straight
+    // through (verified with `]bad[`, `a b`, empty, `x:99999999`, `[::1`). It
+    // throws BEFORE the session lookup, so on a daemon that binds 0.0.0.0 with
+    // no auth, one malformed request from anything that could reach the port
+    // used to take out every session on the host.
+    log.warn("upgrade failed — closing socket", describe(err));
+    socket.destroy();
+  }
+});
+
+/**
+ * Refuse an upgrade with a real HTTP response, then close (DRY-45). ws's own
+ * abortHandshake() writes one, so once we take ownership of a socket — which is
+ * exactly what listening for 'wsClientError' does — skipping it leaves the
+ * client with a bare TCP close and nothing to report. Mirrors ws 8.21's
+ * abortHandshake shape.
+ *
+ * The no-op 'error' listener is load-bearing, not defensive: Node's http server
+ * removes its OWN socket error handler before emitting 'upgrade' (verified —
+ * listenerCount('error') is 0 in the handler), so writing to a socket the peer
+ * has already reset would emit 'error' with nothing listening. That is this
+ * ticket's bug class exactly, re-introduced by the act of answering politely.
+ */
+function rejectUpgrade(
+  socket: import("node:stream").Duplex,
+  code: number,
+  message: string,
+  fields?: LogFields,
+): void {
+  log.warn(`upgrade rejected — ${message}`, { status: code, ...fields });
+  socket.on("error", () => socket.destroy());
+  if (!socket.writable) {
+    socket.destroy();
+    return;
+  }
+  socket.once("finish", () => socket.destroy());
+  socket.end(
+    `HTTP/1.1 ${code} ${http.STATUS_CODES[code]}\r\n` +
+      `Connection: close\r\n` +
+      `Content-Type: text/plain\r\n` +
+      `Content-Length: ${Buffer.byteLength(message)}\r\n` +
+      `\r\n` +
+      message,
+  );
+}
+
+function upgrade(
+  req: http.IncomingMessage,
+  socket: import("node:stream").Duplex,
+  head: Buffer,
+): void {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const match = url.pathname.match(/^\/api\/sessions\/([^/]+)\/attach$/);
   if (!match) {
-    socket.destroy();
-    return;
+    return rejectUpgrade(socket, 404, "not a session attach endpoint", {
+      path: url.pathname,
+    });
   }
   const session = manager.get(match[1]);
   if (!session) {
-    socket.destroy();
-    return;
+    // The stale-tab case: a browser reconnecting to a session this daemon no
+    // longer has (it restarted, or the session was killed). Silently destroying
+    // the socket made the single most likely post-restart symptom invisible.
+    return rejectUpgrade(socket, 404, "unknown session", { id: match[1] });
   }
   wss.handleUpgrade(req, socket, head, (ws) => {
     session.attach(ws);
+    // A client socket erroring must cost that client and nothing else (DRY-45).
+    // `ws` emits 'error' on the WebSocket for any frame-level protocol fault
+    // (a malformed/unmasked frame, a bad opcode, an oversized payload); an
+    // 'error' event with no listener THROWS in Node, so before this handler a
+    // single bad frame from one browser tab took the whole daemon down and
+    // every live agent PTY with it. Reproduced: one unmasked frame →
+    // "RangeError: Invalid WebSocket frame: MASK must be set" → process exit.
+    ws.on("error", (err: Error & { code?: string }) => {
+      // `id=` deliberately, matching every line session.ts writes — one grep key
+      // has to recover a session's whole timeline.
+      log.warn("client socket error — dropping that client", {
+        id: session.id,
+        code: err.code,
+        err: err.message,
+      });
+      // No terminate() here. For a frame error ws has already called
+      // close(1002) before emitting, so tearing the socket down on top of that
+      // replaces a status code the client could act on with an opaque 1006.
+      session.detach(ws as WebSocket);
+    });
     ws.on("message", (raw) => {
       let msg: ClientMessage;
       try {
@@ -384,8 +467,88 @@ server.on("upgrade", (req, socket, head) => {
     });
     ws.on("close", () => session.detach(ws as WebSocket));
   });
+}
+
+// NOT wss.on("error"): with `noServer: true` this WebSocketServer owns no http
+// server, so it never emits 'error' — that listener would be decoration. The
+// event that actually fires on this path is 'wsClientError' (a bad handshake
+// inside handleUpgrade). Note the ownership rule: ws aborts the handshake
+// itself ONLY while nothing is listening, so attaching a listener here makes
+// closing the socket — and answering the client — our job.
+wss.on("wsClientError", (err, socket) => {
+  rejectUpgrade(socket, 400, "bad websocket handshake", { err: err.message });
+});
+
+// --- Crash containment (DRY-45) ---
+// Everything below exists because this process IS the lifetime of every agent
+// session it owns: there is no persistence, so any exit destroys live work with
+// no way to get it back. What we can do is (a) never die for a reason that only
+// concerns one client, and (b) leave a trace when we do die.
+
+/**
+ * One-line census of what's at stake, for the log lines that precede a death.
+ * Reads the cheap `running` getter rather than building a SessionInfo per
+ * session — this runs inside crash handlers, where the less work between the
+ * fault and the line hitting disk, the better.
+ */
+function inventory(): LogFields {
+  const sessions = manager.list();
+  return {
+    sessions: sessions.length,
+    live: sessions.filter((s) => s.running).length,
+    ids: sessions.map((s) => s.id).join(",") || undefined,
+  };
+}
+
+process.on("uncaughtException", (err) => {
+  // describe() rather than err.message: `throw null` makes that dereference a
+  // TypeError, and a TypeError raised INSIDE this handler is fatal (Node exits
+  // 7) — a crash handler with its own crash path is worse than no handler.
+  // Stack goes in as a field so the record stays one greppable line.
+  log.error("UNCAUGHT EXCEPTION", {
+    ...describe(err),
+    ...inventory(),
+    action: CONFIG.log.exitOnUncaught ? "exiting" : "staying up",
+  });
+  // Node's default here is to die. For a PTY-owning daemon that trade is bad:
+  // exiting cleanly still destroys every agent, while staying up in a suspect
+  // state at least keeps the other N sessions reachable. Opt back into the
+  // default with DRYDOCK_EXIT_ON_UNCAUGHT=1 (see config.ts).
+  if (CONFIG.log.exitOnUncaught) process.exit(1);
+});
+
+process.on("unhandledRejection", (reason) => {
+  log.error("UNHANDLED REJECTION", { ...describe(reason), ...inventory() });
+});
+
+// Log what a shutdown is about to destroy before it happens. This is also what
+// makes the dev-watch footgun visible after the fact: `bun run daemon` is
+// `node --watch`, so any save under daemon/src/ SIGTERMs us and takes every
+// live PTY with it — that now leaves a line naming the sessions it killed.
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => {
+    log.warn(`${signal} — shutting down, destroying live sessions`, inventory());
+    process.exit(0);
+  });
+}
+
+let listening = false;
+
+server.on("error", (err: Error & { code?: string }) => {
+  log.error("http server error", { code: err.code, err: err.message, listening });
+  // Any failure before we're listening is fatal — there are no sessions yet, so
+  // nothing to preserve, and a daemon that isn't bound is no daemon. Exit
+  // explicitly rather than letting the event loop drain: that path exits 0,
+  // which reads as a clean shutdown in whatever is watching us. EADDRINUSE is
+  // just the common case; EACCES and EADDRNOTAVAIL are equally terminal.
+  if (!listening) process.exit(1);
 });
 
 server.listen(CONFIG.port, CONFIG.host, () => {
-  console.log(`[drydock] daemon listening on http://${CONFIG.host}:${CONFIG.port}`);
+  listening = true;
+  log.info("daemon listening", {
+    url: `http://${CONFIG.host}:${CONFIG.port}`,
+    pid: process.pid,
+    log: log.file() || "(stdout only)",
+  });
 });

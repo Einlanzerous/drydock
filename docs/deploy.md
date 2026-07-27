@@ -41,7 +41,12 @@ One-time, so the unit survives logout/reboot:
 sudo loginctl enable-linger $USER
 ```
 
-Logs: `journalctl --user -u drydock-daemon -f`
+Logs: `journalctl --user -u drydock-daemon -f` for the unit's view, and
+`~/.drydock/daemon-4318.log` for the daemon's own (DRY-45) — session and client
+lifecycle plus crash traces, one line each, rotating one generation at 8 MiB.
+Prefer the file when working out why sessions died: it survives restarts of both
+the daemon and journald, and the last line before a gap names the sessions that
+went with it. Override with `DRYDOCK_LOG_FILE` in `~/.drydock/prod/.env`.
 
 ## Shell (container)
 
