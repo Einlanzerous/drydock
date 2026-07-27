@@ -67,7 +67,10 @@ function onKey(e: KeyboardEvent) {
 </script>
 
 <template>
-  <div v-if="open" class="scrim" @mousedown="emit('close')">
+  <!-- .prevent matters: without it the browser's default mousedown focus action
+       runs after the close handler and pulls focus off the terminal we just
+       handed it back to (DRY-43). -->
+  <div v-if="open" class="scrim" @mousedown.prevent="emit('close')">
     <div class="palette" @mousedown.stop>
       <div class="search">
         <svg width="17" height="17" viewBox="0 0 16 16" fill="none" stroke="#5b9bd5" stroke-width="1.5">

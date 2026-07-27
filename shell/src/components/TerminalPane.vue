@@ -189,23 +189,6 @@ onMounted(async () => {
   t.loadAddon(f);
   t.open(termEl.value!);
   t.onData((data) => sendWs({ type: "input", data }));
-
-  // DRY-43: xterm's hidden textarea consumes every keydown, so the app-level
-  // Ctrl/Cmd+K never reached App's window listener and the quick-launch palette
-  // silently refused to open. Since DRY-40 focuses a freshly spawned pane,
-  // "focus is inside a terminal" is the normal state — which made the shortcut
-  // the header advertises effectively dead in daily use. Returning false makes
-  // xterm skip the key without calling preventDefault, so it bubbles to the
-  // window listener.
-  //
-  // The cost is real and deliberate: Ctrl+K is readline's kill-to-end-of-line,
-  // and it no longer reaches the shell. The palette is what the UI advertises
-  // ("Ctrl K" in the header), so it wins the chord.
-  t.attachCustomKeyEventHandler((ev) => {
-    const paletteChord = (ev.ctrlKey || ev.metaKey) && (ev.key === "k" || ev.key === "K");
-    return !(ev.type === "keydown" && paletteChord);
-  });
-
   registerMdLinks(t);
   term.value = t;
   fit.value = f;
