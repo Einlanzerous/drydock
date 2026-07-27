@@ -35,7 +35,20 @@ export class PostgresStore implements StateStore {
   readonly kind = "postgres" as const;
   private readonly pool: pg.Pool;
   private ready: Promise<void> | null = null;
-  private lastFailureAt = 0;
+  /**
+   * When we last saw a failure, 0 while we believe the store is healthy.
+   *
+   * This tracks EVERY operation, not just migration, and that distinction is
+   * the whole point. Keying the cooldown off "have we migrated yet" made it
+   * dead code the moment the first migration succeeded: `ready` stayed
+   * resolved forever, so a database that died later was re-dialled on every
+   * single request. Measured against a partitioned (not refusing) database,
+   * that is `connectionTimeoutMillis` — 5s — per request, indefinitely, and
+   * the shell's restore blocks on one of them before it can draw the desktop.
+   * A refused connection hides this: ECONNREFUSED returns instantly, which is
+   * why `docker stop` looks fine and a network partition does not.
+   */
+  private downSince = 0;
 
   constructor(connectionString: string) {
     this.pool = new pg.Pool({
@@ -57,15 +70,14 @@ export class PostgresStore implements StateStore {
   }
 
   /**
-   * Connect + migrate, once. A failure is remembered rather than cached
-   * forever: the next call after the cooldown retries, so a database that comes
-   * up later heals without a daemon restart (which would cost every session).
+   * Connect + migrate, once. A failure clears the cached attempt so the next
+   * caller past the cooldown retries — a database that comes up later heals
+   * without a daemon restart, which matters because a restart costs every
+   * live session.
    */
   private ensureReady(): Promise<void> {
     if (this.ready) return this.ready;
     const attempt = this.migrate().catch((err) => {
-      this.lastFailureAt = Date.now();
-      // Let the next caller past the cooldown try again.
       this.ready = null;
       throw err;
     });
@@ -73,28 +85,49 @@ export class PostgresStore implements StateStore {
     return attempt;
   }
 
+  /**
+   * Run a store operation, fast-failing while the database is known to be
+   * down. The cooldown doesn't make an outage cheap, it makes it BOUNDED: one
+   * request per 10s window pays the connect timeout and the rest return
+   * immediately, instead of every request paying it.
+   */
   private async guard<T>(fn: () => Promise<T>): Promise<T> {
-    if (!this.ready && Date.now() - this.lastFailureAt < RETRY_COOLDOWN_MS) {
+    if (this.downSince && Date.now() - this.downSince < RETRY_COOLDOWN_MS) {
       throw new Error("postgres unavailable (retrying shortly)");
     }
-    await this.ensureReady();
-    return fn();
+    try {
+      await this.ensureReady();
+      const result = await fn();
+      this.downSince = 0;
+      return result;
+    } catch (err) {
+      this.downSince = Date.now();
+      throw err;
+    }
   }
 
   private async migrate(): Promise<void> {
     const client = await this.pool.connect();
     try {
-      await client.query(`
-        create table if not exists drydock_schema_migrations (
-          name       text primary key,
-          applied_at timestamptz not null default now()
-        )
-      `);
-      // Serialize against other daemons pointed at this database. Session-level
-      // (not xact) so it spans the per-file transactions below; released in
-      // `finally` and, failing that, by the connection closing.
+      // Lock FIRST, before any DDL. `create table if not exists` is not itself
+      // concurrency-safe in Postgres — two sessions running it at once can
+      // collide in the catalog and raise "duplicate key value violates unique
+      // constraint pg_type_typname_nsp_index" or a bare "relation already
+      // exists". Creating the ledger before taking the lock left the bootstrap
+      // exposed to exactly the race the lock exists to prevent, which is the
+      // realistic startup shape: `bun run up` and a prod daemon coming back at
+      // the same time, both pointed at one database.
+      //
+      // Session-level (not xact) so the lock spans the per-file transactions
+      // below; released in `finally`, and by the connection closing if not.
       await client.query("select pg_advisory_lock($1)", [MIGRATION_LOCK]);
       try {
+        await client.query(`
+          create table if not exists drydock_schema_migrations (
+            name       text primary key,
+            applied_at timestamptz not null default now()
+          )
+        `);
         const applied = new Set(
           (await client.query<{ name: string }>("select name from drydock_schema_migrations")).rows.map(
             (r) => r.name,
@@ -192,9 +225,5 @@ export class PostgresStore implements StateStore {
     } catch (err) {
       return { kind: this.kind, ok: false, error: (err as Error).message };
     }
-  }
-
-  async close(): Promise<void> {
-    await this.pool.end().catch(() => {});
   }
 }

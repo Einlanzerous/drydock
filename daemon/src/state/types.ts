@@ -58,5 +58,4 @@ export interface StateStore {
   clear(owner: string, name: string): Promise<void>;
   /** Cheap liveness probe for /healthz. Never rejects — reports instead. */
   health(): Promise<StoreHealth>;
-  close(): Promise<void>;
 }

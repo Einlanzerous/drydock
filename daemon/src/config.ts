@@ -1,3 +1,5 @@
+import * as os from "node:os";
+
 /**
  * Parse DRYDOCK_REPO_PATHS ("name=path,other=~/other") into a name→path map.
  * Lets a host map repos that don't live under the common root to explicit
@@ -110,6 +112,23 @@ export const CONFIG = {
      * daemon can at least keep separate desks.
      */
     owner: process.env.DRYDOCK_OWNER ?? "local",
+    /**
+     * Which saved desk this daemon owns, defaulting to something unique per
+     * daemon instance.
+     *
+     * A desk is a set of window ids belonging to THIS daemon's sessions, so
+     * two daemons sharing one row is not sharing, it's a fight: each reconciles
+     * away the other's windows (their sessions don't exist here) and saves the
+     * result. A plain "default" made that the out-of-the-box behaviour for the
+     * arrangement this ticket is actually aimed at — a desktop and a work
+     * laptop pointed at one central Postgres — where both are :4317 on
+     * different hosts, so the port alone wouldn't separate them either.
+     *
+     * The file store got this right by accident (its default path carries the
+     * port); this is the same rule made explicit and host-aware. Set it to the
+     * same value on two daemons to deliberately share a desk.
+     */
+    workspace: process.env.DRYDOCK_WORKSPACE ?? `${os.hostname()}-${PORT}`,
     /**
      * Cap on a single saved workspace, bytes. The daemon is unauthenticated
      * (see `host`), so an unbounded PUT is an unbounded write to whatever is

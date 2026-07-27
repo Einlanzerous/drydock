@@ -79,7 +79,12 @@ function startDb() {
     process.exit(1);
   }
   const [bin, base] = compose;
-  const composeArgs = [...base, "-f", COMPOSE_FILE, "up", "-d"];
+  // --project-directory is not cosmetic: Compose takes the project directory
+  // from the first -f file, so without it the project root is deploy/ and the
+  // repo-root .env is never read — DRYDOCK_DB_PASSWORD and DRYDOCK_DB_PORT
+  // would silently take their compose defaults while the daemon honoured the
+  // real values, producing a container it cannot authenticate against.
+  const composeArgs = [...base, "--project-directory", ROOT, "-f", COMPOSE_FILE, "up", "-d"];
   console.log(`[up] starting local postgres (${bin} ${composeArgs.join(" ")})`);
   const up = spawnSync(bin, composeArgs, { stdio: "inherit", cwd: ROOT, env: process.env });
   if (up.status !== 0) process.exit(up.status ?? 1);
@@ -128,7 +133,11 @@ if (wantDb) {
   // container from a different host, or at a central database while still
   // keeping the local one running.
   if (!process.env.DRYDOCK_DATABASE_URL) {
-    const pw = process.env.DRYDOCK_DB_PASSWORD ?? "drydock";
+    // encodeURIComponent because this is a URL, not a string template: a
+    // password containing @ : / ? # — all of them ordinary in a generated
+    // password — otherwise produces a URL that parses to the wrong host, or
+    // doesn't parse at all.
+    const pw = encodeURIComponent(process.env.DRYDOCK_DB_PASSWORD ?? "drydock");
     const port = process.env.DRYDOCK_DB_PORT ?? "5433";
     process.env.DRYDOCK_DATABASE_URL = `postgres://drydock:${pw}@127.0.0.1:${port}/drydock`;
   }
@@ -140,6 +149,17 @@ const child = spawn("bun", ["run", "--filter", "*", "dev"], {
   stdio: "inherit",
   cwd: ROOT,
   env: process.env,
+});
+
+// Same rule this repo keeps relearning (DRY-45, and the store's pool): an
+// 'error' event with no listener THROWS. spawn() emits it when the binary
+// isn't there, so without this a machine missing `bun` on PATH got a stack
+// trace out of the launcher instead of the one sentence that fixes it.
+child.on("error", (err) => {
+  console.error(`[up] could not start \`bun\`: ${err.message}`);
+  console.error("     Install Bun (https://bun.sh), or run the halves directly:");
+  console.error("       bun run daemon   /   bun run shell");
+  process.exit(1);
 });
 
 // Hand signals down rather than dying first: this process is the parent of the

@@ -89,13 +89,23 @@ Non-negotiable properties, all of them regressions waiting to happen:
    `/api/workspace` answers 503. Start it again and the store heals *without a
    daemon restart* — a restart is precisely what kills every live agent.
    `PostgresStore` migrates lazily for this reason; nothing connects at boot.
-2. **The `pool.on("error")` listener is load-bearing** (DRY-45's bug class): an
+2. **`docker stop` is NOT a sufficient outage test.** It frees the port, so
+   every connect fails instantly with ECONNREFUSED and any latency bug hides.
+   A real partition — host up, packets dropped — costs `connectionTimeoutMillis`
+   per attempt instead. That distinction concealed a live bug: the store's retry
+   cooldown keyed off "have we migrated yet", so once the first migration
+   succeeded it never engaged again and every request re-dialled a dead
+   database for 5s, with the shell's restore blocking on one before it could
+   draw. Test with a proxy that accepts and then goes silent, and assert on
+   *timings*, not just status codes. The cooldown must be driven by the last
+   failure of ANY operation.
+3. **The `pool.on("error")` listener is load-bearing** (DRY-45's bug class): an
    idle client dying emits `error`, and an unhandled `error` event throws. Delete
    that line and stopping Postgres kills the daemon.
-3. **The daemon never parses `windows`.** That shape is the shell's (`Win`), and
+4. **The daemon never parses `windows`.** That shape is the shell's (`Win`), and
    mirroring it here would be the protocol.ts tax on a payload we hand back
    unread. Validation is structural only.
-4. **Prove it at the surface, not with curl.** The claim is "the desk follows the
+5. **Prove it at the surface, not with curl.** The claim is "the desk follows the
    person", so the tests that matter are: wipe `localStorage` → reload → desk
    intact; and a browser profile that has never seen the desk → same desk. Both
    pass under the old localStorage design only by accident. Use the `verify`

@@ -6,7 +6,7 @@
 // and reserves space for the dock; focus puts one window large with a
 // right-hand thumbnail strip of the rest.
 import { onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { loadLayout, saveLayout, type LayoutSource } from "./layoutStore.js";
+import { loadLayout, saveLayout } from "./layoutStore.js";
 
 export type LayoutMode = "float" | "tile" | "focus";
 export type WinType = "agent" | "bash";
@@ -71,10 +71,10 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
   // machines. Ordering matters more than it used to — awaiting a network round
   // trip before the first poll is the difference between restoring a desk and
   // rebuilding one from scratch at cascade positions.
-  async function hydrate(): Promise<LayoutSource> {
-    if (!opts.persistKey) return "none";
-    const { layout: saved, source } = await loadLayout(opts.persistKey);
-    if (!saved) return source;
+  async function hydrate(): Promise<void> {
+    if (!opts.persistKey) return;
+    const saved = await loadLayout(opts.persistKey);
+    if (!saved) return;
     // DRY-42: heal layouts persisted while a duplicate-id window existed (the
     // spawn-vs-poll race wrote both copies, and the deep watcher made the
     // corruption survive reloads). Prefer the workspace-kind entry — it
@@ -92,7 +92,6 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
       .filter((w) => !w.minimized)
       .reduce<Win | null>((best, w) => (!best || w.z > best.z ? w : best), null);
     focusedId.value = top?.id ?? null;
-    return source;
   }
 
   // Debounced so a drag/resize (many mutations/sec) coalesces into one write.

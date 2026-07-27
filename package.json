@@ -15,8 +15,8 @@
     "daemon:local": "DRYDOCK_HOST=127.0.0.1 bun run --filter '@drydock/daemon' dev",
     "shell": "bun run --filter '@drydock/shell' dev",
     "dev": "bun run --filter '*' dev",
-    "db:up": "docker compose -f deploy/compose.db.yml up -d",
-    "db:down": "docker compose -f deploy/compose.db.yml down",
+    "db:up": "docker compose --project-directory . -f deploy/compose.db.yml up -d",
+    "db:down": "docker compose --project-directory . -f deploy/compose.db.yml down",
     "db:psql": "docker exec -it drydock-db psql -U drydock -d drydock"
   },
   "engines": {

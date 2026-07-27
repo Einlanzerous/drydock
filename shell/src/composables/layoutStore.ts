@@ -12,7 +12,7 @@
 // discarded, not migrated, so an old blob can never crash the restore path.
 // That rule stays in the CLIENT on purpose — the daemon stores the version but
 // cannot know which shapes this build of the UI is able to read.
-import { DAEMON_HTTP } from "../lib/daemon.js";
+import { deleteWorkspace, fetchWorkspace, putWorkspace } from "../lib/daemon.js";
 import type { LayoutMode, Win } from "./useWindowManager.js";
 
 const PREFIX = "drydock.layout";
@@ -26,10 +26,6 @@ export interface PersistedLayout {
   layout: LayoutMode;
   windows: Win[];
 }
-
-/** Where a restored layout came from — lets a caller tell "this desk roams"
- *  apart from "I'm running on this browser's copy". */
-export type LayoutSource = "daemon" | "local" | "none";
 
 function keyFor(host: string): string {
   return `${PREFIX}.${host}`;
@@ -89,14 +85,23 @@ function noteRecovered(): void {
   console.info("[drydock] layout persistence restored");
 }
 
-async function pushRemote(data: PersistedLayout): Promise<void> {
-  const res = await fetch(`${DAEMON_HTTP}/api/workspace`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(data),
-  });
-  if (!res.ok) throw new Error(`daemon returned ${res.status}`);
-}
+/**
+ * Whether we have successfully READ the daemon's copy this session, and so
+ * whether we're entitled to overwrite it.
+ *
+ * This gates every push, and it exists to close a data-loss path that only
+ * shows up in the scenario this whole feature is for. If the store is
+ * unreachable at page load, the restore falls back to the local mirror — and
+ * on a browser that has never been here, the mirror is empty. The desktop then
+ * builds itself from live sessions at cascade positions, the watcher fires,
+ * and the moment the store comes back that from-scratch layout is written
+ * straight over the desk you arranged on the other machine.
+ *
+ * So: no read, no write. Nothing is lost — the mirror keeps working and a
+ * reload re-reads — and the daemon's copy is only ever replaced by a client
+ * that knows what it's replacing.
+ */
+let mayPush = false;
 
 /**
  * Restore the saved arrangement.
@@ -108,34 +113,33 @@ async function pushRemote(data: PersistedLayout): Promise<void> {
  * to remove. The cost is losing at most one debounce window (400ms) of dragging
  * if the tab is closed mid-write, which is not worth a clock war.
  */
-export async function loadLayout(
-  host: string,
-): Promise<{ layout: PersistedLayout | null; source: LayoutSource }> {
+export async function loadLayout(host: string): Promise<PersistedLayout | null> {
   try {
-    const res = await fetch(`${DAEMON_HTTP}/api/workspace`);
-    if (!res.ok) throw new Error(`daemon returned ${res.status}`);
-    const body = await res.json();
+    const workspace = await fetchWorkspace();
+    // The read succeeded, so we now know what the daemon holds — including
+    // "nothing" — and may write over it.
+    mayPush = true;
     noteRecovered();
-    const remote = validate(body.workspace);
+    const remote = validate(workspace);
     if (remote) {
       writeLocal(host, remote); // keep the offline mirror current
-      return { layout: remote, source: "daemon" };
+      return remote;
     }
     // The daemon has nothing for us. If this browser does, it's a desk that
     // predates daemon-side storage (or a reset done elsewhere) — hand it up, so
     // upgrading to DRY-28 is a one-time migration instead of a silent reset.
     const local = readLocal(host);
     if (local) {
-      void pushRemote(local).catch(noteDegraded);
-      return { layout: local, source: "local" };
+      void putWorkspace(local).catch(noteDegraded);
+      return local;
     }
-    return { layout: null, source: "none" };
+    return null;
   } catch (err) {
-    // Daemon unreachable, or its store is degraded (503): fall back to the
-    // mirror. The desktop still works, it just stops roaming until it's back.
+    // Daemon unreachable, its store degraded (503), or the read timed out:
+    // fall back to the mirror and, crucially, DON'T push (see `mayPush`). The
+    // desktop still works; it just stops roaming until a reload gets a read in.
     noteDegraded(err);
-    const local = readLocal(host);
-    return { layout: local, source: local ? "local" : "none" };
+    return readLocal(host);
   }
 }
 
@@ -148,7 +152,8 @@ export async function loadLayout(
 export function saveLayout(host: string, layout: LayoutMode, windows: Win[]): void {
   const data: PersistedLayout = { version: LAYOUT_VERSION, layout, windows };
   writeLocal(host, data);
-  pushRemote(data).then(noteRecovered, noteDegraded);
+  if (!mayPush) return; // never overwrite a copy we failed to read
+  putWorkspace(data).then(noteRecovered, noteDegraded);
 }
 
 /** Reset the saved arrangement in both places. */
@@ -161,7 +166,7 @@ export async function clearLayout(host: string): Promise<void> {
     }
   }
   try {
-    await fetch(`${DAEMON_HTTP}/api/workspace`, { method: "DELETE" });
+    await deleteWorkspace();
   } catch (err) {
     noteDegraded(err);
   }

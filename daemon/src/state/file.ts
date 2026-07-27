@@ -40,6 +40,49 @@ export class FileStore implements StateStore {
     this.path = expandHome(file);
   }
 
+  /** A fresh, prototype-free document. See `plain()` for why. */
+  private empty(): FileShape {
+    return { version: FILE_VERSION, owners: Object.create(null) };
+  }
+
+  /**
+   * Re-key a parsed object onto a null prototype.
+   *
+   * `?name=` reaches these maps as a key, and on an ordinary object a lookup of
+   * `__proto__` / `constructor` / `toString` hits Object.prototype instead of
+   * missing. That produced two real faults, both silent: reading
+   * `?name=constructor` returned a phantom "workspace", and writing
+   * `?name=__proto__` reported 200 while storing nothing (assigning
+   * `__proto__` sets the prototype rather than creating an own property, so
+   * JSON.stringify dropped it). The route now rejects such names outright —
+   * this is the second line, so the store is not one careless caller away from
+   * the same behaviour.
+   */
+  private plain<T>(obj: Record<string, T>): Record<string, T> {
+    return Object.assign(Object.create(null), obj);
+  }
+
+  /**
+   * Is this a document we can work with?
+   *
+   * The null and array cases are explicit because `typeof` reports "object"
+   * for both, and letting `owners: null` through did not fail loudly — it
+   * wedged every subsequent read AND write with a TypeError, permanently,
+   * while health() went on reporting the store green. Shared with health() so
+   * the check that decides "this file gets replaced" is the same one that
+   * decides "say so out loud".
+   */
+  private static isValidShape(data: unknown): data is FileShape {
+    const d = data as FileShape | null;
+    return !!(
+      d &&
+      d.version === FILE_VERSION &&
+      d.owners &&
+      typeof d.owners === "object" &&
+      !Array.isArray(d.owners)
+    );
+  }
+
   private read(): FileShape {
     try {
       const raw = fs.readFileSync(this.path, "utf8");
@@ -47,17 +90,23 @@ export class FileStore implements StateStore {
       // An unreadable/foreign shape is discarded rather than migrated — same
       // rule the shell applies to a stale layout blob. Losing a window
       // arrangement is a nuisance; refusing to boot over one is not.
-      if (!data || data.version !== FILE_VERSION || typeof data.owners !== "object") {
+      if (!FileStore.isValidShape(data)) {
         log.warn("state file has an unknown shape — starting fresh", { file: this.path });
-        return { version: FILE_VERSION, owners: {} };
+        return this.empty();
       }
-      return data;
+      const owners = Object.create(null) as FileShape["owners"];
+      for (const [owner, spaces] of Object.entries(data.owners)) {
+        if (spaces && typeof spaces === "object" && !Array.isArray(spaces)) {
+          owners[owner] = this.plain(spaces);
+        }
+      }
+      return { version: FILE_VERSION, owners };
     } catch (err) {
       const e = err as NodeJS.ErrnoException;
       if (e.code !== "ENOENT") {
         log.warn("state file unreadable — starting fresh", { file: this.path, err: e.message });
       }
-      return { version: FILE_VERSION, owners: {} };
+      return this.empty();
     }
   }
 
@@ -91,7 +140,7 @@ export class FileStore implements StateStore {
     return this.enqueue(() => {
       const data = this.read();
       const saved: WorkspaceState = { ...state, updatedAt: Date.now() };
-      (data.owners[owner] ??= {})[name] = saved;
+      (data.owners[owner] ??= Object.create(null))[name] = saved;
       this.write(data);
       return saved;
     });
@@ -108,21 +157,34 @@ export class FileStore implements StateStore {
     });
   }
 
+  /**
+   * Answer about the file we'd actually use, not a proxy for it.
+   *
+   * Checking only that the DIRECTORY was writable was worse than checking
+   * nothing: a state file that wedged every load and save still reported
+   * `ok: true`, so the one signal meant to make degradation visible was the
+   * thing hiding it. Reading a few KB is not a cost worth being wrong over.
+   */
   async health(): Promise<StoreHealth> {
-    // The file legitimately doesn't exist until the first save, so "can I write
-    // where it would go" is the real question — an unwritable directory is the
-    // failure worth reporting (read-only $HOME, wrong owner after a sudo run).
     try {
       fs.mkdirSync(path.dirname(this.path), { recursive: true });
       fs.accessSync(path.dirname(this.path), fs.constants.W_OK);
+      // No file until the first save — a healthy empty store, not a fault.
+      if (fs.existsSync(this.path)) {
+        fs.accessSync(this.path, fs.constants.R_OK | fs.constants.W_OK);
+        if (!FileStore.isValidShape(JSON.parse(fs.readFileSync(this.path, "utf8")))) {
+          // Recoverable (the next save replaces it) but not silent: this is
+          // someone's saved desk about to be discarded.
+          return {
+            kind: this.kind,
+            ok: false,
+            error: "state file has an unreadable shape; it will be replaced on the next save",
+          };
+        }
+      }
       return { kind: this.kind, ok: true };
     } catch (err) {
       return { kind: this.kind, ok: false, error: (err as Error).message };
     }
-  }
-
-  async close(): Promise<void> {
-    // Let a save that's mid-flight finish rather than leaving a .tmp behind.
-    await this.queue.catch(() => {});
   }
 }

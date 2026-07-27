@@ -229,8 +229,20 @@ const server = http.createServer(async (req, res) => {
     // The daemon has no authentication, so `owner` here is a namespace, not a
     // boundary — it comes from host config, deliberately NOT from the request.
     if (pathname === "/api/workspace") {
-      const name = url.searchParams.get("name") || "default";
+      const name = url.searchParams.get("name") || CONFIG.state.workspace;
       const owner = CONFIG.state.owner;
+      // Constrain the one request-controlled key that reaches a store. Not
+      // theoretical: unconstrained, `?name=__proto__` answered 200 and stored
+      // nothing (assigning `__proto__` sets a prototype instead of an own
+      // property, so the write vanished at JSON.stringify), and
+      // `?name=constructor` read back a phantom workspace off Object.prototype.
+      // The file store now uses null-prototype maps too — this is the front
+      // door, that's the back stop.
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name)) {
+        return send(res, 400, {
+          error: "name must be 1-64 chars of [A-Za-z0-9._-] and start alphanumeric",
+        });
+      }
 
       if (req.method === "GET") {
         try {
@@ -259,6 +271,14 @@ const server = http.createServer(async (req, res) => {
         // Structural checks only. The daemon can't validate a Win — that shape
         // belongs to the shell (see state/types.ts) — so it confirms the
         // envelope it does own and stores the rest verbatim.
+        //
+        // The object check comes first because a body of literal `null` parses
+        // fine and then makes `body.version` a TypeError — thrown outside the
+        // parse guard, so a route whose entire contract is 400/413/503 answered
+        // 500 with a raw stack-derived message.
+        if (!body || typeof body !== "object" || Array.isArray(body)) {
+          return send(res, 400, { error: "body must be a JSON object" });
+        }
         if (!Number.isFinite(body.version) || typeof body.layout !== "string") {
           return send(res, 400, { error: "version (number) and layout (string) are required" });
         }

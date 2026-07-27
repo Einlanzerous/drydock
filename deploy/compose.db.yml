@@ -10,6 +10,13 @@
 # and ~/.claude auth that agents need (see docs/deploy.md). The isolated
 # single-host container profile is DRY-25's problem, not this file's.
 
+# Pinned, because Compose otherwise names the project after the directory it
+# resolves as the root — "deploy" when invoked bare, the checkout's folder name
+# with --project-directory. That name prefixes the volume, so the same repo in
+# two checkouts (a worktree, say) would quietly get two different databases
+# while both fought over the fixed container_name below.
+name: drydock
+
 services:
   db:
     image: postgres:16-alpine
