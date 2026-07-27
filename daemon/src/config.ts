@@ -80,6 +80,46 @@ export const CONFIG = {
   },
 
   /**
+   * Workspace state (DRY-28). The daemon owns the desktop arrangement so it
+   * follows the person rather than the browser profile that happened to draw it.
+   *
+   * `databaseUrl` picks the backend and nothing else does: set it and state
+   * lives in Postgres (your server, or a container on this host — same code
+   * path), leave it unset and state is a JSON file. Unset is the default on
+   * purpose: a fresh clone, and the isolated single-host profile (DRY-25), must
+   * work with no database to install.
+   */
+  state: {
+    /** postgres://user:pass@host:port/db — unset selects the file store. */
+    databaseUrl: process.env.DRYDOCK_DATABASE_URL || undefined,
+    /**
+     * Per-port like the log file, and for the same reason: the documented way
+     * to verify a change is a second daemon on a spare port (CLAUDE.md), and
+     * two daemons sharing one state file would overwrite each other's
+     * workspace on every save.
+     */
+    file: process.env.DRYDOCK_STATE_FILE ?? `~/.drydock/state-${PORT}.json`,
+    /**
+     * Who saved state belongs to. A constant until DRY-27 brings accounts.
+     *
+     * It is read from host config and NEVER from the request — a client can't
+     * name an owner — but that still doesn't make it a security boundary: the
+     * daemon has no authentication, so anyone who can reach the port reads and
+     * writes this owner's workspace. It exists so the schema doesn't have to
+     * change when real identities arrive, and so two people sharing one host
+     * daemon can at least keep separate desks.
+     */
+    owner: process.env.DRYDOCK_OWNER ?? "local",
+    /**
+     * Cap on a single saved workspace, bytes. The daemon is unauthenticated
+     * (see `host`), so an unbounded PUT is an unbounded write to whatever is
+     * backing it. A real arrangement is a few KB; 1 MiB is four orders of
+     * magnitude of headroom and still bounded.
+     */
+    maxBytes: num(process.env.DRYDOCK_STATE_MAX_BYTES, 1_048_576),
+  },
+
+  /**
    * Login shell spawned for plain "shell" sessions. Defaults to the host
    * owner's own shell ($SHELL) so their real setup loads — zsh + oh-my-zsh,
    * prompt, aliases — instead of a hardcoded bash. Override with DRYDOCK_SHELL.

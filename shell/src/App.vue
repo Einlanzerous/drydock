@@ -477,7 +477,13 @@ onMounted(async () => {
   // restored windows whose sessions are still alive (at their saved geometry),
   // drops those whose session is gone, and cascade-adds any new ones. Rehydrate
   // ticket associations so dock sub-labels / badges survive the reload too.
-  wm.hydrate();
+  //
+  // AWAITED since DRY-28 — the arrangement is fetched from the daemon now, and
+  // letting the first refresh() run before it lands would reconcile against an
+  // empty window list: every live session re-added at a cascade position, the
+  // restored desk overwritten a beat later by the debounced save. The visible
+  // symptom would be "my layout resets itself on reload, sometimes".
+  await wm.hydrate();
   for (const w of wm.windows) if (w.ticket) ticketById[w.id] = w.ticket;
 
   await refresh();

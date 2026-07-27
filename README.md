@@ -77,6 +77,14 @@ smoke-test checklist — read it before touching `daemon/src/`.
 ```bash
 bun install            # installs both workspaces + builds node-pty
 
+bun run up             # daemon + shell in one command (+ Postgres, if declared)
+bun run up:local       # same, daemon locked to 127.0.0.1
+```
+
+Or start the halves separately, which is what you want when only one of them is
+being changed (the daemon's `--watch` restart destroys live PTYs):
+
+```bash
 bun run daemon         # → :4317  (runs on Node, see below; binds 0.0.0.0 — LAN/Tailscale)
 bun run daemon:local   # same, locked to 127.0.0.1
 bun run shell          # → http://0.0.0.0:5320  (runs on Bun; binds LAN by default)
@@ -156,9 +164,36 @@ no per-repo setup.
 - **"Your turn" indicator (DRY-18).** The injected `Stop` hook flags a session
   idle when the agent yields; the window badge and dock light up. A turn ending
   means "done *or* waiting on your reply" — the UI never claims "complete".
-- **Layout persistence (DRY-14).** Window positions, sizes, dock state, z-order,
-  and layout mode persist per daemon host across reloads
-  (`composables/layoutStore.ts`).
+- **Layout persistence (DRY-14, DRY-28).** Window positions, sizes, dock state,
+  z-order, and layout mode survive reloads — and, since the *daemon* holds them
+  rather than the browser, they follow you to whatever client attaches next.
+  Arrange the desk on the desktop, open the shell on a laptop, get the same desk
+  (`composables/layoutStore.ts` → `/api/workspace` → `daemon/src/state/`).
+
+## Workspace state (DRY-28)
+
+The daemon owns your arrangement, and where it puts it is one env var:
+
+| `DRYDOCK_DATABASE_URL` | store | for |
+|---|---|---|
+| unset (default) | JSON file, `~/.drydock/state-<port>.json` | a fresh clone, a single laptop — nothing to install |
+| `postgres://…` | Postgres, schema migrated on first use | a central database, or a container on this host |
+
+There is no third mode: "central Postgres" and "Postgres in Docker" are the same
+code path reached by a different URL, because a mode exercised in only one
+deployment is a mode that breaks in the other. `DRYDOCK_DB_LOCAL=1` in `.env`
+makes `bun run up` start that container (`deploy/compose.db.yml`, loopback-bound
+on `5433`) and point the daemon at it.
+
+A database that's unreachable **degrades, never escalates**: the daemon still
+boots, still spawns agents, still replays scrollback; `/api/workspace` answers
+503 and the shell keeps using its localStorage mirror until the store comes back
+(no daemon restart needed — which matters, since a restart is what kills every
+live PTY). Window positions must never be able to cost you a running agent.
+
+State is keyed by an `owner` that is the constant `local` until accounts land
+(DRY-27). It is a namespace, **not** a security boundary — the daemon has no
+auth.
 
 ## Layout
 
@@ -167,7 +202,9 @@ no per-repo setup.
   `server.ts` is the HTTP + WS surface; `repos.ts` resolves a ticket's repo
   name to its real working directory on this host; `worktree.ts` creates and
   prunes the per-ticket agent worktrees; `tracker/` holds the provider
-  abstraction (fixture / Switchyard / Jira behind one interface).
+  abstraction (fixture / Switchyard / Jira behind one interface); `state/`
+  holds workspace persistence (JSON file or Postgres behind one interface,
+  with the SQL migrations).
 - `shell/` — Vue 3 viewer. `components/TerminalPane.vue` is the core pane
   (xterm + approval overlay); `WindowFrame.vue` + `composables/useWindowManager.ts`
   do the windowing; `WorkspacePane.vue` is the composite ticket workspace;
