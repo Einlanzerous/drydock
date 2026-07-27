@@ -4,6 +4,7 @@ import * as pty from "node-pty";
 import type { WebSocket } from "ws";
 import { CONFIG } from "./config.js";
 import { CLAUDE_SETTINGS_PATH } from "./hooks.js";
+import { log } from "./log.js";
 import type {
   PermissionDecision,
   ServerMessage,
@@ -120,6 +121,15 @@ export class PtySession {
 
     this.pty.onData((data) => this.onData(data));
     this.pty.onExit(({ exitCode }) => this.onExit(exitCode));
+
+    log.info("session spawned", {
+      id: this.id,
+      pid: this.pty.pid,
+      command: this.command,
+      cwd: this.cwd,
+      ticket: this.ticket,
+      branch: this.branch,
+    });
   }
 
   private onData(data: string): void {
@@ -139,6 +149,13 @@ export class PtySession {
     this.status = "exited";
     this.exitCode = exitCode;
     this.idle = false; // process is gone; "exited" supersedes "your turn"
+    log.info("session exited", {
+      id: this.id,
+      command: this.command,
+      exitCode,
+      uptimeSec: Math.round((Date.now() - this.createdAt) / 1000),
+      clients: this.clients.size,
+    });
     this.broadcast({ type: "status", status: "exited", exitCode });
     // Resolve any dangling permission gates so the CLI isn't left hanging.
     for (const [requestId, p] of this.pending) {
@@ -151,6 +168,11 @@ export class PtySession {
   /** Attach a client: replay scrollback, then stream live + any open gates. */
   attach(ws: WebSocket): void {
     this.clients.add(ws);
+    log.info("client attached", {
+      id: this.id,
+      clients: this.clients.size,
+      replayBytes: this.scrollbackBytes,
+    });
     this.send(ws, { type: "replay", data: Buffer.concat(this.scrollback).toString("utf8") });
     this.send(ws, {
       type: "status",
@@ -164,7 +186,8 @@ export class PtySession {
   }
 
   detach(ws: WebSocket): void {
-    this.clients.delete(ws);
+    if (!this.clients.delete(ws)) return; // already dropped (e.g. by an error)
+    log.info("client detached", { id: this.id, clients: this.clients.size });
   }
 
   /**
@@ -204,7 +227,9 @@ export class PtySession {
   }
 
   kill(): void {
-    if (this.status === "running") this.pty.kill();
+    if (this.status !== "running") return;
+    log.info("session kill requested", { id: this.id, command: this.command });
+    this.pty.kill();
   }
 
   /**

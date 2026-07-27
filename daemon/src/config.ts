@@ -31,6 +31,27 @@ export const CONFIG = {
   scrollbackBytes: Number(process.env.DRYDOCK_SCROLLBACK_BYTES ?? 1_048_576),
 
   /**
+   * Daemon log (DRY-45). Session/client lifecycle and crash traces go here as
+   * well as to stdout, because stdout is the terminal that started the daemon —
+   * which is exactly what nobody still has open when they come asking why their
+   * agents vanished. Rotates one generation at maxBytes. Set DRYDOCK_LOG_FILE=
+   * (empty) to disable the file sink.
+   */
+  log: {
+    file: process.env.DRYDOCK_LOG_FILE ?? "~/.drydock/daemon.log",
+    maxBytes: Number(process.env.DRYDOCK_LOG_MAX_BYTES ?? 8_388_608),
+    /**
+     * An uncaught exception normally kills Node — and here that means killing
+     * every live agent PTY, unrecoverably, because a session's lifetime IS the
+     * process's. Since sessions can't survive a restart at all, staying up in a
+     * questionable state strictly beats exiting cleanly: the other N agents stay
+     * reachable. We log loudly and carry on. Set DRYDOCK_EXIT_ON_UNCAUGHT=1 to
+     * restore Node's default (e.g. under a supervisor, once sessions are durable).
+     */
+    exitOnUncaught: process.env.DRYDOCK_EXIT_ON_UNCAUGHT === "1",
+  },
+
+  /**
    * Login shell spawned for plain "shell" sessions. Defaults to the host
    * owner's own shell ($SHELL) so their real setup loads — zsh + oh-my-zsh,
    * prompt, aliases — instead of a hardcoded bash. Override with DRYDOCK_SHELL.

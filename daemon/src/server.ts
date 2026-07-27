@@ -3,6 +3,7 @@ import * as http from "node:http";
 import * as path from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import { CONFIG } from "./config.js";
+import { log, type LogFields } from "./log.js";
 import { SessionManager } from "./manager.js";
 import { expandHome, resolveRepoCwd } from "./repos.js";
 import {
@@ -69,9 +70,10 @@ const server = http.createServer(async (req, res) => {
         const r = resolveRepoCwd(body.repo);
         cwd = r.cwd;
         if (!r.matched) {
-          console.warn(
-            `[drydock] repo "${body.repo}" not found under repos root or overrides — spawning in ${r.cwd}`,
-          );
+          log.warn("repo not found under repos root or overrides — spawning in fallback", {
+            repo: body.repo,
+            cwd: r.cwd,
+          });
         }
       }
       const ticket = typeof body.ticket === "string" ? body.ticket : undefined;
@@ -94,9 +96,11 @@ const server = http.createServer(async (req, res) => {
           worktree = wt.cwd;
           branch = wt.branch;
         } catch (err) {
-          console.warn(
-            `[drydock] worktree for ${ticket} failed (${String(err)}) — spawning in ${cwd}`,
-          );
+          log.warn("worktree setup failed — spawning in the plain repo cwd", {
+            ticket,
+            cwd,
+            err: String(err),
+          });
         }
       }
 
@@ -363,6 +367,22 @@ server.on("upgrade", (req, socket, head) => {
   }
   wss.handleUpgrade(req, socket, head, (ws) => {
     session.attach(ws);
+    // A client socket erroring must cost that client and nothing else (DRY-45).
+    // `ws` emits 'error' on the WebSocket for any frame-level protocol fault
+    // (a malformed/unmasked frame, a bad opcode, an oversized payload); an
+    // 'error' event with no listener THROWS in Node, so before this handler a
+    // single bad frame from one browser tab took the whole daemon down and
+    // every live agent PTY with it. Reproduced: one unmasked frame →
+    // "RangeError: Invalid WebSocket frame: MASK must be set" → process exit.
+    ws.on("error", (err: Error & { code?: string }) => {
+      log.warn("client socket error — dropping that client", {
+        session: session.id,
+        code: err.code,
+        err: err.message,
+      });
+      session.detach(ws as WebSocket);
+      ws.terminate();
+    });
     ws.on("message", (raw) => {
       let msg: ClientMessage;
       try {
@@ -386,6 +406,66 @@ server.on("upgrade", (req, socket, head) => {
   });
 });
 
+wss.on("error", (err) => log.error("websocket server error", { err: String(err) }));
+
+// --- Crash containment (DRY-45) ---
+// Everything below exists because this process IS the lifetime of every agent
+// session it owns: there is no persistence, so any exit destroys live work with
+// no way to get it back. What we can do is (a) never die for a reason that only
+// concerns one client, and (b) leave a trace when we do die.
+
+/** One-line census of what's at stake, for the log lines that precede a death. */
+function inventory(): LogFields {
+  const sessions = manager.list();
+  return {
+    sessions: sessions.length,
+    live: sessions.filter((s) => s.info().status === "running").length,
+    ids: sessions.map((s) => s.id).join(",") || undefined,
+  };
+}
+
+process.on("uncaughtException", (err) => {
+  log.error("UNCAUGHT EXCEPTION", {
+    err: err.message,
+    ...inventory(),
+    action: CONFIG.log.exitOnUncaught ? "exiting" : "staying up",
+  });
+  log.error(err.stack ?? "(no stack)");
+  // Node's default here is to die. For a PTY-owning daemon that trade is bad:
+  // exiting cleanly still destroys every agent, while staying up in a suspect
+  // state at least keeps the other N sessions reachable. Opt back into the
+  // default with DRYDOCK_EXIT_ON_UNCAUGHT=1 (see config.ts).
+  if (CONFIG.log.exitOnUncaught) process.exit(1);
+});
+
+process.on("unhandledRejection", (reason) => {
+  log.error("UNHANDLED REJECTION", {
+    err: reason instanceof Error ? reason.message : String(reason),
+    ...inventory(),
+  });
+  if (reason instanceof Error && reason.stack) log.error(reason.stack);
+});
+
+// Log what a shutdown is about to destroy before it happens. This is also what
+// makes the dev-watch footgun visible after the fact: `bun run daemon` is
+// `node --watch`, so any save under daemon/src/ SIGTERMs us and takes every
+// live PTY with it — that now leaves a line naming the sessions it killed.
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
+  process.on(signal, () => {
+    log.warn(`${signal} — shutting down, destroying live sessions`, inventory());
+    process.exit(0);
+  });
+}
+
+server.on("error", (err: Error & { code?: string }) => {
+  // A listen failure (EADDRINUSE) is fatal and there is nothing to lose yet.
+  log.error("http server error", { code: err.code, err: err.message });
+  if (err.code === "EADDRINUSE") process.exit(1);
+});
+
 server.listen(CONFIG.port, CONFIG.host, () => {
-  console.log(`[drydock] daemon listening on http://${CONFIG.host}:${CONFIG.port}`);
+  log.info("daemon listening", {
+    url: `http://${CONFIG.host}:${CONFIG.port}`,
+    log: log.file() || "(stdout only)",
+  });
 });
