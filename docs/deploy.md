@@ -35,6 +35,14 @@ First run seeds `~/.drydock/prod/.env` from `.env.example` with
 `DRYDOCK_REPO_PATHS` overrides there. Secrets stay in that gitignored file on
 the host — never in an image or the repo.
 
+Workspace state (DRY-28) defaults to `~/.drydock/state-4318.json`, which needs
+no extra infrastructure and is a perfectly good answer for a single host. Point
+`DRYDOCK_DATABASE_URL` at a Postgres in that same `.env` to keep it in a
+database instead — the daemon migrates its own schema on first use, and treats
+an unreachable database as degraded rather than fatal, so adding one can't turn
+a database outage into a daemon that won't start. Note prod and dev must not
+share a state file: the default carries the port for exactly that reason.
+
 One-time, so the unit survives logout/reboot:
 
 ```sh

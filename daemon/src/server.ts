@@ -15,9 +15,11 @@ import {
 } from "./worktree.js";
 import type { ClientMessage } from "./protocol.js";
 import { createTracker, trackerInfo } from "./tracker/index.js";
+import { createStore } from "./state/index.js";
 
 const manager = new SessionManager();
 const tracker = createTracker();
+const store = createStore();
 
 // Permission modes where Claude Code runs tools without asking. In these the
 // PreToolUse hook still fires, but our approve/deny is moot — so we auto-allow
@@ -33,7 +35,11 @@ function send(res: http.ServerResponse, status: number, body: unknown): void {
     // a permissive CORS policy is fine here.
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Headers": "Content-Type, X-Drydock-Session",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    // PUT/DELETE are here for /api/workspace (DRY-28). Without them the
+    // browser's preflight rejects the save and the shell silently degrades to
+    // its local cache — which looks exactly like "the daemon isn't storing my
+    // layout", with no error anywhere on the daemon side to explain it.
+    "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
   });
   res.end(payload);
 }
@@ -45,13 +51,56 @@ async function readJson(req: http.IncomingMessage): Promise<any> {
   return JSON.parse(Buffer.concat(chunks).toString("utf8"));
 }
 
+/** Marker so the route can answer 413 instead of a generic 500. */
+class PayloadTooLarge extends Error {}
+
+/**
+ * readJson with a hard ceiling (DRY-28). The control-API payloads are a few
+ * hundred bytes, so readJson buffering whatever it's handed has never mattered;
+ * /api/workspace is the first endpoint whose whole job is to accept a blob, and
+ * it sits on a port with no authentication (see CONFIG.host). Stop at the cap
+ * while reading rather than after allocating the whole thing.
+ */
+async function readJsonCapped(req: http.IncomingMessage, maxBytes: number): Promise<any> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  for await (const chunk of req) {
+    const buf = chunk as Buffer;
+    total += buf.byteLength;
+    if (total > maxBytes) {
+      throw new PayloadTooLarge(`workspace exceeds the ${maxBytes} byte cap`);
+    }
+    chunks.push(buf);
+  }
+  if (chunks.length === 0) return {};
+  return JSON.parse(Buffer.concat(chunks).toString("utf8"));
+}
+
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
     const { pathname } = url;
 
     if (req.method === "OPTIONS") return send(res, 204, {});
-    if (pathname === "/healthz") return send(res, 200, { ok: true, sessions: manager.list().length });
+    if (pathname === "/healthz") {
+      return send(res, 200, {
+        // `ok` stays an answer about the DAEMON, not about everything it talks
+        // to. A daemon whose workspace store is unreachable spawns, attaches
+        // and replays perfectly well — reporting it as unhealthy would make
+        // anything watching this endpoint act on a fault that costs nobody a
+        // session. The store reports alongside instead, so a degraded one is
+        // visible without being fatal. (DRY-48 is where this endpoint grows a
+        // real opinion about internal state.)
+        //
+        // NB this probe can block for up to the pool's connect timeout when a
+        // configured Postgres is down. Nothing on the deploy path waits on it —
+        // install-prod.sh polls /api/sessions — but a monitor pointed here
+        // wants a timeout above 5s.
+        ok: true,
+        sessions: manager.list().length,
+        store: await store.health(),
+      });
+    }
 
     // --- Session control API ---
     if (pathname === "/api/sessions" && req.method === "GET") {
@@ -166,6 +215,101 @@ const server = http.createServer(async (req, res) => {
     if (killMatch && req.method === "POST") {
       manager.remove(killMatch[1]);
       return send(res, 200, { ok: true });
+    }
+
+    // --- Workspace state (DRY-28) ---
+    // The desktop arrangement, held by the daemon rather than the browser that
+    // drew it, so it follows the person to whatever client attaches next.
+    // `?name=` leaves room for more than one saved arrangement; the shell uses
+    // "default" only.
+    //
+    // The governing rule for this whole section: window positions are a
+    // convenience and live PTYs are the product, so a store that's unreachable
+    // degrades (503 → the shell keeps its local mirror) and never escalates.
+    // The daemon has no authentication, so `owner` here is a namespace, not a
+    // boundary — it comes from host config, deliberately NOT from the request.
+    if (pathname === "/api/workspace") {
+      const name = url.searchParams.get("name") || CONFIG.state.workspace;
+      const owner = CONFIG.state.owner;
+      // Constrain the one request-controlled key that reaches a store. Not
+      // theoretical: unconstrained, `?name=__proto__` answered 200 and stored
+      // nothing (assigning `__proto__` sets a prototype instead of an own
+      // property, so the write vanished at JSON.stringify), and
+      // `?name=constructor` read back a phantom workspace off Object.prototype.
+      // The file store now uses null-prototype maps too — this is the front
+      // door, that's the back stop.
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name)) {
+        return send(res, 400, {
+          error: "name must be 1-64 chars of [A-Za-z0-9._-] and start alphanumeric",
+        });
+      }
+
+      if (req.method === "GET") {
+        try {
+          // null (not 404) for "never saved": absence is the normal first-run
+          // state, and making the client tell 404-means-empty apart from
+          // 404-means-wrong-url is a distinction it can't act on either way.
+          return send(res, 200, { workspace: await store.load(owner, name), kind: store.kind });
+        } catch (err) {
+          log.warn("workspace load failed — client falls back to its local copy", {
+            owner,
+            name,
+            err: String(err),
+          });
+          return send(res, 503, { error: `state store: ${String(err)}`, degraded: true });
+        }
+      }
+
+      if (req.method === "PUT") {
+        let body: any;
+        try {
+          body = await readJsonCapped(req, CONFIG.state.maxBytes);
+        } catch (err) {
+          if (err instanceof PayloadTooLarge) return send(res, 413, { error: err.message });
+          return send(res, 400, { error: `invalid workspace body: ${String(err)}` });
+        }
+        // Structural checks only. The daemon can't validate a Win — that shape
+        // belongs to the shell (see state/types.ts) — so it confirms the
+        // envelope it does own and stores the rest verbatim.
+        //
+        // The object check comes first because a body of literal `null` parses
+        // fine and then makes `body.version` a TypeError — thrown outside the
+        // parse guard, so a route whose entire contract is 400/413/503 answered
+        // 500 with a raw stack-derived message.
+        if (!body || typeof body !== "object" || Array.isArray(body)) {
+          return send(res, 400, { error: "body must be a JSON object" });
+        }
+        if (!Number.isFinite(body.version) || typeof body.layout !== "string") {
+          return send(res, 400, { error: "version (number) and layout (string) are required" });
+        }
+        if (!Array.isArray(body.windows)) {
+          return send(res, 400, { error: "windows must be an array" });
+        }
+        try {
+          const workspace = await store.save(owner, name, {
+            version: body.version,
+            layout: body.layout,
+            windows: body.windows,
+          });
+          return send(res, 200, { workspace });
+        } catch (err) {
+          log.warn("workspace save failed — client keeps its local copy", {
+            owner,
+            name,
+            err: String(err),
+          });
+          return send(res, 503, { error: `state store: ${String(err)}`, degraded: true });
+        }
+      }
+
+      if (req.method === "DELETE") {
+        try {
+          await store.clear(owner, name);
+          return send(res, 200, { ok: true });
+        } catch (err) {
+          return send(res, 503, { error: `state store: ${String(err)}`, degraded: true });
+        }
+      }
     }
 
     // --- Session-relative file read (DRY-35 markdown viewer) ---

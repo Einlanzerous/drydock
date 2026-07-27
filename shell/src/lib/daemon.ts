@@ -71,6 +71,52 @@ export function attachUrl(id: string): string {
   return `${DAEMON_WS}/api/sessions/${id}/attach`;
 }
 
+// --- Workspace state (DRY-28) ---
+// The saved desk. `windows` stays `unknown[]` at this layer for the same reason
+// the daemon keeps it opaque: the Win shape belongs to the window manager, and
+// this module has no business knowing it. composables/layoutStore.ts owns
+// validation and the localStorage mirror; this owns the wire.
+
+export interface WorkspaceEnvelope {
+  version: number;
+  layout: string;
+  windows: unknown[];
+  /** Server clock at write; absent on the way up. */
+  updatedAt?: number;
+}
+
+/**
+ * Fetch the saved desk, or null when this owner has never saved one.
+ *
+ * The timeout is load-bearing, not hygiene: the desktop can't render until
+ * this resolves, and the daemon's own Postgres connect timeout is 5s — so a
+ * partitioned database (as opposed to a refused connection, which fails
+ * instantly) would otherwise mean five seconds of blank page before the local
+ * mirror gets its turn. Bail early and let the mirror answer.
+ */
+export async function fetchWorkspace(): Promise<WorkspaceEnvelope | null> {
+  const res = await fetch(`${DAEMON_HTTP}/api/workspace`, {
+    signal: AbortSignal.timeout(3000),
+  });
+  if (!res.ok) throw new Error(`daemon returned ${res.status}`);
+  const body = await res.json();
+  return body.workspace ?? null;
+}
+
+export async function putWorkspace(data: WorkspaceEnvelope): Promise<void> {
+  const res = await fetch(`${DAEMON_HTTP}/api/workspace`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(data),
+  });
+  if (!res.ok) throw new Error(`daemon returned ${res.status}`);
+}
+
+export async function deleteWorkspace(): Promise<void> {
+  const res = await fetch(`${DAEMON_HTTP}/api/workspace`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`daemon returned ${res.status}`);
+}
+
 /** Where a ticket's spawn will land (host-side preview). */
 export interface RepoResolution {
   cwd: string;

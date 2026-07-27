@@ -1,0 +1,62 @@
+# Local Postgres for Drydock's workspace state (DRY-28).
+#
+# This is the "or a container on this laptop" half of the store: `bun run up`
+# starts it when DRYDOCK_DB_LOCAL=1, and points the daemon at it. Pointing
+# DRYDOCK_DATABASE_URL at a central Postgres instead needs none of this file —
+# the daemon can't tell the difference, which is the point.
+#
+# Deliberately NOT a full Drydock stack: the daemon spawns `claude` and $SHELL
+# as you, on your host, so containerizing it would strip the repos, toolchain
+# and ~/.claude auth that agents need (see docs/deploy.md). The isolated
+# single-host container profile is DRY-25's problem, not this file's.
+
+# Pinned, because Compose otherwise names the project after the directory it
+# resolves as the root — "deploy" when invoked bare, the checkout's folder name
+# with --project-directory. That name prefixes the volume, so the same repo in
+# two checkouts (a worktree, say) would quietly get two different databases
+# while both fought over the fixed container_name below.
+name: drydock
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: drydock-db
+    restart: unless-stopped
+    # Loopback-bound on purpose: it must not be reachable from the LAN or
+    # Tailscale. That is a second line of defence, not the first — see the
+    # password below.
+    ports:
+      - "127.0.0.1:${DRYDOCK_DB_PORT:-5433}:5432"
+    # 5433, not 5432: a dev box with any other Postgres — construct-server's
+    # shared instance, say — already owns 5432, and a port clash here fails at
+    # `up` time with an error nobody connects to workspace state.
+    environment:
+      POSTGRES_USER: drydock
+      # No default, deliberately: a committed fallback would give every Drydock
+      # install the same database password — "it's only window positions" and
+      # "it's only on loopback" are both true, and neither makes a shared
+      # credential a good idea. `bun run up` / `bun run db:up` generate one into
+      # the gitignored .env on first use (scripts/up.mjs), and they refuse to
+      # start the container without it, so the missing-value case is handled
+      # there with a message rather than here.
+      #
+      # A bare ${VAR} on purpose. Compose's ${VAR:?message} form would be more
+      # self-explanatory, but secret scanners read the message as the value and
+      # open an incident on it — which is how this line got flagged once already.
+      POSTGRES_PASSWORD: ${DRYDOCK_DB_PASSWORD}
+      POSTGRES_DB: drydock
+    volumes:
+      - drydock_pgdata:/var/lib/postgresql/data
+    # scripts/up.mjs waits on this before starting the daemon. Without it the
+    # daemon races the database's own first-boot initdb, and while that only
+    # costs a degraded first request (the store retries), it looks exactly like
+    # a misconfiguration in the logs.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U drydock -d drydock"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 3s
+
+volumes:
+  drydock_pgdata:

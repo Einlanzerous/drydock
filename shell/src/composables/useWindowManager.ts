@@ -60,14 +60,20 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
   const desk = reactive({ w: 1000, h: 640 });
   let z = 30;
 
-  // ---- persistence (DRY-14) ----
-  // Restore the saved arrangement. App.vue calls this *before* the first daemon
+  // ---- persistence (DRY-14, daemon-backed in DRY-28) ----
+  // Restore the saved arrangement. App.vue awaits this *before* the first daemon
   // poll, so reconcile() sees the restored windows and keeps the alive ones at
   // their saved geometry (rather than re-adding at cascade), adds genuinely new
   // sessions, and drops windows whose session is gone.
-  function hydrate() {
+  //
+  // Async since DRY-28: the arrangement now comes from the daemon (falling back
+  // to this browser's mirror), which is what lets it follow you between
+  // machines. Ordering matters more than it used to — awaiting a network round
+  // trip before the first poll is the difference between restoring a desk and
+  // rebuilding one from scratch at cascade positions.
+  async function hydrate(): Promise<void> {
     if (!opts.persistKey) return;
-    const saved = loadLayout(opts.persistKey);
+    const saved = await loadLayout(opts.persistKey);
     if (!saved) return;
     // DRY-42: heal layouts persisted while a duplicate-id window existed (the
     // spawn-vs-poll race wrote both copies, and the deep watcher made the
