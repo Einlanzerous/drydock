@@ -38,8 +38,17 @@ for (const stream of [process.stdout, process.stderr]) {
   stream.on("error", () => dead.add(stream));
 }
 
-/** Set once the file sink has failed, so we complain exactly once. */
-let fileBroken = false;
+/**
+ * File-sink health. A latch would be wrong: a transient ENOSPC, a directory
+ * that briefly vanishes under a deploy, an NFS blip — any one of them would
+ * silently end file logging for the rest of the process's life, and the notice
+ * about it goes to a console that may itself be gone. So we back off and retry,
+ * and when the file comes back we say so IN THE FILE, with the count of lines
+ * that were lost while it was down.
+ */
+let fileFailedAt = 0; // 0 = healthy; otherwise when it broke
+let fileDropped = 0; // lines lost since it broke
+const FILE_RETRY_MS = 30_000;
 
 function target(): string {
   return CONFIG.log.file ? expandHome(CONFIG.log.file) : "";
@@ -57,7 +66,11 @@ function toConsole(stream: NodeJS.WritableStream, line: string): void {
 /** Append one line, rotating a single generation aside when over the cap. */
 function write(line: string): void {
   const file = target();
-  if (!file || fileBroken) return; // DRYDOCK_LOG_FILE= (empty) disables the file sink
+  if (!file) return; // DRYDOCK_LOG_FILE= (empty) disables the file sink
+  if (fileFailedAt && Date.now() - fileFailedAt < FILE_RETRY_MS) {
+    fileDropped++;
+    return;
+  }
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     // Stat per write instead of tracking a byte counter in memory: the
@@ -80,19 +93,36 @@ function write(line: string): void {
       }
     }
     fs.appendFileSync(file, line + "\n");
+    if (fileFailedAt) {
+      // Recovered. Record the gap in the file itself — the reader of this file
+      // is the one who needs to know a stretch of it is missing. Direct append,
+      // not write(), so this can't recurse.
+      const note = fmt("WARN", "log file recovered", {
+        droppedLines: fileDropped,
+        downSec: Math.round((Date.now() - fileFailedAt) / 1000),
+      });
+      fileFailedAt = 0;
+      fileDropped = 0;
+      fs.appendFileSync(file, note + "\n");
+    }
   } catch (err) {
     // Never take the daemon down over logging — but never swallow this either:
     // a silently unwritable log reproduces the exact "they died and there are no
     // logs" symptom this module exists to end, while the startup banner is still
     // advertising the path.
-    fileBroken = true;
-    toConsole(
-      process.stderr,
-      fmt("ERROR", "log file unusable — continuing on stdout only", {
-        file,
-        err: String(err),
-      }),
-    );
+    const first = fileFailedAt === 0;
+    fileFailedAt = Date.now();
+    fileDropped++;
+    if (first) {
+      toConsole(
+        process.stderr,
+        fmt("ERROR", "log file write failed — backing off, will retry", {
+          file,
+          retrySec: FILE_RETRY_MS / 1000,
+          err: String(err),
+        }),
+      );
+    }
   }
 }
 

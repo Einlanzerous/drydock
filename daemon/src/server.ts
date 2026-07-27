@@ -369,6 +369,42 @@ server.on("upgrade", (req, socket, head) => {
   }
 });
 
+/**
+ * Refuse an upgrade with a real HTTP response, then close (DRY-45). ws's own
+ * abortHandshake() writes one, so once we take ownership of a socket — which is
+ * exactly what listening for 'wsClientError' does — skipping it leaves the
+ * client with a bare TCP close and nothing to report. Mirrors ws 8.21's
+ * abortHandshake shape.
+ *
+ * The no-op 'error' listener is load-bearing, not defensive: Node's http server
+ * removes its OWN socket error handler before emitting 'upgrade' (verified —
+ * listenerCount('error') is 0 in the handler), so writing to a socket the peer
+ * has already reset would emit 'error' with nothing listening. That is this
+ * ticket's bug class exactly, re-introduced by the act of answering politely.
+ */
+function rejectUpgrade(
+  socket: import("node:stream").Duplex,
+  code: number,
+  message: string,
+  fields?: LogFields,
+): void {
+  log.warn(`upgrade rejected — ${message}`, { status: code, ...fields });
+  socket.on("error", () => socket.destroy());
+  if (!socket.writable) {
+    socket.destroy();
+    return;
+  }
+  socket.once("finish", () => socket.destroy());
+  socket.end(
+    `HTTP/1.1 ${code} ${http.STATUS_CODES[code]}\r\n` +
+      `Connection: close\r\n` +
+      `Content-Type: text/plain\r\n` +
+      `Content-Length: ${Buffer.byteLength(message)}\r\n` +
+      `\r\n` +
+      message,
+  );
+}
+
 function upgrade(
   req: http.IncomingMessage,
   socket: import("node:stream").Duplex,
@@ -377,13 +413,16 @@ function upgrade(
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const match = url.pathname.match(/^\/api\/sessions\/([^/]+)\/attach$/);
   if (!match) {
-    socket.destroy();
-    return;
+    return rejectUpgrade(socket, 404, "not a session attach endpoint", {
+      path: url.pathname,
+    });
   }
   const session = manager.get(match[1]);
   if (!session) {
-    socket.destroy();
-    return;
+    // The stale-tab case: a browser reconnecting to a session this daemon no
+    // longer has (it restarted, or the session was killed). Silently destroying
+    // the socket made the single most likely post-restart symptom invisible.
+    return rejectUpgrade(socket, 404, "unknown session", { id: match[1] });
   }
   wss.handleUpgrade(req, socket, head, (ws) => {
     session.attach(ws);
@@ -434,11 +473,10 @@ function upgrade(
 // server, so it never emits 'error' — that listener would be decoration. The
 // event that actually fires on this path is 'wsClientError' (a bad handshake
 // inside handleUpgrade). Note the ownership rule: ws aborts the handshake
-// itself ONLY while nothing is listening, so attaching a log-only listener here
-// would silently leak every rejected socket. Hence the destroy.
+// itself ONLY while nothing is listening, so attaching a listener here makes
+// closing the socket — and answering the client — our job.
 wss.on("wsClientError", (err, socket) => {
-  log.warn("websocket handshake rejected", { err: err.message });
-  socket.destroy();
+  rejectUpgrade(socket, 400, "bad websocket handshake", { err: err.message });
 });
 
 // --- Crash containment (DRY-45) ---
