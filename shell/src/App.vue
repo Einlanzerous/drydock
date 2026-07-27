@@ -388,10 +388,35 @@ const layouts: LayoutMode[] = ["float", "tile", "focus"];
 const deskEl = ref<HTMLDivElement | null>(null);
 let deskObs: ResizeObserver | null = null;
 
+// DRY-43: now that Ctrl+K reaches us from inside a terminal (TerminalPane's
+// custom key handler lets the chord through), dismissing the palette has to put
+// the keyboard back where it came from — otherwise the round trip costs you a
+// click before you can type again, on what is now the common path.
+//
+// Only a terminal is restored, deliberately: handing focus back to the header
+// button that opened the palette is exactly the shape of DRY-40's
+// duplicate-spawn bug, where a retained button focus turned the next Enter into
+// a second click. Spawning from the palette doesn't restore either — the new
+// pane claims the keyboard on mount.
+let focusBeforePalette: HTMLElement | null = null;
+
+function openPalette() {
+  focusBeforePalette = document.activeElement as HTMLElement | null;
+  quickOpen.value = true;
+}
+
+function dismissPalette() {
+  quickOpen.value = false;
+  const el = focusBeforePalette;
+  focusBeforePalette = null;
+  if (el?.classList.contains("xterm-helper-textarea") && document.contains(el)) el.focus();
+}
+
 function onKey(e: KeyboardEvent) {
   if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
     e.preventDefault();
-    quickOpen.value = !quickOpen.value;
+    if (quickOpen.value) dismissPalette();
+    else openPalette();
   }
   // Esc closes the ticket detail (it no longer dismisses on outside click).
   if (e.key === "Escape" && selectedTicket.value) {
@@ -490,7 +515,7 @@ onBeforeUnmount(() => {
           </svg>
           <span>{{ focusedRepo }}</span>
         </div>
-        <button class="new" @click="quickOpen = true">
+        <button class="new" @click="openPalette()">
           <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#9cc6ec" stroke-width="1.6">
             <path d="M8 3v10M3 8h10" />
           </svg>
@@ -590,7 +615,7 @@ onBeforeUnmount(() => {
       :open="quickOpen"
       :tickets="tickets"
       :provider-name="providerName"
-      @close="quickOpen = false"
+      @close="dismissPalette"
       @launch="openTicket"
       @spawn-blank="(quickOpen = false), spawnFresh('claude')"
       @spawn-shell="(quickOpen = false), spawnFresh('shell')"
