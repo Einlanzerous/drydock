@@ -32,13 +32,18 @@ services:
     # `up` time with an error nobody connects to workspace state.
     environment:
       POSTGRES_USER: drydock
-      # Required, with deliberately no default. A committed fallback would give
-      # every Drydock install the same database password — "it's only window
-      # positions" and "it's only on loopback" are both true, and neither makes
-      # a shared credential a good idea. `bun run up` / `bun run db:up`
-      # generate one into the gitignored .env on first use, so there is nothing
-      # to remember and nothing to commit; scripts/up.mjs is where that lives.
-      POSTGRES_PASSWORD: ${DRYDOCK_DB_PASSWORD:?run `bun run db:up`, which generates one into .env}
+      # No default, deliberately: a committed fallback would give every Drydock
+      # install the same database password — "it's only window positions" and
+      # "it's only on loopback" are both true, and neither makes a shared
+      # credential a good idea. `bun run up` / `bun run db:up` generate one into
+      # the gitignored .env on first use (scripts/up.mjs), and they refuse to
+      # start the container without it, so the missing-value case is handled
+      # there with a message rather than here.
+      #
+      # A bare ${VAR} on purpose. Compose's ${VAR:?message} form would be more
+      # self-explanatory, but secret scanners read the message as the value and
+      # open an incident on it — which is how this line got flagged once already.
+      POSTGRES_PASSWORD: ${DRYDOCK_DB_PASSWORD}
       POSTGRES_DB: drydock
     volumes:
       - drydock_pgdata:/var/lib/postgresql/data
