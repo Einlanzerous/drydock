@@ -310,7 +310,7 @@ function onWorkspacePatch(id: string, patch: Partial<Win>) {
 // Picking a ticket (sidebar or palette) opens its detail panel; the actual
 // spawn happens from there once you've read it and hit "Send to agent".
 function openTicket(t: Ticket) {
-  quickOpen.value = false;
+  closePalette();
   selectedTicket.value = t;
   ticketZ.value = wm.allocZ(); // land it on top of the current windows
 }
@@ -388,14 +388,78 @@ const layouts: LayoutMode[] = ["float", "tile", "focus"];
 const deskEl = ref<HTMLDivElement | null>(null);
 let deskObs: ResizeObserver | null = null;
 
+// DRY-43. The palette shortcut never fired while a terminal had focus: xterm's
+// textarea handler calls cancel() (preventDefault + stopPropagation) for Ctrl+K,
+// so a bubble-phase window listener never saw the event. Since DRY-40 focuses a
+// freshly spawned pane, "focus is inside a terminal" is the normal state, which
+// made the shortcut the header advertises effectively dead.
+//
+// Claiming the chord in the CAPTURE phase fixes it for every focused element at
+// once — terminals today, any other key-swallowing widget later — rather than
+// per Terminal instance. Stopping propagation there is also what keeps xterm
+// from turning the chord into readline's ^K for the PTY: it never reaches the
+// textarea at all.
+//
+// The cost is deliberate: Ctrl+K no longer reaches any shell, so kill-to-
+// end-of-line is gone in every pane. The palette is what the UI advertises, so
+// it wins the chord (documented in README).
+function isPaletteChord(e: KeyboardEvent): boolean {
+  // altKey is excluded because AltGr reports ctrlKey AND altKey on Windows and
+  // Linux layouts — without this, AltGr+K stops typing its real character.
+  // shiftKey is excluded because Ctrl+Shift+K is the browser's console and the
+  // UI never advertised it. toLowerCase (rather than matching "K") keeps the
+  // chord working under CapsLock, which reports "K" with shiftKey false.
+  return (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "k";
+}
+
+/** What had the keyboard when the palette opened, to hand it back on dismiss. */
+let focusBeforePalette: HTMLElement | null = null;
+
+function openPalette() {
+  focusBeforePalette = document.activeElement as HTMLElement | null;
+  quickOpen.value = true;
+}
+
+/**
+ * Close the palette. `restore` hands the keyboard back to whatever had it when
+ * the palette opened — the other half of DRY-43, since the chord is now normally
+ * pressed from inside a terminal and landing back on <body> costs a click before
+ * you can type. Spawning does NOT restore: the new pane claims focus on mount
+ * (DRY-40).
+ */
+function closePalette(restore = false) {
+  quickOpen.value = false;
+  const el = focusBeforePalette;
+  focusBeforePalette = null; // never retain a detached pane's DOM
+  // Text entry only, never a button: DRY-40's duplicate-spawn bug was a retained
+  // button focus turning the next Enter into a second click. A terminal's
+  // xterm-helper-textarea IS a <textarea>, so this covers panes without
+  // depending on xterm's private class name, and covers real inputs too.
+  // preventScroll matches xterm's own focus() — .desk is overflow:hidden, so a
+  // scroll caused here has no scrollbar to undo it.
+  if (restore && el?.isConnected && el.matches?.("textarea, input")) {
+    el.focus({ preventScroll: true });
+  }
+}
+
 function onKey(e: KeyboardEvent) {
-  if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+  if (isPaletteChord(e)) {
+    // Swallow every repeat, but toggle only on the first: holding the chord
+    // would otherwise thrash focus between the terminal and the palette input.
     e.preventDefault();
-    quickOpen.value = !quickOpen.value;
+    e.stopPropagation();
+    if (e.repeat) return;
+    if (quickOpen.value) closePalette(true);
+    else openPalette();
+    return;
   }
   // Esc closes the ticket detail (it no longer dismisses on outside click).
-  if (e.key === "Escape" && selectedTicket.value) {
-    selectedTicket.value = null;
+  // While the palette is open, Esc belongs to the palette, which closes itself —
+  // we run in the capture phase, so quickOpen is still true here and this bails
+  // before one keystroke collapses both layers and discards a typed prompt.
+  if (e.key === "Escape") {
+    if (quickOpen.value) return;
+    if (selectedTicket.value) selectedTicket.value = null;
   }
 }
 
@@ -432,14 +496,16 @@ onMounted(async () => {
     });
     deskObs.observe(deskEl.value);
   }
-  window.addEventListener("keydown", onKey);
+  // Capture phase: see isPaletteChord — xterm cancels the chord before it can
+  // bubble, so we have to claim it on the way down (DRY-43).
+  window.addEventListener("keydown", onKey, true);
 });
 
 onBeforeUnmount(() => {
   if (poll) clearInterval(poll);
   if (ticketPoll) clearInterval(ticketPoll);
   deskObs?.disconnect();
-  window.removeEventListener("keydown", onKey);
+  window.removeEventListener("keydown", onKey, true);
 });
 </script>
 
@@ -490,7 +556,7 @@ onBeforeUnmount(() => {
           </svg>
           <span>{{ focusedRepo }}</span>
         </div>
-        <button class="new" @click="quickOpen = true">
+        <button class="new" @click="openPalette()">
           <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#9cc6ec" stroke-width="1.6">
             <path d="M8 3v10M3 8h10" />
           </svg>
@@ -590,10 +656,9 @@ onBeforeUnmount(() => {
       :open="quickOpen"
       :tickets="tickets"
       :provider-name="providerName"
-      @close="quickOpen = false"
+      @close="closePalette(true)"
       @launch="openTicket"
-      @spawn-blank="(quickOpen = false), spawnFresh('claude')"
-      @spawn-shell="(quickOpen = false), spawnFresh('shell')"
+      @spawn-shell="closePalette(), spawnFresh('shell')"
     />
 
     <TicketDetail

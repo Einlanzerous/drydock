@@ -134,7 +134,13 @@ no per-repo setup.
 - **`Ctrl K` quick-launch.** Fuzzy-search tickets by key/title/repo; `↵` opens
   the selection's ticket panel (or a blank `claude` session when nothing
   matches), `⇧↵` spawns a plain shell — the palette is the one entry point for
-  blank sessions (DRY-39).
+  blank sessions (DRY-39). It works with focus inside a terminal, which is the
+  normal state once a spawned pane grabs the keyboard: the shell claims the
+  chord in the capture phase (DRY-43). **The trade: `Ctrl K` no longer reaches
+  any shell**, so readline's kill-to-end-of-line is gone in every pane — use
+  `Ctrl U` (kill to start) or `Ctrl W` (kill previous word), or rebind the
+  palette in `App.vue`'s `isPaletteChord` if you'd rather keep `^K`. Dismissing
+  the palette hands the keyboard back to the terminal it was opened from.
 - **Markdown doc viewer (DRY-35).** Ctrl/Cmd-click a `*.md` path in any
   terminal pane and it opens rendered (sanitized `marked` + DOMPurify) in a
   floating window; relative links inside a doc navigate in place, and a refresh
