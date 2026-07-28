@@ -171,6 +171,10 @@ function scheduleRetry(): void {
  * from sleep is on a different network than the one that failed, and a tab
  * being looked at again is the moment a stale desk starts to matter.
  *
+ * Promptness only — recovery does NOT depend on either event firing, because
+ * one that did would be recovery that silently doesn't happen on whatever
+ * browser doesn't fire it.
+ *
  * `attempt` deliberately isn't reset. A tab flipped back and forth would
  * otherwise poll on every flip, and the point of the ceiling is that a long
  * outage stays quiet.
@@ -216,12 +220,12 @@ function listen(): void {
  */
 async function recover(): Promise<void> {
   if (!degraded || !hooks || !recoveryHost || recovering) return;
-  // A tab nobody is looking at has no desk to keep in sync. Reschedule rather
-  // than relying on `visibilitychange` alone — recovery that hangs off a single
-  // event is recovery that doesn't happen when the event doesn't fire.
-  if (typeof document !== "undefined" && document.visibilityState === "hidden") {
-    return scheduleRetry();
-  }
+  // It runs in a hidden tab too. Skipping there looked like an easy saving —
+  // nobody arranges a desk they can't see — but what's being retried is the
+  // desk this tab is ALREADY holding, and a background tab that never flushes
+  // it and is eventually closed loses that arrangement outright. Browsers
+  // throttle background timers on their own, so the polling goes sparse without
+  // any help from here.
   recovering = true;
   try {
     if (!mayPush) {
