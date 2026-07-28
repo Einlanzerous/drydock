@@ -208,8 +208,12 @@ auth.
 - `shell/` — Vue 3 viewer. `components/TerminalPane.vue` is the core pane
   (xterm + approval overlay); `WindowFrame.vue` + `composables/useWindowManager.ts`
   do the windowing; `WorkspacePane.vue` is the composite ticket workspace;
-  `TicketDetail.vue` is the read-then-spawn panel; `TrackerSidebar.vue`,
-  `QuickLaunch.vue` (Ctrl K), and `Dock.vue` round out the chrome.
+  `TicketDetail.vue` is the read-then-spawn panel; `RunRail.vue` owns the
+  bottom edge (unattended runs and minimized windows in one component, DRY-49)
+  with `GatePanel.vue` as the out-of-pane decision surface; `TrackerSidebar.vue`
+  and `QuickLaunch.vue` (Ctrl K) round out the chrome.
+- `daemon/src/runs.ts` — what an autonomous run leaves behind: a handoff
+  document on disk, and a tracker comment pointing at it.
 - `daemon/src/hooks.ts` — the `PreToolUse` + `Stop` + `SessionStart` hooks the
   daemon injects into every spawned `claude` via `--settings` (no per-repo
   install). `daemon/src/protocol.ts` is the wire protocol, duplicated verbatim

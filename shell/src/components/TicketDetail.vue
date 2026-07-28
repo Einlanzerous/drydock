@@ -33,6 +33,11 @@ type SpawnPayload = {
   branch?: string;
   // DRY-22: start the agent in auto (hands-off) permission mode.
   auto: boolean;
+  /**
+   * DRY-49: run unattended. No window — the run gets a card on the rail, the
+   * daemon submits the prompt, and gates surface there instead of in a pane.
+   */
+  autonomous?: boolean;
 };
 const emit = defineEmits<{
   (e: "send", payload: SpawnPayload): void; // App opens a workspace (DRY-36)
@@ -170,6 +175,34 @@ function send(): void {
   emit("send", payload());
 }
 
+/**
+ * Send it off to run unattended (DRY-49).
+ *
+ * Two overrides, both deliberate:
+ *
+ * `auto: false` — the Auto toggle defaults ON, and an autonomous run in auto
+ * mode is exactly what this ticket calls "explicitly not this": the daemon
+ * auto-allows every gate in the hands-off modes, so the run would be
+ * uninterrupted with no safety and the rail would never ask you anything. The
+ * value of autonomous mode is the middle — gates still fire, and there is now
+ * somewhere for them to go.
+ *
+ * Worktree ON regardless of the toggle when the repo is a git work tree —
+ * letting something nobody is watching write into the human's own checkout is
+ * how you lose an afternoon.
+ */
+function sendAutonomous(): void {
+  if (!prompt.value.trim() || !cwd.value.trim()) return;
+  const on = isGit.value;
+  emit("send", {
+    ...payload(),
+    auto: false,
+    autonomous: true,
+    worktree: on ? worktreePath.value.trim() : false,
+    branch: on ? branch.value.trim() || undefined : undefined,
+  });
+}
+
 // Prune the existing worktree (DRY-15 "reset"): removes it + starts the branch
 // fresh on the next spawn. The agent's branch is kept; only the checkout is
 // dropped. Re-previews so the reuse badge clears.
@@ -275,6 +308,14 @@ async function resetWorktree(): Promise<void> {
         Auto
       </label>
       <button class="cancel" @click="emit('close')">Cancel</button>
+      <button
+        class="auto-run"
+        title="Run unattended: no window, a card on the rail, and gates surface there. Always isolated in a worktree, and never in auto mode — the gates are the point."
+        :disabled="!prompt.trim() || !cwd.trim()"
+        @click="sendAutonomous"
+      >
+        Run autonomously
+      </button>
       <button
         class="send"
         title="Open a workspace: agent + this ticket in a drawer + a co-located zsh shell (both minimized)"
@@ -578,6 +619,31 @@ async function resetWorktree(): Promise<void> {
 .send {
   background: #2a6db0;
   color: #eef5fb;
+}
+/* Outlined, not filled: "Spawn Agent" stays the primary action. Launching
+   something you then walk away from should be a deliberate second choice. */
+.auto-run {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  background: #13171c;
+  border: 1px solid #2a557d;
+  color: #9cc6ec;
+}
+.auto-run:hover:not(:disabled) {
+  background: #16222e;
+}
+.auto-run:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 .send:disabled {
   opacity: 0.5;

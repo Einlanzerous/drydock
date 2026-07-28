@@ -52,6 +52,16 @@ export async function createSession(opts: {
   /** Override the branch checked out in the worktree (default `agent/<TICKET>`). */
   branch?: string;
   title?: string;
+  /** Run unattended: a rail card instead of a window, hour-long gates (DRY-49). */
+  autonomous?: boolean;
+  /** Who started it. Only the browser sends spawns today, so only "you". */
+  origin?: "you" | "agent";
+  /**
+   * First prompt, typed AND submitted by the daemon once the CLI settles.
+   * Autonomous runs must use this rather than `initialInput` on a pane: there
+   * is no pane, so nothing else would ever type it.
+   */
+  input?: string;
 }): Promise<SessionInfo> {
   const res = await fetch(`${DAEMON_HTTP}/api/sessions`, {
     method: "POST",
@@ -96,16 +106,38 @@ export async function answerGate(
   requestId: string,
   decision: "allow" | "deny",
   reason?: string,
+  /** Stop gating this tool for the rest of the run ("Always allow Bash", DRY-49). */
+  always?: boolean,
 ): Promise<void> {
   const res = await fetch(
     `${DAEMON_HTTP}/api/sessions/${encodeURIComponent(sessionId)}/permission`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ requestId, decision, reason }),
+      body: JSON.stringify({ requestId, decision, reason, always }),
     },
   );
   if (!res.ok && res.status !== 409 && res.status !== 404) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error ?? `daemon returned ${res.status}`);
+  }
+}
+
+/**
+ * Take over an autonomous run: it becomes an ordinary supervised session and
+ * leaves the rail (DRY-49). One-way — the daemon refuses the reverse, so
+ * there's no parameter to get wrong here.
+ */
+export async function takeOverRun(sessionId: string): Promise<void> {
+  const res = await fetch(
+    `${DAEMON_HTTP}/api/sessions/${encodeURIComponent(sessionId)}/autonomy`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ autonomous: false }),
+    },
+  );
+  if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error ?? `daemon returned ${res.status}`);
   }
