@@ -125,9 +125,15 @@ no per-repo setup.
 - **Windowed multi-pane desktop.** Every session is a window: drag/resize freely
   in Float mode, or let Tile/Focus manage the rects
   (`composables/useWindowManager.ts`). Minimizing sends a still-running session
-  to a macOS-style **dock** — the daemon owns the PTY, so a hidden pane costs
-  nothing; a pending approval keeps the dock dot pulsing so a gated session
+  to the rail's **DOCKED** lane — the daemon owns the PTY, so a hidden pane
+  costs nothing; a pending approval keeps its dot pulsing so a gated session
   can't get lost.
+- **The rail (DRY-49).** One component owns the bottom edge, in two lanes
+  separated by depth rather than colour: **UNDERWAY** (raised, agent-owned —
+  unattended runs that change on their own) and **DOCKED** (recessed,
+  you-owned — windows you minimized, which never change unless you touch them).
+  It reserves a constant 98px that Float/Tile/Focus subtract before laying
+  windows out, so a gate firing mid-drag never reflows the desk.
 - **Composite ticket workspace (DRY-21).** *The* way a ticket spawns (DRY-36
   collapsed the old separate agent-window path): one window binding the ticket
   and two independent PTYs — the agent on top, a co-located `zsh` below — with
@@ -161,6 +167,18 @@ no per-repo setup.
   permission mode; the daemon honors hands-off modes (`bypassPermissions` /
   `auto` / `dontAsk`) by auto-allowing instead of popping a gate that Claude
   Code would ignore anyway (DRY-5).
+- **Autonomous runs (DRY-49).** "Run autonomously" on the ticket panel starts a
+  run with no window at all: it gets a card on the rail, the daemon types and
+  submits the prompt itself, and it always works in a worktree. It is
+  deliberately *not* hands-off mode — gates still fire, and the rail is where
+  they go, answerable in place without opening a terminal. An unanswered gate
+  waits an hour (not the supervised 300s) and is then explicitly **denied with a
+  reason** and the run ended, because the alternative — the CLI falling back to
+  its own prompt inside a PTY nobody can see — is a run that looks busy forever.
+  Every run that ends writes a **handoff document** (`~/.drydock/runs`) and, when
+  the tracker supports comments, posts a line on the ticket pointing at it.
+  Clicking a card offers **Watch** (a window, still autonomous) or **Take over**
+  (an ordinary session; one-way).
 - **"Your turn" indicator (DRY-18).** The injected `Stop` hook flags a session
   idle when the agent yields; the window badge and dock light up. A turn ending
   means "done *or* waiting on your reply" — the UI never claims "complete".

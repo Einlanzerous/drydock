@@ -22,10 +22,14 @@ export type RunState =
   | "failed";
 
 export function runState(session: SessionInfo, gating: boolean): RunState {
-  // `failure` rather than the exit code alone: a run killed after an unanswered
-  // gate is terminated by us, so it can exit 0 while having plainly failed.
+  // `failure` is the ONLY thing that means failed — never the exit code. The
+  // daemon records a failure for every genuine one (including a run it killed
+  // after an unanswered gate, which can exit 0 while having plainly failed),
+  // and deliberately records none when a person stopped the run themselves.
+  // Reading the exit code here instead put "FAILED" on the card of every run
+  // anybody chose to stop, because a signalled process exits 129.
   if (session.failure) return "failed";
-  if (session.status === "exited") return session.exitCode === 0 ? "finished" : "failed";
+  if (session.status === "exited") return "finished";
   if (gating) return "gating";
   if (session.idle) return "ended-turn";
   if (!session.activity) return "starting";

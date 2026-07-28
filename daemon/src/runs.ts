@@ -54,6 +54,7 @@ function outcomeLine(session: PtySession, reason: RunEndReason): string {
     return `failed — ${failure?.reason ?? `exited ${info.exitCode ?? "?"}`}`;
   }
   if (reason === "finished") return "finished — the process exited cleanly";
+  if (reason === "stopped") return "stopped — ended by request";
   // Deliberately not "done". The Stop hook means the agent handed the turn
   // back; whether that was a sign-off or a question is not something we know,
   // and the UI must never spend the word on a guess (DRY-18).
@@ -182,6 +183,10 @@ export function runEndHandler(tracker: TrackerProvider) {
       return;
     }
 
+    // A run somebody stopped on purpose still gets its transcript kept, but no
+    // comment: the tracker is for things that happened while you weren't
+    // looking, and you were looking — you pressed the button.
+    if (reason === "stopped") return;
     // Only a run spawned FOR a ticket has anywhere to comment. One launched
     // without one still got its handoff above and still shows its terminal
     // state on the rail — that path is not degraded, it just has no ticket.

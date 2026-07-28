@@ -265,6 +265,25 @@ function onCardClick(card: Card): void {
       @terminal="emit('take-over', activeGate!.sessionId)"
     />
 
+    <!-- Watch / Take over. Take-over is the one legal crossing between the
+         lanes and it only goes one way, so it says so.
+         A CHILD OF THE RAIL, not of the lane it points at: the UNDERWAY lane
+         scrolls horizontally, and `overflow-x: auto` makes the browser clip the
+         other axis too — so anchored inside the lane this rendered above the
+         rail, looked perfectly fine, and swallowed every click into the desk
+         behind it. -->
+    <div v-if="chooser" class="chooser" @click.stop>
+      <span class="chooser-title">open as…</span>
+      <button @click="emit('watch', chooser!), (chooser = null)">
+        <strong>Watch</strong>
+        <span>Opens a window. Keeps running autonomously and stays in the rail.</span>
+      </button>
+      <button @click="emit('take-over', chooser!), (chooser = null)">
+        <strong>Take over</strong>
+        <span>Ends autonomy. Becomes a normal supervised session and leaves the rail.</span>
+      </button>
+    </div>
+
     <!-- The stream is how a gate arrives at all; while it's down, what's on
          screen is a snapshot of the past and no new gate will appear (DRY-50). -->
     <p v-if="!gatesConnected && (runs.length || docked.length)" class="offline">
@@ -315,20 +334,6 @@ function onCardClick(card: Card): void {
               </div>
             </div>
           </div>
-        </div>
-
-        <!-- Watch / Take over. Take-over is the one legal crossing between the
-             lanes and it only goes one way, so it says so. -->
-        <div v-if="chooser" class="chooser" @click.stop>
-          <span class="chooser-title">open as…</span>
-          <button @click="emit('watch', chooser!), (chooser = null)">
-            <strong>Watch</strong>
-            <span>Opens a window. Keeps running autonomously and stays in the rail.</span>
-          </button>
-          <button @click="emit('take-over', chooser!), (chooser = null)">
-            <strong>Take over</strong>
-            <span>Ends autonomy. Becomes a normal supervised session and leaves the rail.</span>
-          </button>
         </div>
       </div>
 
@@ -659,7 +664,9 @@ function onCardClick(card: Card): void {
 .chooser {
   position: absolute;
   left: 12px;
+  /* Anchored to the rail, above it — see the template comment. */
   bottom: calc(100% + 8px);
+  z-index: 1;
   width: 320px;
   display: flex;
   flex-direction: column;

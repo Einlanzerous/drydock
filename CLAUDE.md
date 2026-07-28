@@ -112,6 +112,58 @@ Non-negotiable properties, all of them regressions waiting to happen:
    pass under the old localStorage design only by accident. Use the `verify`
    skill.
 
+## Verifying autonomous runs (DRY-49)
+
+An autonomous run's premise is that nobody is watching, so every failure mode
+here is silent by construction. Use a throwaway daemon with the timeout turned
+down — an hour is the right default and a terrible test:
+
+```sh
+DRYDOCK_PORT=4399 DRYDOCK_AUTONOMOUS_PERMISSION_TIMEOUT_MS=25000 \
+  DRYDOCK_RUNS_ROOT=/tmp/runs DRYDOCK_TRACKER=fixture \
+  node --import tsx src/index.ts
+
+curl -s -X POST localhost:4399/api/sessions -H 'Content-Type: application/json' \
+  -d '{"command":"claude","repo":"drydock","ticket":"DRY-1","autonomous":true,
+       "input":"Run this exact bash command and nothing else: echo hi"}'
+```
+
+Then watch `/api/sessions`: `activity` fills in, `pendingPermissions` goes to 1,
+and 25s later `failure` appears and `handoff` names a file.
+
+The traps, all of them found the hard way:
+
+1. **The prompt's RETURN must be a separate write.** Appending `\r` to the text
+   puts it in the same read() and Claude Code's TUI treats the burst as pasted
+   content: the prompt appears in the composer and the agent never starts. The
+   card sits on "starting" forever and nothing errors.
+2. **A run you stop on purpose is not a failure.** Signalling a process exits it
+   129/143, so inferring failure from the exit code made every deliberate stop
+   post *"failed — exited 129 … nobody was watching, please pick it up"* to the
+   ticket. `failure` being SET is the only thing that means failed; `kill()`
+   records `stoppedByRequest` instead.
+3. **Kill removes the session from the registry synchronously**, so after
+   `POST /kill` there is no `SessionInfo` left to read `handoff` off. Assert on
+   the file, not the field.
+4. **A failed run reaches two terminal states**, because denying the gate makes
+   the CLI end its turn. The handoff is named for the run's START time so the
+   second ending rewrites one document instead of leaving a trail.
+5. **Don't test the tab title with one sample.** It alternates every 2s with the
+   plain title on purpose (so it reads in a truncated tab), so a single read
+   returns "Drydock" half the time.
+6. **The claude trust dialog does not fire** in a fresh worktree as of Claude
+   Code v2.1.220 — verified deliberately, since it would wedge an unattended run
+   at a prompt nobody can answer. If a future version brings it back, that is
+   where to look first. NB testing from inside a claude session leaks
+   `CLAUDE_CODE_CHILD_SESSION` into the daemon's env and suppresses it anyway,
+   which makes for a convincing false negative: `env -u` the `CLAUDE_*` vars.
+
+Verify the tracker comment against **both** providers — it is the first thing
+to exercise `comment()` on either. Switchyard against a throwaway ticket; Jira
+against a stub asserting `POST /rest/api/2/issue/<KEY>/comment` with a plain
+string `{body}` (v2 is chosen precisely so no ADF document is needed), plus the
+fixture provider (`comment: false`) to prove the rail stands alone without one.
+
 ## Verifying a tracker provider (Switchyard / Jira)
 
 The tracker is host config; the browser only ever sees `/api/tracker/*`.

@@ -52,7 +52,7 @@ export interface SpawnOptions {
  * reply", and we can't tell which — so the word "finished" is reserved for a
  * process that actually exited zero.
  */
-export type RunEndReason = "finished" | "ended-turn" | "failed";
+export type RunEndReason = "finished" | "ended-turn" | "failed" | "stopped";
 
 export type RunEndNotifier = (session: PtySession, reason: RunEndReason) => void;
 
@@ -225,6 +225,8 @@ export class PtySession {
   private readonly allowedTools = new Set<string>();
   /** Fired at most once per terminal state; see notifyRunEnd. */
   private endsAnnounced = new Set<RunEndReason>();
+  /** This process was signalled on purpose, so its exit code isn't a verdict. */
+  private stoppedByRequest = false;
 
   constructor(
     opts: SpawnOptions,
@@ -362,7 +364,7 @@ export class PtySession {
     // handoff. A run killed after a gate timeout already has a failure reason —
     // don't overwrite the explanation with whatever the CLI printed on its way
     // out.
-    if (exitCode !== 0 && !this.failure) {
+    if (exitCode !== 0 && !this.failure && !this.stoppedByRequest) {
       this.failure = {
         at: Date.now(),
         reason: `exited ${exitCode}`,
@@ -393,7 +395,9 @@ export class PtySession {
       p.resolve({ decision: "timeout" });
       this.pending.delete(requestId);
     }
-    this.announceRunEnd(this.failure ? "failed" : "finished");
+    this.announceRunEnd(
+      this.failure ? "failed" : this.stoppedByRequest ? "stopped" : "finished",
+    );
   }
 
   // --- run lifecycle (DRY-49) ---------------------------------------------
@@ -577,6 +581,14 @@ export class PtySession {
       return;
     }
     log.info("session kill requested", { id: this.id, command: this.command });
+    // Somebody asked for this. Signalling a process makes it exit non-zero
+    // (129/143 for HUP/TERM), and without this an autonomous run that was
+    // deliberately stopped reported itself FAILED and posted "nobody was
+    // watching when this stopped — please pick it up" to the ticket. Somebody
+    // was watching; they pressed the button. The one exception is the
+    // unanswered-gate path, which kills too — it records its failure first, so
+    // the check below leaves that verdict alone.
+    if (!this.failure) this.stoppedByRequest = true;
     this.pty.kill();
   }
 
