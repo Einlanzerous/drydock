@@ -41,6 +41,19 @@ const props = defineProps<{
   name: string;
   tickets: Ticket[];
   refreshing?: boolean;
+  /**
+   * Why the last pull failed, or null while they're working (DRY-55). Read
+   * together with `tickets`, because the two combinations are different
+   * statements and only one of them replaces the empty state:
+   *
+   *   set + no tickets   nothing was fetched. "No tickets match." would be a
+   *                      lie, and the plausible one — scope chips make an empty
+   *                      sidebar look like a filter you got wrong.
+   *   set + tickets      what's on screen is real, just no longer current. It
+   *                      still renders; the header says it may be stale.
+   *   null               today's behaviour.
+   */
+  pullError?: string | null;
   /** Host-default project scope from /api/tracker/info (fixed chips). */
   scopeProjects: string[];
   /** Browser-added project keys (removable chips). */
@@ -214,6 +227,14 @@ function clearFilters(): void {
       </svg>
       <span class="label">{{ (name || "Tracker").toUpperCase() }}</span>
       <span class="count">{{ filtered.length }}<template v-if="filtered.length !== tickets.length">/{{ tickets.length }}</template></span>
+      <!-- The quiet half of DRY-55: these tickets are real, they're just not
+           current. Worth a marker rather than a banner — the loud case is the
+           empty one below. -->
+      <span
+        v-if="pullError && tickets.length"
+        class="stale"
+        :title="`Last pull failed, so these may be out of date — ${pullError}`"
+      >stale</span>
       <button
         class="refresh"
         :class="{ spinning: refreshing }"
@@ -226,7 +247,14 @@ function clearFilters(): void {
           <path d="M13.5 2v3.2H10.3" />
         </svg>
       </button>
-      <span class="live"></span>
+      <!-- A green "live" dot over a list nothing is refreshing is its own small
+           untruth, and this is the one pixel already in the header that claims
+           freshness (DRY-55). -->
+      <span
+        class="live"
+        :class="{ down: !!pullError }"
+        :title="pullError ? 'Not reaching the tracker' : 'Tickets are refreshing'"
+      ></span>
     </div>
 
     <!-- search + filters -->
@@ -303,7 +331,17 @@ function clearFilters(): void {
     </div>
 
     <div class="list">
-      <p v-if="!groups.length" class="empty">No tickets match.</p>
+      <!-- Nothing was fetched, so there is no set for "match" to be about
+           (DRY-55). Keyed off `tickets`, not `groups`: a filter that hides
+           every loaded row is still "No tickets match", outage or not. -->
+      <div v-if="pullError && !tickets.length" class="unreachable">
+        <p class="unreachable-head">Can't reach {{ name || "the tracker" }}</p>
+        <p class="unreachable-why">{{ pullError }}</p>
+        <button class="retry" :disabled="refreshing" @click="emit('refresh')">
+          {{ refreshing ? "Retrying…" : "Retry" }}
+        </button>
+      </div>
+      <p v-else-if="!groups.length" class="empty">No tickets match.</p>
       <template v-for="grp in rendered" :key="grp.repo">
         <button class="grp" :class="{ open: isOpen(grp.repo) }" @click="toggle(grp.repo)">
           <span class="chev">▸</span>
@@ -494,6 +532,22 @@ function clearFilters(): void {
   background: #5fb98a;
   box-shadow: 0 0 6px #5fb98a99;
 }
+.live.down {
+  background: #d57a6e;
+  box-shadow: 0 0 6px #d57a6e99;
+}
+/* Amber, not red: the rows under it are still usable (DRY-55). */
+.stale {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #d6a651;
+  background: #d6a6511a;
+  border: 1px solid #d6a65133;
+  border-radius: 4px;
+  padding: 1px 4px;
+}
 
 /* search + filters */
 .controls {
@@ -655,6 +709,43 @@ function clearFilters(): void {
   color: #5a636f;
   text-align: center;
   margin: 18px 0;
+}
+/* The empty state's replacement when the pull failed (DRY-55). Not named
+   `.down` — that's the live dot's modifier, and the two would share a rule. */
+.unreachable {
+  margin: 18px 8px;
+  text-align: center;
+}
+.unreachable-head {
+  font-size: 12px;
+  color: #d57a6e;
+  margin: 0 0 5px;
+}
+.unreachable-why {
+  font-size: 11px;
+  line-height: 1.45;
+  color: #5a636f;
+  margin: 0 0 10px;
+  /* Daemon errors arrive as one unbroken token often enough (a URL, a JSON
+     blob) to overflow a 266px rail otherwise. */
+  overflow-wrap: anywhere;
+}
+.retry {
+  padding: 4px 12px;
+  font-size: 11px;
+  color: #aecbe8;
+  background: #11161c;
+  border: 1px solid #ffffff14;
+  border-radius: 5px;
+  cursor: pointer;
+}
+.retry:hover:not(:disabled) {
+  background: #17202a;
+  border-color: #ffffff24;
+}
+.retry:disabled {
+  color: #5a636f;
+  cursor: default;
 }
 .grp {
   width: 100%;
