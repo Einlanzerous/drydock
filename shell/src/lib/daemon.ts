@@ -92,6 +92,50 @@ export async function listSessions(): Promise<SessionInfo[]> {
   return expectList(body.sessions, "sessions");
 }
 
+/** One session as retained history (DRY-56). Mirrors the daemon's SessionRecord. */
+export interface SessionRecord {
+  id: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  repo?: string;
+  ticket?: string;
+  worktree?: string;
+  branch?: string;
+  title?: string;
+  /** `claude --resume <id>`. Absent when the CLI never reported one. */
+  agentSessionId?: string;
+  createdAt: number;
+  lastActiveAt?: number;
+  endedAt?: number;
+  exitCode?: number;
+  endReason?: "finished" | "failed" | "stopped" | "unknown";
+}
+
+/**
+ * Recent sessions, live or dead — what tombstones are drawn from (DRY-56).
+ *
+ * `null` means this Drydock keeps no history (the file tier answers 501), which
+ * is a DIFFERENT answer from an empty list and the caller has to say so
+ * differently: an absent tombstone must read as "sessions aren't recorded here",
+ * never as "your session was lost". Any other failure throws, so a store outage
+ * degrades the desk rather than silently claiming nothing ever ran.
+ */
+export async function fetchSessionHistory(): Promise<SessionRecord[] | null> {
+  const res = await fetch(`${DAEMON_HTTP}/api/sessions/history`);
+  // 501 is the tier speaking, not a fault — checked before the body is read so
+  // it can't be mistaken for one.
+  if (res.status === 501) return null;
+  let body: any;
+  try {
+    body = await res.json();
+  } catch {
+    if (res.ok) throw new Error(`daemon returned a non-JSON body (${res.status})`);
+  }
+  if (!res.ok) throw new Error(`daemon returned ${res.status}${suffix(body)}`);
+  return expectList<SessionRecord>(body?.sessions, "session history");
+}
+
 export async function createSession(opts: {
   command: string;
   args?: string[];
