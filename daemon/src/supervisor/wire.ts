@@ -167,6 +167,8 @@ export interface SessionMeta {
   cols: number;
   rows: number;
   ticket?: string;
+  /** Tracker repo name, so a restart can still say what a session was on (DRY-56). */
+  repo?: string;
   worktree?: string;
   branch?: string;
   autonomous: boolean;

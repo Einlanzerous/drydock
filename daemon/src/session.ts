@@ -7,6 +7,7 @@ import { log } from "./log.js";
 import { assertSocketPathFits, forget, writeMeta } from "./sessions-dir.js";
 import { SupervisorLink } from "./supervisor/link.js";
 import { PROTOCOL_VERSION, type SessionMeta } from "./supervisor/wire.js";
+import type { SessionEndReason, SessionStart } from "./state/types.js";
 import type {
   EventMessage,
   PendingGate,
@@ -29,6 +30,17 @@ export interface SpawnOptions {
   env?: Record<string, string>;
   /** Tracker ticket this session is scoped to; surfaced to the SessionStart hook. */
   ticket?: string;
+  /**
+   * Tracker repo NAME, kept alongside the cwd it resolved to (DRY-56).
+   *
+   * The daemon used to resolve `repo` → cwd at spawn and drop the name, which
+   * left a tombstone unable to say which repo a dead session belonged to — a
+   * path is not an answer to "what was this working on". Deliberately NOT added
+   * to SessionInfo: the browser reads it off the history record, and mirroring
+   * a field into protocol.ts costs a hand-synced copy in the shell for
+   * something no live pane renders.
+   */
+  repo?: string;
   /** Isolated git worktree the session runs in (DRY-15); equals cwd when set. */
   worktree?: string;
   /** Branch checked out in that worktree. */
@@ -60,6 +72,19 @@ export interface SpawnOptions {
 export type RunEndReason = "finished" | "ended-turn" | "failed" | "stopped";
 
 export type RunEndNotifier = (session: PtySession, reason: RunEndReason) => void;
+
+/**
+ * Told when ANY session ends — autonomous or not (DRY-56).
+ *
+ * Separate from RunEndNotifier because that one is gated on `autonomous`
+ * inside announceRunEnd: a supervised session ending its turn is a person
+ * sitting in front of it, and DRY-49's artefacts are for the runs nobody saw.
+ * History has the opposite requirement — a tombstone for a plain shell you
+ * closed is exactly as useful as one for an unattended agent — so recording it
+ * through the run-end path would silently keep history for a fraction of
+ * sessions and look like it worked.
+ */
+export type SessionEndNotifier = (session: PtySession) => void;
 
 /**
  * Strip ANSI/OSC control sequences from captured PTY output.
@@ -200,6 +225,7 @@ export class PtySession {
   readonly args: string[];
   readonly cwd: string;
   readonly ticket?: string;
+  readonly repo?: string;
   readonly worktree?: string;
   readonly branch?: string;
   readonly origin: RunOrigin;
@@ -279,6 +305,7 @@ export class PtySession {
     meta: SessionMeta,
     private readonly notifyGate: GateNotifier = () => {},
     private readonly notifyRunEnd: RunEndNotifier = () => {},
+    private readonly notifyEnded: SessionEndNotifier = () => {},
   ) {
     this.id = meta.id;
     this.createdAt = meta.createdAt;
@@ -288,6 +315,7 @@ export class PtySession {
     this.env = meta.env;
     this.cwd = meta.cwd;
     this.ticket = meta.ticket;
+    this.repo = meta.repo;
     this.worktree = meta.worktree;
     this.branch = meta.branch;
     this.autonomous = meta.autonomous;
@@ -313,6 +341,7 @@ export class PtySession {
       cols: this.cols,
       rows: this.rows,
       ticket: this.ticket,
+      repo: this.repo,
       worktree: this.worktree,
       branch: this.branch,
       autonomous: this.autonomous,
@@ -349,6 +378,7 @@ export class PtySession {
     opts: SpawnOptions,
     notifyGate: GateNotifier = () => {},
     notifyRunEnd: RunEndNotifier = () => {},
+    notifyEnded: SessionEndNotifier = () => {},
   ): Promise<PtySession> {
     const id = randomUUID();
     assertSocketPathFits(id);
@@ -368,6 +398,7 @@ export class PtySession {
       cols: opts.cols ?? 80,
       rows: opts.rows ?? 24,
       ticket: opts.ticket,
+      repo: opts.repo,
       worktree: opts.worktree,
       branch: opts.branch,
       autonomous,
@@ -388,7 +419,7 @@ export class PtySession {
     };
 
     const link = await SupervisorLink.start(meta);
-    const session = new PtySession(meta, notifyGate, notifyRunEnd);
+    const session = new PtySession(meta, notifyGate, notifyRunEnd, notifyEnded);
     session.bind(link);
 
     log.info("session spawned", {
@@ -421,8 +452,9 @@ export class PtySession {
     link: SupervisorLink,
     notifyGate: GateNotifier = () => {},
     notifyRunEnd: RunEndNotifier = () => {},
+    notifyEnded: SessionEndNotifier = () => {},
   ): PtySession {
-    const session = new PtySession(meta, notifyGate, notifyRunEnd);
+    const session = new PtySession(meta, notifyGate, notifyRunEnd, notifyEnded);
     session.seedScrollback(link.takeReplay());
     // Whatever size the last client negotiated, not what the spawn asked for.
     session.cols = link.hello.cols;
@@ -457,8 +489,9 @@ export class PtySession {
     scrollback: Buffer | undefined,
     notifyGate: GateNotifier = () => {},
     notifyRunEnd: RunEndNotifier = () => {},
+    notifyEnded: SessionEndNotifier = () => {},
   ): PtySession {
-    const session = new PtySession(meta, notifyGate, notifyRunEnd);
+    const session = new PtySession(meta, notifyGate, notifyRunEnd, notifyEnded);
     if (scrollback) session.seedScrollback(scrollback);
     session.status = "exited";
     session.exitCode = exitCode;
@@ -632,6 +665,9 @@ export class PtySession {
     this.announceRunEnd(
       this.failure ? "failed" : this.stoppedByRequest ? "stopped" : "finished",
     );
+    // Unconditional, unlike the line above (DRY-56). History records every
+    // session; the run artefacts record only the unattended ones.
+    this.notifyEnded(this);
 
     // LAST, and after the run-end announcement on purpose. The index exists so
     // a daemon that wasn't here can find out what happened; this daemon WAS
@@ -685,6 +721,38 @@ export class PtySession {
     this.announceRunEnd(
       this.failure ? "failed" : this.stoppedByRequest ? "stopped" : "finished",
     );
+  }
+
+  /**
+   * How this session ended, in the vocabulary history stores (DRY-56).
+   *
+   * The same ternary onExit and announceMissedEnding use, exposed because the
+   * recorder lives outside this class — `exit_code` can't distinguish a
+   * deliberate stop (129/137/143) from a crash, and the thing that knows the
+   * difference is `stoppedByRequest`, which only exists in here.
+   */
+  ending(): { endedAt: number; exitCode?: number; endReason: SessionEndReason } {
+    return {
+      endedAt: this.endedAtValue ?? Date.now(),
+      exitCode: this.exitCode ?? undefined,
+      endReason: this.failure ? "failed" : this.stoppedByRequest ? "stopped" : "finished",
+    };
+  }
+
+  /** What history records at spawn. Everything a tombstone has to be able to say. */
+  historyStart(): SessionStart {
+    return {
+      id: this.id,
+      command: this.command,
+      args: this.args,
+      cwd: this.cwd,
+      repo: this.repo,
+      ticket: this.ticket,
+      worktree: this.worktree,
+      branch: this.branch,
+      title: this.title,
+      createdAt: this.createdAt,
+    };
   }
 
   /** Scrollback with the terminal control codes taken out, for humans. */

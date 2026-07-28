@@ -179,8 +179,14 @@ const common = {
         {
           type: "command",
           timeout: 30,
+          // POST, not GET, since DRY-56: Claude Code pipes the hook payload on
+          // stdin, and that payload carries the CLI's own `session_id` — the id
+          // `claude --resume` needs, which the daemon has no other source for.
+          // A GET threw it away. The response shape is unchanged, and the
+          // daemon still answers GET so a session spawned by an older daemon
+          // (whose settings file it already read) keeps getting its context.
           command:
-            'curl -s -m 25 "$DRYDOCK_DAEMON_URL/hook/sessionstart" -H "X-Drydock-Session: $DRYDOCK_SESSION_ID"',
+            'curl -s -m 25 -X POST "$DRYDOCK_DAEMON_URL/hook/sessionstart" -H "Content-Type: application/json" -H "X-Drydock-Session: $DRYDOCK_SESSION_ID" --data-binary @-',
         },
       ],
     },

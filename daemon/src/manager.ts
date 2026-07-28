@@ -1,17 +1,35 @@
 import { log } from "./log.js";
+import type { SessionHistoryRecorder } from "./history.js";
 import { forget, listMeta, readExitRecord, readScrollback } from "./sessions-dir.js";
 import { ProtocolMismatch, SupervisorLink } from "./supervisor/link.js";
 import type { SessionMeta } from "./supervisor/wire.js";
 import {
   PtySession,
   type GateEvent,
+  type GateNotifier,
+  type RunEndNotifier,
   type RunEndReason,
+  type SessionEndNotifier,
   type SpawnOptions,
 } from "./session.js";
 
 /** In-memory registry of live sessions. One per wrapped CLI / shell. */
 export class SessionManager {
   private readonly sessions = new Map<string, PtySession>();
+
+  /**
+   * Session history, when the tier keeps any (DRY-56).
+   *
+   * Injected rather than constructed here for the same reason the tracker is
+   * injected into runs.ts: this class owns PTYs and must not grow an opinion
+   * about databases. A no-op recorder on the file tier means no call site needs
+   * a conditional.
+   */
+  private history?: SessionHistoryRecorder;
+
+  useHistory(recorder: SessionHistoryRecorder): void {
+    this.history = recorder;
+  }
 
   /**
    * Subscribers to gate activity across *every* session (DRY-50). Kept on the
@@ -60,12 +78,9 @@ export class SessionManager {
    * before the socket exists makes every attach a race.
    */
   async create(opts: SpawnOptions): Promise<PtySession> {
-    const session = await PtySession.spawn(
-      opts,
-      (event) => this.emitGate(event),
-      (s, reason) => this.emitRunEnd(s, reason),
-    );
+    const session = await PtySession.spawn(opts, ...this.listeners());
     this.sessions.set(session.id, session);
+    this.history?.started(session);
     return session;
   }
 
@@ -119,12 +134,7 @@ export class SessionManager {
     try {
       const link = await SupervisorLink.connect(meta.id);
       if (link) {
-        const session = PtySession.adopt(
-          meta,
-          link,
-          (event) => this.emitGate(event),
-          (s, reason) => this.emitRunEnd(s, reason),
-        );
+        const session = PtySession.adopt(meta, link, ...this.listeners());
         // Somebody killed this before we went down, and the child evidently
         // didn't go — it ignored the signal, or we died inside the window
         // between sending it and seeing the exit. Finish what was asked for
@@ -200,9 +210,11 @@ export class SessionManager {
         exit.exitCode,
         exit.endedAt,
         readScrollback(meta.id),
-        (event) => this.emitGate(event),
-        (s, reason) => this.emitRunEnd(s, reason),
+        ...this.listeners(),
       );
+      // History has to learn about this one too, or it has a hole exactly where
+      // the daemon was absent — which is the case a tombstone exists for.
+      this.history?.endedWhileAway(session);
       // Not returned to the registry. It is a dead session with no PTY behind
       // it, so putting it in `/api/sessions` would draw a pane for something
       // that can never produce another byte; the durable record of a run is its
@@ -228,6 +240,15 @@ export class SessionManager {
       log.warn("could not reconcile a session — skipping it", { id: meta.id, err: String(err) });
       return undefined;
     }
+  }
+
+  /** The three notifiers every PtySession factory takes, in order. */
+  private listeners(): [GateNotifier, RunEndNotifier, SessionEndNotifier] {
+    return [
+      (event) => this.emitGate(event),
+      (s, reason) => this.emitRunEnd(s, reason),
+      (s) => this.history?.ended(s),
+    ];
   }
 
   private emitRunEnd(session: PtySession, reason: RunEndReason): void {

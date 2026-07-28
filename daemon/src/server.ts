@@ -19,6 +19,7 @@ import type { ClientMessage, EventMessage } from "./protocol.js";
 import { createTracker, trackerInfo } from "./tracker/index.js";
 import { createStore } from "./state/index.js";
 import { runEndHandler } from "./runs.js";
+import { SessionHistoryRecorder } from "./history.js";
 
 const manager = new SessionManager();
 const tracker = createTracker();
@@ -29,6 +30,12 @@ const store = createStore();
 // here rather than inside the session so PtySession keeps knowing nothing about
 // trackers or the filesystem.
 manager.onRunEnd(runEndHandler(tracker));
+
+// Retained session history, on the tiers that keep any (DRY-56). `store.history`
+// is undefined on the file store, which makes every call below a no-op — the
+// capability is derived from that, so it can't claim more than the backend does.
+const history = new SessionHistoryRecorder(store.history, CONFIG.state.owner);
+manager.useHistory(history);
 
 // Permission modes where Claude Code runs tools without asking. In these the
 // PreToolUse hook still fires, but our approve/deny is moot — so we auto-allow
@@ -46,6 +53,32 @@ const HANDS_OFF_MODES = new Set(["bypassPermissions", "auto", "dontAsk"]);
  * the tools that reach OUT of the worktree still stop.
  */
 const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
+
+/**
+ * Learn what a hook payload can tell us about a session (DRY-56).
+ *
+ * Two things ride on every Claude Code hook body, and both are free here:
+ *
+ * `session_id` is the CLI's OWN id, which is not `PtySession.id` and is the
+ * only thing `claude --resume <id>` accepts. `pty_sessions.agent_session_id`
+ * has existed unwritten since DRY-28 for exactly this. Taken opportunistically
+ * from whichever hook arrives first rather than from one designated event: the
+ * earliest is SessionStart, but a session whose SessionStart failed still
+ * reports it on its first tool call, and recording it late beats not at all.
+ * Left null when the CLI doesn't send one — a guessed resume id is worse than
+ * an honest "respawn fresh" button.
+ *
+ * The activity stamp is debounced inside the recorder; this path is the rail's
+ * hot one and must stay free of round trips.
+ */
+function noteFromHook(sessionId: string, body: unknown): void {
+  const agentId = (body as { session_id?: unknown } | null | undefined)?.session_id;
+  if (typeof agentId === "string" && agentId) {
+    history.noteAgentSessionId(sessionId, agentId);
+  }
+  const session = manager.get(sessionId);
+  if (session) history.active(session);
+}
 
 function send(res: http.ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
@@ -121,7 +154,16 @@ const server = http.createServer(async (req, res) => {
         // waiting to find out" (DRY-58).
         ok: true,
         sessions: manager.list().length,
-        store: await store.health(),
+        store: {
+          ...(await store.health()),
+          // What this backend can do, not just whether it's up (DRY-56). The
+          // shell gates the tombstone surface on this: on a tier that keeps no
+          // history it must SAY so where the tombstone would be, because an
+          // absent tombstone is otherwise indistinguishable from a lost
+          // session. Derived from whether the port exists, so it can't drift
+          // from what the store actually implements.
+          capabilities: { sessionHistory: Boolean(store.history) },
+        },
       });
     }
 
@@ -212,6 +254,36 @@ const server = http.createServer(async (req, res) => {
     // --- Session control API ---
     if (pathname === "/api/sessions" && req.method === "GET") {
       return send(res, 200, { sessions: manager.list().map((s) => s.info()) });
+    }
+
+    // --- Session history (DRY-56) ---
+    // "What has run here recently, live or dead." The shell's restore uses it to
+    // tell a window whose session is still running (reattach, as always) from
+    // one whose session is gone (a tombstone it can resume from).
+    //
+    // 501, not an empty list, when the tier keeps no history. An empty list is
+    // indistinguishable from "nothing has ever run", which is the exact
+    // confusion `001_workspace.sql` was written to pre-empt — and the shell has
+    // to say something different in the two cases.
+    if (pathname === "/api/sessions/history" && req.method === "GET") {
+      if (!history.enabled) {
+        return send(res, 501, {
+          error: "this Drydock keeps no session history",
+          reason: "the file store cannot retain it — set DRYDOCK_DATABASE_URL",
+          capability: "sessionHistory",
+        });
+      }
+      const asked = Number(url.searchParams.get("limit"));
+      const limit = Number.isFinite(asked) && asked > 0 ? Math.min(asked, 200) : 50;
+      try {
+        return send(res, 200, { sessions: (await history.recent(limit)) ?? [] });
+      } catch (err) {
+        // Same rule as /api/workspace: a store that can't answer degrades, it
+        // never escalates. The desk still restores, it just can't draw
+        // tombstones this time round.
+        log.warn("session history unavailable", { err: String(err) });
+        return send(res, 503, { error: `state store: ${String(err)}`, degraded: true });
+      }
     }
 
     // Answer a gate without holding that session's WebSocket (DRY-50). The
@@ -338,6 +410,9 @@ const server = http.createServer(async (req, res) => {
         args: Array.isArray(body.args) ? body.args : [],
         cwd,
         ticket,
+        // The tracker repo NAME, not just the cwd it resolved to (DRY-56):
+        // a tombstone has to be able to say what a dead session was working on.
+        repo: typeof body.repo === "string" ? body.repo : undefined,
         worktree,
         branch,
         title: typeof body.title === "string" ? body.title : undefined,
@@ -638,6 +713,7 @@ const server = http.createServer(async (req, res) => {
       // immediately below — is precisely the one whose card would otherwise
       // have nothing to say for its entire life.
       session.noteActivity(tool, body.tool_input ?? {});
+      noteFromHook(session.id, body);
       if (HANDS_OFF_MODES.has(mode)) {
         return send(res, 200, {
           hookSpecificOutput: {
@@ -689,6 +765,7 @@ const server = http.createServer(async (req, res) => {
       const body = await readJson(req).catch(() => ({}));
       if (session && typeof body?.tool_name === "string") {
         session.noteActivity(body.tool_name, body.tool_input ?? {});
+        noteFromHook(session.id, body);
       }
       return send(res, 200, {});
     }
@@ -702,8 +779,11 @@ const server = http.createServer(async (req, res) => {
     if (pathname === "/hook/stop" && req.method === "POST") {
       const sessionId = (req.headers["x-drydock-session"] as string | undefined) ?? "";
       const session = manager.get(sessionId);
-      await readJson(req).catch(() => ({})); // drain/ignore the hook payload
-      if (session) session.markIdle();
+      const body = await readJson(req).catch(() => ({}));
+      if (session) {
+        session.markIdle();
+        noteFromHook(session.id, body);
+      }
       return send(res, 200, {});
     }
 
@@ -713,9 +793,15 @@ const server = http.createServer(async (req, res) => {
     // carrying the ticket body — so the agent starts with the full ticket in
     // context without it being typed into the prompt. Non-ticket sessions (or an
     // unknown one) get an empty object, which the hook treats as "no context".
-    if (pathname === "/hook/sessionstart" && req.method === "GET") {
+    if (pathname === "/hook/sessionstart" && (req.method === "POST" || req.method === "GET")) {
       const sessionId = (req.headers["x-drydock-session"] as string | undefined) ?? "";
       const session = manager.get(sessionId);
+      // Before the ticket check, not after: a session with no ticket still has
+      // an agent session id worth recording, and it is the earliest moment we
+      // can learn it (DRY-56).
+      if (req.method === "POST") {
+        noteFromHook(sessionId, await readJson(req).catch(() => ({})));
+      }
       if (!session?.ticket) return send(res, 200, {});
       try {
         const t = await tracker.getTicket(session.ticket);
