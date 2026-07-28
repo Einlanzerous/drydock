@@ -190,14 +190,16 @@ function wake(): void {
   void recover();
 }
 
+function onVisible(): void {
+  if (document.visibilityState === "visible") wake();
+}
+
 let listening = false;
 function listen(): void {
   if (listening || typeof window === "undefined") return;
   listening = true;
   window.addEventListener("online", wake);
-  document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "visible") wake();
-  });
+  document.addEventListener("visibilitychange", onVisible);
 }
 
 /**
@@ -236,15 +238,23 @@ async function recover(): Promise<void> {
         writeLocal(recoveryHost, remote);
         hooks.apply(remote);
         unflushed = null;
-      } else if (unflushed) {
-        await putWorkspace(unflushed);
-        unflushed = null;
+        // `apply` mutates the reactive windows, so the deep watcher will push
+        // this desk straight back out in 400ms — one redundant round trip per
+        // heal. Left alone deliberately: it also re-persists whatever DRY-42's
+        // duplicate-id healing fixed up on the way in.
+      } else if (unflushed && !(await drain())) {
+        return scheduleRetry();
       }
+      // No probe needed on this path — the read above IS the evidence.
     } else if (unflushed) {
-      // Cleared only after the await resolves: a push that fails again must
-      // leave the desk queued, not swallow it.
-      await putWorkspace(unflushed);
-      unflushed = null;
+      if (!(await drain())) return scheduleRetry();
+    } else {
+      // Nothing queued is NOT evidence the store is back, and `noteRecovered()`
+      // is two lines away. `clearLayout` raises a notice on a failed DELETE and
+      // queues nothing at all, so this used to fall through to "layout
+      // persistence restored" without touching the network — announcing the
+      // opposite of what was true. A read is the cheapest thing that can fail.
+      await fetchWorkspace();
     }
     noteRecovered();
   } catch (err) {
@@ -252,6 +262,49 @@ async function recover(): Promise<void> {
   } finally {
     recovering = false;
   }
+}
+
+/**
+ * Send the queued desk, and clear the slot only if it still holds what we sent.
+ *
+ * `saveLayout` runs while this await is outstanding, and that window is as wide
+ * as `WRITE_TIMEOUT_MS`. Drag during it and the drag's own push fails fast,
+ * queueing deskB behind the deskA already in flight; a bare `unflushed = null`
+ * on deskA's success then drops deskB on the floor. That's the outage costing
+ * work, which is the thing this ticket is about.
+ *
+ * Cleared after the await either way, never before: a push that fails again
+ * must leave the desk queued rather than swallow it.
+ */
+async function flush(): Promise<void> {
+  const pending = unflushed;
+  if (!pending) return;
+  await putWorkspace(pending);
+  if (unflushed === pending) unflushed = null;
+}
+
+/**
+ * Bound on `drain`'s passes. Each one is a real round trip, so a desk being
+ * dragged continuously would otherwise keep this spinning inside a single
+ * attempt; three is enough to settle the realistic case (one desk queued behind
+ * one in flight) and anything past it is the backoff's problem, not this loop's.
+ */
+const MAX_FLUSH_PASSES = 3;
+
+/**
+ * Push until the slot is empty. Returns false if a desk is STILL waiting.
+ *
+ * Not-losing deskB isn't enough on its own: `recover` calls `noteRecovered()`
+ * next, which cancels the timer deskB's own failure had just armed and clears
+ * the notice. Keeping the desk while cancelling the only thing that would ever
+ * send it leaves the daemon holding deskA and the UI claiming everything is
+ * fine — the same bug, one step further along. So recovery isn't finished while
+ * anything is queued: either this drains it, or the caller stays degraded and
+ * re-arms.
+ */
+async function drain(): Promise<boolean> {
+  for (let pass = 0; unflushed && pass < MAX_FLUSH_PASSES; pass++) await flush();
+  return !unflushed;
 }
 
 /**
