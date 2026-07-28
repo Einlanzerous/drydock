@@ -21,17 +21,20 @@ that blocks new connects alone never partitions anything at all.
 
 ## Setup
 
+Every block below runs from the **repo root** and returns there — the `cd`s are
+in subshells on purpose, so the whole section copy-pastes in sequence.
+
 ```sh
+npm i playwright --prefix scripts/verify     # ad-hoc; not a repo dependency
+
 # Throwaway daemon — file store (the default tier, the one that gets forgotten)
-cd daemon && DRYDOCK_PORT=4370 DRYDOCK_HOST=127.0.0.1 \
-  DRYDOCK_STATE_FILE=/tmp/dry58-state.json DRYDOCK_TRACKER=fixture \
-  node --import tsx src/index.ts &
+(cd daemon && DRYDOCK_PORT=4370 DRYDOCK_HOST=127.0.0.1 \
+   DRYDOCK_STATE_FILE=/tmp/dry58-state.json DRYDOCK_TRACKER=fixture \
+   node --import tsx src/index.ts &)
 
 # HTTP partition proxy in front of it, and the dev shell pointed at the PROXY
 node scripts/verify/proxy-http.mjs &                      # :4371 → :4370
-cd shell && VITE_DAEMON_URL=http://127.0.0.1:4371 bunx vite --port 5370 --strictPort &
-
-npm i playwright        # in this directory; not a repo dependency
+(cd shell && VITE_DAEMON_URL=http://127.0.0.1:4371 bunx vite --port 5370 --strictPort &)
 ```
 
 For the Postgres tier, add a throwaway database behind the TCP proxy and a
@@ -42,9 +45,9 @@ docker run -d --name dry58-pg -e POSTGRES_PASSWORD=dry58 -e POSTGRES_DB=drydock 
   -p 127.0.0.1:5455:5432 postgres:16
 node scripts/verify/proxy-tcp.mjs &                       # :5456 → :5455, control :5457
 
-cd daemon && DRYDOCK_PORT=4372 DRYDOCK_HOST=127.0.0.1 DRYDOCK_TRACKER=fixture \
-  DRYDOCK_DATABASE_URL='postgres://postgres:dry58@127.0.0.1:5456/drydock' \
-  node --import tsx src/index.ts &
+(cd daemon && DRYDOCK_PORT=4372 DRYDOCK_HOST=127.0.0.1 DRYDOCK_TRACKER=fixture \
+   DRYDOCK_DATABASE_URL='postgres://postgres:dry58@127.0.0.1:5456/drydock' \
+   node --import tsx src/index.ts &)
 ```
 
 Then point `proxy-http.mjs` at it (`TARGET_PORT=4372`) and pass

@@ -17,6 +17,10 @@ import { chromium } from "playwright";
 const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5370";
 const DAEMON = process.env.DAEMON ?? "http://127.0.0.1:4370";
 const PROXY = process.env.PROXY ?? "http://127.0.0.1:4371";
+// Must match the proxy's own default, and is read rather than hardcoded: the
+// section below waits out the hold, so overriding one and not the other would
+// silently change what is being tested rather than fail.
+const DELAY_MS = Number(process.env.DELAY_MS ?? 6000);
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const j = async (u, i) => (await fetch(u, i)).json();
@@ -109,7 +113,7 @@ console.log("\n1. a drag landing mid-recovery is not swallowed");
   // deskA now completes successfully against a store that is otherwise still
   // broken. Nothing is healed yet — this is the moment the old code declared
   // victory, dropped deskB and cancelled its retry.
-  await sleep(6000);
+  await sleep(DELAY_MS + 1500);
   check(
     "the late push landed deskA",
     (await stored())[id] === deskA[id],
@@ -161,8 +165,14 @@ console.log("\n2. recovery does not announce a health it never checked");
     await noticed(p2),
     "cleared here would mean recovery reported success without a probe",
   );
-  const s = await stored();
-  check("and the daemon really is still refusing", Object.keys(s).length >= 0);
+  // Pointed at PROXY, which is what the shell talks to, and asserting the
+  // status. `Object.keys(await stored()).length >= 0` sat here first: it can
+  // never be false, and it read the daemon directly, bypassing the very break
+  // this section is about — a check that would stay green through any
+  // regression, four lines under a comment about checks that prove less than
+  // they look like.
+  const still = await fetch(`${PROXY}/api/workspace`);
+  check("and the store really is still refusing", still.status === 503, `proxy said ${still.status}`);
 
   await j(`${PROXY}/__heal`, { method: "POST" });
   const t = await waitFor(async () => !(await noticed(p2)));

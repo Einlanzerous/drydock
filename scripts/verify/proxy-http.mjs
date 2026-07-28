@@ -83,8 +83,9 @@ const server = http.createServer((req, res) => {
 
   if (url.pathname === "/api/workspace" && mode !== "ok") {
     if (mode === "hang") {
-      // Never answer, never close. The client's own AbortSignal.timeout(3000)
-      // is what must save it — this is the case that finds a missing timeout.
+      // Never answer, never close. The client's own budget is the only thing
+      // that can save it — 3s on the read, 12s on a write (lib/daemon.ts) —
+      // which is what makes this the case that finds a missing one.
       held.add(req.socket);
       req.socket.on("close", () => held.delete(req.socket));
       return;
