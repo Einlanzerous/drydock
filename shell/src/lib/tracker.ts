@@ -27,10 +27,33 @@ export interface Ticket {
   url?: string;
 }
 
+/** One comment off a ticket's thread (DRY-53). See daemon/src/tracker/types.ts. */
+export interface TicketComment {
+  author?: string;
+  createdAt?: string;
+  body: string;
+}
+
 export interface TicketDetail extends Ticket {
   description: string;
   project: string;
   labels: string[];
+  /**
+   * Comment thread, oldest first, and the thread's TRUE length (DRY-53) —
+   * `commentCount` differs from `comments.length` when the provider capped its
+   * fetch.
+   *
+   * **`/api/tracker/ticket/<KEY>` does not populate these**, and neither is
+   * `epic` below. They cost extra tracker round trips (up to two on Switchyard,
+   * whose single-ticket endpoint hands back a bare parent UUID) and only the
+   * daemon's SessionStart brief reads them, so the daemon asks for them there
+   * and not on the path this panel uses. Rendering them here means teaching
+   * that route to pass `{thread: true}` first.
+   */
+  comments?: TicketComment[];
+  commentCount?: number;
+  /** Nearest ancestor epic, when the provider could resolve one (DRY-53). */
+  epic?: { key: string; title?: string };
 }
 
 export interface TrackerInfo {

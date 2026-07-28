@@ -24,7 +24,7 @@ survive disconnects, sleep, and multi-day gaps. The browser is just a viewer.
    claude PreToolUse hook ─ HTTP ─────▶│  • owns PTY master per session         │
    (curl → /hook/pretooluse)           │  • ring-buffer scrollback + replay     │
    claude SessionStart hook ─ HTTP ───▶│  • holds approval gates open for a UI  │
-   (curl → /hook/sessionstart)         │  • injects ticket body as context      │
+   (curl → /hook/sessionstart)         │  • briefs agents from ticket + thread  │
    claude Stop hook ─ HTTP ───────────▶│  • resolves ticket repo → spawn cwd    │
    (curl → /hook/stop)                 │  • per-ticket git worktree isolation   │
                                        │  • marks idle ("Your turn") on Stop    │
@@ -311,8 +311,18 @@ if you deliberately give them the same workspace name.
 Picking a ticket (sidebar or `Ctrl K`) opens its description; the panel shows
 the resolved **working directory** (editable — projects with no repo default to
 `$HOME`, which you can override). **Send to agent** spawns `claude` there and the
-ticket body rides into the agent's context via a `SessionStart` hook (`curl →
-/hook/sessionstart`) — not typed into the prompt. The prompt is pre-filled with
+ticket rides into the agent's context via a `SessionStart` hook (`curl →
+/hook/sessionstart`) — not typed into the prompt.
+
+The brief is the description **plus the comment thread and the nearest epic's
+key** (DRY-53). Comments matter because that's where decisions, design reviews
+and handoffs get recorded — brief an agent from the description alone and on any
+ticket with history you have briefed it from the one document the team stopped
+updating. It fits a budget rather than being concatenated: Claude Code truncates
+hook context past 10000 characters, so the thread keeps a reserved slice a long
+description can't crowd out, the newest comments are the ones kept, and anything
+withheld is said out loud ("showing the 3 most recent of 11 comments") rather
+than silently dropped. The prompt is pre-filled with
 your instruction and left for you to send (no auto-submit). The hooks are
 injected by the daemon (`claude --settings`), so they work regardless of cwd —
 no per-repo `.claude/settings.json` needed.
