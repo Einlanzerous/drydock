@@ -73,6 +73,23 @@ export class PostgresStore implements StateStore {
       // that's up but not listening (wrong host, dropped packets).
       connectionTimeoutMillis: 5_000,
       idleTimeoutMillis: 30_000,
+      // And bound the OTHER half of that, which the connect timeout does not
+      // cover (DRY-58). `connectionTimeoutMillis` only bounds acquiring a
+      // connection; a query issued on one the pool already holds has no
+      // deadline at all. So a partition that arrives while the pool is warm —
+      // the normal case, since it keeps clients idle for 30s — leaves the query
+      // waiting on TCP retransmits for minutes, and the daemon never answers
+      // /api/workspace at all. The route can't 503 what never returns, so the
+      // cooldown never engages and every later request queues behind it.
+      //
+      // Only findable with a real partition: `docker stop` sends a RST, the
+      // query fails instantly, and this looks perfectly bounded.
+      //
+      // 10s rather than matching the 5s connect timeout, because this also
+      // covers `select pg_advisory_lock(...)` in migrate(), which legitimately
+      // waits on another daemon migrating the same database (CLAUDE.md's
+      // dev/prod/throwaway-all-pointed-at-one-database setup).
+      query_timeout: 10_000,
     });
     // Load-bearing, not decoration — this is DRY-45's bug class exactly. An
     // idle pooled client that dies (database restarted, network dropped)
