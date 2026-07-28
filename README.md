@@ -217,9 +217,9 @@ Two things that are easy to assume and wrong:
   beside it is entirely normal. The no-database tier is about zero setup, not
   about being containerless.
 - **Process durability isn't what the database buys.** How long a session lives
-  is a property of how the daemon owns its PTYs, and it is identical in both
-  tiers — whatever survives, survives without a database, and adding one buys
-  none of it.
+  is a property of how this host runs its PTYs (DRY-57's detached supervisors),
+  and it is identical in both tiers — whatever survives, survives without a
+  database, and adding one buys none of it.
 
 What the file tier can't do: it's local to one host and it holds exactly one
 desk per workspace name — there's nothing to query, nothing retained about
