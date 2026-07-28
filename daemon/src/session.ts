@@ -463,13 +463,18 @@ export class PtySession {
     session.status = "exited";
     session.exitCode = exitCode;
     session.endedAtValue = endedAt;
-    if (exitCode !== 0) {
+    // We CAN tell a deliberate stop from a crash, because `/kill` records the
+    // intent in the index before it sends the signal. That matters twice over:
+    // signalling a process exits it 129/137/143, so without this the branch
+    // below would mark a run somebody deliberately stopped as FAILED and post
+    // "nobody was watching when this stopped — please pick it up" to its ticket
+    // (DRY-49's trap 2, which this path would otherwise have reintroduced by
+    // the back door), and it keeps this ending the same shape as the one the
+    // live path produces — transcript kept, no tracker comment.
+    session.stoppedByRequest = Boolean(meta.killedAt);
+    if (exitCode !== 0 && !session.stoppedByRequest) {
       session.failure = {
         at: endedAt,
-        // Named for what we actually know. We can't tell a deliberate stop from
-        // a crash here — the daemon that would have recorded `stoppedByRequest`
-        // is the one that wasn't running — so the reason says so rather than
-        // asserting a verdict it can't support (DRY-49's trap 2).
         reason: `exited ${exitCode} while the daemon was down`,
         lastLine: session.lastOutputLine(),
       };
@@ -673,7 +678,13 @@ export class PtySession {
    * human in front of it, and the artefacts are for the runs nobody saw.
    */
   announceMissedEnding(): void {
-    this.announceRunEnd(this.failure ? "failed" : "finished");
+    // Deliberately the same ternary as onExit's. The two paths describe the
+    // same event — a run reaching a terminal state — and the only difference
+    // is whether the daemon was there to watch it happen, which must not be
+    // something a handoff document can tell.
+    this.announceRunEnd(
+      this.failure ? "failed" : this.stoppedByRequest ? "stopped" : "finished",
+    );
   }
 
   /** Scrollback with the terminal control codes taken out, for humans. */

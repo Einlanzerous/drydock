@@ -14,13 +14,6 @@
 [Unit]
 Description=Drydock daemon (prod, port from .env — default 4318)
 After=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=__APP_DIR__/daemon
-ExecStart=__NODE__ --import tsx src/index.ts
-Restart=always
-RestartSec=2
 # NO start rate limit, and this is load-bearing since DRY-57.
 #
 # The daemon now takes Node's default exit on an uncaught exception, because
@@ -34,7 +27,21 @@ RestartSec=2
 # So: keep trying. A restart loop is noisy in the journal and costs nothing
 # else, and every attempt is another chance to come back and re-adopt the
 # sessions that are still sitting there waiting to be reached.
+#
+# IT BELONGS IN [Unit], NOT [Service], and the difference is silent. systemd
+# keeps a compatibility alias for the OLD spellings there (StartLimitInterval=,
+# StartLimitBurst=) but not for the Sec form, so `StartLimitIntervalSec=` under
+# [Service] is dropped with an "Unknown key name" notice nobody reads and the
+# unit keeps the default limit. Verified with `systemd-analyze verify` on
+# systemd 255; check it there if this ever moves.
 StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=__APP_DIR__/daemon
+ExecStart=__NODE__ --import tsx src/index.ts
+Restart=always
+RestartSec=2
 # Spawned agents and shells inherit this environment; keep the installing
 # user's real PATH so `claude`, git, bun, etc. resolve as in a login shell.
 Environment=PATH=__PATH__

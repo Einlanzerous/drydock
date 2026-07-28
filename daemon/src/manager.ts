@@ -167,15 +167,21 @@ export class SessionManager {
 
       // It ended while we were down. `handoff` already set means a previous
       // daemon got there first, so there is nothing owed and re-announcing
-      // would post a second tracker comment for one run. A deliberate kill is
-      // likewise not a run that "ended unattended" — somebody was watching,
-      // they pressed the button (DRY-49's trap 2, carried through a restart).
-      if (meta.handoff || meta.killedAt) {
-        log.info("session ended while the daemon was down — nothing owed", {
+      // would post a second tracker comment for one run.
+      //
+      // A deliberate kill deliberately does NOT short-circuit here. It reaches
+      // adoptExited as `stoppedByRequest` instead, so it ends up with exactly
+      // what the live path gives it: the transcript kept, no tracker comment
+      // (runs.ts returns before commenting on a `stopped` run). Skipping it
+      // here instead would mean a run you stopped by hand keeps its handoff if
+      // the daemon happened to see the exit and loses it if the daemon was down
+      // for those few seconds — the same action, two outcomes, decided by
+      // something nobody can observe.
+      if (meta.handoff) {
+        log.info("session ended while the daemon was down — artefacts already written", {
           id: meta.id,
           exitCode: exit.exitCode,
           handoff: meta.handoff,
-          killed: meta.killedAt ? true : undefined,
         });
         forget(meta.id);
         return undefined;
@@ -187,6 +193,7 @@ export class SessionManager {
         ticket: meta.ticket,
         exitCode: exit.exitCode,
         autonomous: meta.autonomous || undefined,
+        stopped: meta.killedAt ? true : undefined,
       });
       const session = PtySession.adoptExited(
         meta,
