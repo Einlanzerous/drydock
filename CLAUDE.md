@@ -25,18 +25,39 @@ bun run shell      # dev shell   → :5320 (Vite)
 - `daemon/src/protocol.ts` is duplicated **verbatim** in
   `shell/src/lib/protocol.ts`. If you touch one, mirror the other.
 
-## ⚠️ The dev daemon kills sessions on edit
+## Sessions survive a daemon restart (DRY-57)
 
-`bun run daemon` runs `--watch`: **any save under `daemon/src/` restarts the
-daemon and destroys every live agent PTY it owns** — including the session you
-may be running in. Rules:
+**This used to be the loudest warning in this file**, and it no longer is: a
+save under `daemon/src/` restarts the `--watch` daemon, and the agents keep
+running. Each PTY is held by its own detached supervisor process
+(`daemon/src/supervisor/`), so the daemon is a client of its own sessions
+rather than their parent. On boot it reconciles them from an index of small
+files (`daemon/src/sessions-dir.ts`, `~/.drydock/sessions-<port>/`) and
+reattaches, scrollback included.
 
-1. Never edit `daemon/src/` in a checkout whose daemon has live sessions. Work
-   in a git worktree (ticket-spawned agents get one automatically, branch
-   `agent/<TICKET>`).
-2. Never test daemon changes by restarting a daemon that has live sessions —
-   dev (`:4317`) or prod (`:4318`, systemd unit `drydock-daemon`). Spin up a
-   second instance instead (next section).
+What that changes in practice:
+
+1. Editing `daemon/src/` in a checkout with live sessions is survivable. The
+   daemon restarts; the agents don't notice; panes reconnect on their own.
+2. `DRYDOCK_EXIT_ON_UNCAUGHT` now defaults to ON — a wedged daemon is pure
+   cost when a restart is cheap. `=0` restores the old posture.
+3. **Still don't restart prod (`:4318`) casually.** Reattach is very good, not
+   free: an in-flight gate is re-raised (the hook curl retries), but the rail's
+   action line resets, and a session whose supervisor is SIGKILLed alongside
+   the daemon is still gone.
+
+The rules that survive intact:
+
+- **Never bump `PROTOCOL_VERSION` in `supervisor/wire.ts` casually.** A daemon
+  refuses to drive a supervisor from a different build rather than misparse it,
+  which strands live sessions until that supervisor's agent finishes. If you
+  change a frame type or the meaning of a `SessionMeta` field, bump it and
+  expect running sessions to become undrivable.
+- **Test daemon changes on a second instance**, not by restarting :4317/:4318
+  (next section). Reattach makes a restart recoverable, not free.
+- The sessions dir is **per-port on purpose**: a throwaway daemon on :4399
+  sharing it would adopt the dev daemon's live agents and reparent them to a
+  process you're about to Ctrl-C.
 
 ## Verifying daemon changes: second-instance pattern
 
@@ -49,6 +70,24 @@ bun install                       # worktree needs its own node_modules + node-p
 cd daemon
 DRYDOCK_PORT=4399 DRYDOCK_HOST=127.0.0.1 node --import tsx src/index.ts
 ```
+
+Since DRY-57 a throwaway daemon leaves **detached supervisor processes** behind
+if you Ctrl-C it — that is the feature working, and it means cleaning up after a
+test run is now a real step. Kill by executable, not by pattern: `pkill -f
+supervisor/main` also matches the shell command containing that string and will
+kill your own session.
+
+```sh
+for p in $(pgrep -f "supervisor/main"); do
+  case "$(readlink /proc/$p/exe)" in *node*) kill -9 "$p";; esac
+done
+```
+
+**In that order — supervisors first, then the directory.** `rm -rf` on a
+sessions dir with live supervisors in it doesn't stop them; it deletes the
+socket and metadata that were the only handle on them, leaving processes that
+no daemon can ever find. (Done it. The symptom is a supervisor whose `/proc/<pid>/fd`
+shows its log as `(deleted)`.)
 
 Smoke-test against it (`curl` from another terminal):
 
@@ -175,18 +214,97 @@ The traps, all of them found the hard way:
 5. **Don't test the tab title with one sample.** It alternates every 2s with the
    plain title on purpose (so it reads in a truncated tab), so a single read
    returns "Drydock" half the time.
-6. **The claude trust dialog does not fire** in a fresh worktree as of Claude
+6. **The claude trust dialog does not fire in a fresh WORKTREE** as of Claude
    Code v2.1.220 — verified deliberately, since it would wedge an unattended run
-   at a prompt nobody can answer. If a future version brings it back, that is
-   where to look first. NB testing from inside a claude session leaks
-   `CLAUDE_CODE_CHILD_SESSION` into the daemon's env and suppresses it anyway,
-   which makes for a convincing false negative: `env -u` the `CLAUDE_*` vars.
+   at a prompt nobody can answer. That is narrower than "does not fire": a cwd
+   claude has never seen (a scratch dir, a repo cloned somewhere new) *does*
+   prompt, and the failure is worse than a wedge — the daemon's typed prompt
+   lands in the dialog and its RETURN answers it, so the run starts with an
+   empty composer and the card reads "starting" forever. A worktree of an
+   already-trusted repo inherits the trust, which is why the normal path is
+   clean. Test in one; if you use a scratch cwd, expect to answer it once.
+   NB testing from inside a claude session leaks `CLAUDE_CODE_CHILD_SESSION`
+   into the daemon's env and suppresses the dialog anyway, which makes for a
+   convincing false negative: `env -u` the `CLAUDE_*` vars.
 
 Verify the tracker comment against **both** providers — it is the first thing
 to exercise `comment()` on either. Switchyard against a throwaway ticket; Jira
 against a stub asserting `POST /rest/api/2/issue/<KEY>/comment` with a plain
 string `{body}` (v2 is chosen precisely so no ADF document is needed), plus the
 fixture provider (`comment: false`) to prove the rail stands alone without one.
+
+## Verifying session durability (DRY-57)
+
+The whole feature is a negative claim — "killing this does not kill that" — so
+every test is: break something, then prove an agent didn't notice.
+
+```sh
+# short path: these are unix sockets, and the ABSOLUTE path must fit in ~100 bytes
+DRYDOCK_PORT=4391 DRYDOCK_SESSIONS_DIR=/tmp/d57 node --import tsx src/index.ts
+```
+
+`kill -9` the daemon (not SIGTERM — SIGKILL is the case with no cleanup path),
+then restart and watch for `session adopted after a daemon restart`. The
+supervisor's `sid == pid` (`ps -o sid,pid`) is the proof it detached.
+
+The traps, all found the hard way:
+
+1. **A socket file outlives the process that bound it.** `fs.exists` cannot tell
+   a live supervisor from a corpse; the only honest probe is to connect and
+   treat ECONNREFUSED/ENOENT as stale. Getting this wrong either abandons a
+   running agent or unlinks the one handle anything has on it.
+2. **A liveness probe must cost nothing.** The supervisor stays silent until the
+   client sends `Attach`; before that it greeted every connection, so each probe
+   serialized the whole scrollback to a socket about to be dropped — paid twice
+   per session on every boot, and logged as EPIPE.
+3. **Reconcile BEFORE binding the port.** Otherwise the first `/api/sessions`
+   of a restart honestly reports zero sessions, the shell reconciles away the
+   windows for agents that are alive, and every retrying hook gets a 404.
+4. **A replay is the WHOLE buffer**, so the pane must `term.reset()` before
+   writing one or a reconnect prints the session's history twice. Assert on the
+   count of a marker, not its presence.
+5. **`--retry-connrefused` does not cover a held gate.** That connection is
+   established, so a killed daemon RESETS it (curl exit 56), which plain
+   `--retry` ignores. `--retry-all-errors` does cover it and also retries the
+   `-m 590` timeout — which an autonomous gate is *supposed* to outlive, so it
+   would raise a second gate for one tool call. Hence the hand-rolled loop over
+   7|52|55|56 in hooks.ts. Test it with a server that accepts, holds, then
+   closes with SO_LINGER 0.
+6. **Buffer the hook body before retrying.** `--data-binary @-` reads stdin, and
+   stdin is a pipe that can only be consumed once.
+7. **A signalled child reports exitCode 0** with the signal alongside, so
+   passing the raw code on tells the daemon a killed run finished cleanly — and
+   for an autonomous run that is the difference between silence and a handoff.
+8. **`pkill -f supervisor/main` kills your own shell**, because the command
+   string contains the pattern. Filter on `/proc/<pid>/exe`.
+9. **A killed session whose child ignores the signal is the resurrection case.**
+   `/kill` drops it from the registry immediately and depends on the child
+   dying for the index to be cleaned; a child that traps SIGHUP breaks that
+   chain, and the next boot would adopt it back. `meta.killedAt` is written
+   BEFORE the signal so reconciliation finishes the job, and the supervisor
+   escalates to SIGKILL after a grace period so "kill" can't leave an
+   unreachable orphan. Reproduce with
+   `{"command":"/bin/sh","args":["-c","trap \"\" HUP TERM INT; while :; do sleep 1; done"]}`.
+10. **A close with no preceding `error` is a different path from a reset.** A
+   `destroy()`ed peer EPIPEs the outgoing write first, and that error disposes
+   the link before `close` fires — so a test built on `destroy()` passes even
+   against a link that mishandles `close`. Use a clean `end()` to exercise it.
+
+## Resource cost, so nobody discovers it from `top`
+
+One Node process per session (with the tsx loader) replaces N PTYs in a single
+process — tens of MB RSS each — and scrollback is now double-buffered, once in
+the supervisor's ring and once in the daemon's, each capped by
+`DRYDOCK_SCROLLBACK_BYTES` (~1 MiB default). Both are the right trade for
+sessions that survive a restart, but a host running twenty agents is running
+twenty extra Node processes.
+
+The reconciliation branch that is easy to forget: a run that ENDS while the
+daemon is down. Kill the daemon, then `kill -9` the agent, then restart — the
+supervisor flushed its transcript and exit record on the way out, so boot must
+write DRY-49's handoff from them and then clean up. `meta.handoff` being set is
+what stops the next boot writing a second one; the invariant is that an exit
+record still on disk at boot means, and only means, that nobody was home.
 
 ## Verifying a tracker provider (Switchyard / Jira)
 

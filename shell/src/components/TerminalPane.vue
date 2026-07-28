@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { Terminal, type ILink } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { attachUrl } from "../lib/daemon.js";
@@ -114,11 +114,50 @@ function doFit() {
 // Exposed so the parent can refit after a layout change moves/resizes us.
 defineExpose({ refit: () => requestAnimationFrame(doFit) });
 
+// DRY-57: a daemon restart no longer ends a session, so a closed socket is a
+// reason to dial again rather than the end of the pane. Before this, `onclose`
+// only set `connected = false` and the pane sat there dead until a full page
+// reload — which made "your agent survived the restart" true of the daemon and
+// invisible in the UI.
+let unmounting = false;
+let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+const attempts = ref(0);
+const RECONNECT_CEILING_MS = 5_000;
+/**
+ * After this many failures the badge stops saying "reconnecting".
+ *
+ * A restart is back within one or two tries, so anything past that is a
+ * different problem — a session the daemon no longer has (the upgrade is
+ * refused with a 404, which the browser reports as an indistinguishable close),
+ * or a shell pointed at the wrong daemon entirely. Both used to read as a pane
+ * that says "reconnecting…" forever, which is the least useful thing it could
+ * say while somebody debugs a port.
+ */
+const RECONNECT_PATIENCE = 4;
+
+/** What the badge says. Distinguishes "wait" from "something is actually wrong". */
+const disconnectedLabel = computed(() =>
+  attempts.value > RECONNECT_PATIENCE ? "can't reach the daemon" : "reconnecting…",
+);
+
+function scheduleReconnect() {
+  if (unmounting) return;
+  attempts.value++;
+  // Backoff to a 5s ceiling rather than a fixed retry: a daemon restart is back
+  // in a couple of seconds, but a host that is down deserves a quiet socket
+  // rather than one browser tab dialling it forever at full speed. Unbounded on
+  // purpose — the parent unmounts this pane when the session stops being listed,
+  // so "give up after N" would only ever abandon a session that still exists.
+  const wait = Math.min(400 * 2 ** (attempts.value - 1), RECONNECT_CEILING_MS);
+  reconnectTimer = setTimeout(connect, wait);
+}
+
 function connect() {
   const sock = new WebSocket(attachUrl(props.session.id));
   ws.value = sock;
   sock.onopen = () => {
     connected.value = true;
+    attempts.value = 0;
     doFit();
     if (!sentInitial && props.initialInput) {
       sentInitial = true;
@@ -134,13 +173,27 @@ function connect() {
       setTimeout(() => sendWs({ type: "input", data }), 700);
     }
   };
+  // No `onerror` handler, deliberately. The WebSocket error event carries no
+  // status — the spec makes it information-free so a page can't port-scan by
+  // timing handshake failures — so a 404 "unknown session", a wrong daemon port
+  // and a daemon mid-restart are genuinely indistinguishable here. `onclose`
+  // fires for all three, and the attempt count above is what separates "wait a
+  // moment" from "something is actually wrong".
   sock.onclose = () => {
     connected.value = false;
+    scheduleReconnect();
   };
   sock.onmessage = (ev) => {
     const msg = JSON.parse(ev.data) as ServerMessage;
     switch (msg.type) {
       case "replay":
+        // Reset first. A replay is always the WHOLE buffer, so on a reconnect —
+        // which is now an ordinary event, not a page load — writing it onto
+        // what the terminal already shows prints the session's entire history a
+        // second time.
+        term.value?.reset();
+        term.value?.write(msg.data);
+        break;
       case "data":
         term.value?.write(msg.data);
         break;
@@ -220,6 +273,10 @@ onBeforeUnmount(() => {
   // Release before the socket closes: from here on this session's gates have
   // nowhere to render but the tray (DRY-50).
   releasePane(props.session.id);
+  // Before ws.close(), or our own teardown triggers a reconnect to a session
+  // this pane is no longer showing.
+  unmounting = true;
+  clearTimeout(reconnectTimer);
   resizeObserver?.disconnect();
   ws.value?.close();
   term.value?.dispose();
@@ -229,7 +286,10 @@ onBeforeUnmount(() => {
 <template>
   <div class="pane-body" :class="{ attention: !!pending }">
     <div ref="termEl" class="term"></div>
-    <span v-if="!connected" class="detached">detached</span>
+    <!-- "reconnecting", not "detached": since DRY-57 a dropped socket is a
+         daemon that went away, not a session that ended, and the pane is
+         actively dialling back. -->
+    <span v-if="!connected" class="detached">{{ disconnectedLabel }}</span>
 
     <!-- DRY-41: dead PTY — the scrollback above is a frozen transcript. -->
     <div v-if="exited" class="exited">

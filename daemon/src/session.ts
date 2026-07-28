@@ -1,10 +1,12 @@
 import * as os from "node:os";
 import { randomUUID } from "node:crypto";
-import * as pty from "node-pty";
 import type { WebSocket } from "ws";
 import { CONFIG } from "./config.js";
 import { CLAUDE_SETTINGS_PATH, CLAUDE_SETTINGS_PATH_AUTONOMOUS } from "./hooks.js";
 import { log } from "./log.js";
+import { assertSocketPathFits, forget, writeMeta } from "./sessions-dir.js";
+import { SupervisorLink } from "./supervisor/link.js";
+import { PROTOCOL_VERSION, type SessionMeta } from "./supervisor/wire.js";
 import type {
   EventMessage,
   PendingGate,
@@ -192,8 +194,8 @@ export type GateEvent = Extract<EventMessage, { type: "gate-open" | "gate-resolv
  * running and we replay everything it printed while you were gone.
  */
 export class PtySession {
-  readonly id = randomUUID();
-  readonly createdAt = Date.now();
+  readonly id: string;
+  readonly createdAt: number;
   readonly command: string;
   readonly args: string[];
   readonly cwd: string;
@@ -209,7 +211,33 @@ export class PtySession {
    */
   private autonomous: boolean;
 
-  private readonly pty: pty.IPty;
+  /** What to exec, resolved once at spawn and carried through a restart. */
+  private readonly exec: { file: string; args: string[] };
+  /** The env vars the daemon ADDS — never a snapshot of process.env. */
+  private readonly env: Record<string, string>;
+  /**
+   * The supervisor holding this session's PTY master (DRY-57).
+   *
+   * Undefined only for a session adopted after it had already ended, which
+   * exists purely long enough to produce the artefacts its run never got.
+   */
+  private link?: SupervisorLink;
+  /** Its index files are gone; stop rewriting them. See onExit. */
+  private forgotten = false;
+  /**
+   * When this run actually ended, if that was BEFORE we found out about it.
+   *
+   * Only set by `adoptExited`. Without it the handoff document for a run that
+   * ended while the daemon was down is stamped with the moment the daemon came
+   * back — which turns a 39-second run into however long the daemon happened to
+   * be away, in the one document that is the only account of what happened.
+   */
+  private endedAtValue?: number;
+
+  /** See endedAtValue. Undefined means "it is ending now". */
+  get endedAt(): number | undefined {
+    return this.endedAtValue;
+  }
   private cols: number;
   private rows: number;
   private status: SessionStatus = "running";
@@ -244,58 +272,243 @@ export class PtySession {
   private endsAnnounced = new Set<RunEndReason>();
   /** This process was signalled on purpose, so its exit code isn't a verdict. */
   private stoppedByRequest = false;
+  /** When somebody asked for it to stop. Persisted — see SessionMeta.killedAt. */
+  private killedAt?: number;
 
-  constructor(
-    opts: SpawnOptions,
+  private constructor(
+    meta: SessionMeta,
     private readonly notifyGate: GateNotifier = () => {},
     private readonly notifyRunEnd: RunEndNotifier = () => {},
   ) {
-    this.command = opts.command;
-    this.args = opts.args ?? [];
-    this.cwd = opts.cwd ?? os.homedir();
-    this.ticket = opts.ticket;
-    this.worktree = opts.worktree;
-    this.branch = opts.branch;
-    this.autonomous = opts.autonomous ?? false;
-    this.origin = opts.origin ?? "you";
-    this.permissionMode = opts.permissionMode ?? "manual";
-    this.title = opts.title ?? opts.command;
-    this.cols = opts.cols ?? 80;
-    this.rows = opts.rows ?? 24;
+    this.id = meta.id;
+    this.createdAt = meta.createdAt;
+    this.command = meta.command;
+    this.args = meta.args;
+    this.exec = meta.exec;
+    this.env = meta.env;
+    this.cwd = meta.cwd;
+    this.ticket = meta.ticket;
+    this.worktree = meta.worktree;
+    this.branch = meta.branch;
+    this.autonomous = meta.autonomous;
+    this.origin = meta.origin;
+    this.permissionMode = meta.permissionMode;
+    this.title = meta.title;
+    this.cols = meta.cols;
+    this.rows = meta.rows;
+    this.handoff = meta.handoff;
+  }
 
-    const spawn = resolveSpawn(this.command, this.args, this.autonomous, this.permissionMode);
-    this.pty = pty.spawn(spawn.file, spawn.args, {
-      name: "xterm-256color",
+  /** The index entry this session would be rebuilt from after a restart. */
+  private toMeta(): SessionMeta {
+    return {
+      protocol: PROTOCOL_VERSION,
+      id: this.id,
+      createdAt: this.createdAt,
+      command: this.command,
+      args: this.args,
+      exec: this.exec,
+      cwd: this.cwd,
+      title: this.title,
       cols: this.cols,
       rows: this.rows,
-      cwd: this.cwd,
+      ticket: this.ticket,
+      worktree: this.worktree,
+      branch: this.branch,
+      autonomous: this.autonomous,
+      origin: this.origin,
+      permissionMode: this.permissionMode,
+      env: this.env,
+      handoff: this.handoff,
+      killedAt: this.killedAt,
+    };
+  }
+
+  /**
+   * Push the mutable half of the index back to disk.
+   *
+   * Only a handful of things change after a spawn and survive a restart —
+   * a take-over, a handoff path, a retitle — but each one that DOESN'T get
+   * written is a lie the next boot reads: a run adopted back onto the rail
+   * after somebody took it over, or a second tracker comment for a handoff
+   * that already exists.
+   */
+  private persist(): void {
+    if (this.forgotten) return;
+    try {
+      writeMeta(this.toMeta());
+    } catch (err) {
+      // The session is live and driving an agent; an index write failing costs
+      // a restart's memory of it, not the run.
+      log.warn("could not update the session index", { id: this.id, err: String(err) });
+    }
+  }
+
+  /** Start a new session under its own detached supervisor. */
+  static async spawn(
+    opts: SpawnOptions,
+    notifyGate: GateNotifier = () => {},
+    notifyRunEnd: RunEndNotifier = () => {},
+  ): Promise<PtySession> {
+    const id = randomUUID();
+    assertSocketPathFits(id);
+    const command = opts.command;
+    const args = opts.args ?? [];
+    const autonomous = opts.autonomous ?? false;
+    const permissionMode = opts.permissionMode ?? "manual";
+    const meta: SessionMeta = {
+      protocol: PROTOCOL_VERSION,
+      id,
+      createdAt: Date.now(),
+      command,
+      args,
+      exec: resolveSpawn(command, args, autonomous, permissionMode),
+      cwd: opts.cwd ?? os.homedir(),
+      title: opts.title ?? command,
+      cols: opts.cols ?? 80,
+      rows: opts.rows ?? 24,
+      ticket: opts.ticket,
+      worktree: opts.worktree,
+      branch: opts.branch,
+      autonomous,
+      origin: opts.origin ?? "you",
+      permissionMode,
       env: {
-        ...process.env,
         ...opts.env,
         // Lets the PreToolUse hook tell the daemon which session it belongs to.
-        DRYDOCK_SESSION_ID: this.id,
+        // Both of these are baked into the child at spawn and CANNOT be changed
+        // afterwards, which is the one real limit on a session outliving its
+        // daemon: move the daemon's host or port and an already-running agent's
+        // hooks keep calling the old address. Host config, so it doesn't move
+        // on its own — but it is why DRYDOCK_SESSIONS_DIR exists.
+        DRYDOCK_SESSION_ID: id,
         DRYDOCK_DAEMON_URL: `http://${CONFIG.host}:${CONFIG.port}`,
         TERM: "xterm-256color",
       },
-    });
+    };
 
-    this.pty.onData((data) => this.onData(data));
-    this.pty.onExit(({ exitCode }) => this.onExit(exitCode));
+    const link = await SupervisorLink.start(meta);
+    const session = new PtySession(meta, notifyGate, notifyRunEnd);
+    session.bind(link);
 
     log.info("session spawned", {
-      id: this.id,
-      pid: this.pty.pid,
-      command: this.command,
-      cwd: this.cwd,
-      ticket: this.ticket,
-      branch: this.branch,
-      autonomous: this.autonomous || undefined,
+      id,
+      supervisorPid: link.hello.pid,
+      pid: link.hello.childPid,
+      command,
+      cwd: meta.cwd,
+      ticket: meta.ticket,
+      branch: meta.branch,
+      autonomous: autonomous || undefined,
       // Logged because it decides whether this run can ask for anything at all;
       // "why did nothing ever gate?" should be answerable from the log.
-      permissionMode: this.permissionMode,
+      permissionMode,
     });
 
-    if (opts.input) this.scheduleInitialInput(opts.input);
+    if (opts.input) session.scheduleInitialInput(opts.input);
+    return session;
+  }
+
+  /**
+   * Take back a session whose supervisor outlived the daemon (DRY-57).
+   *
+   * The scrollback comes back with it: the ring buffer lives in the supervisor
+   * now, so "we replay everything it printed while you were gone" survives the
+   * daemon's own absence, not just a closed browser tab.
+   */
+  static adopt(
+    meta: SessionMeta,
+    link: SupervisorLink,
+    notifyGate: GateNotifier = () => {},
+    notifyRunEnd: RunEndNotifier = () => {},
+  ): PtySession {
+    const session = new PtySession(meta, notifyGate, notifyRunEnd);
+    session.seedScrollback(link.takeReplay());
+    // Whatever size the last client negotiated, not what the spawn asked for.
+    session.cols = link.hello.cols;
+    session.rows = link.hello.rows;
+    session.bind(link);
+    log.info("session adopted after a daemon restart", {
+      id: meta.id,
+      supervisorPid: link.hello.pid,
+      pid: link.hello.childPid,
+      command: meta.command,
+      ticket: meta.ticket,
+      autonomous: meta.autonomous || undefined,
+      replayBytes: session.scrollbackBytes,
+      ageSec: Math.round((Date.now() - meta.createdAt) / 1000),
+    });
+    return session;
+  }
+
+  /**
+   * Rebuild a session that ENDED while the daemon was down, from the transcript
+   * and exit record its supervisor flushed on the way out.
+   *
+   * It has no link and never runs again. It exists because DRY-49's premise is
+   * that nobody was watching: an unattended run whose daemon died before it
+   * finished used to leave nothing at all — no handoff, no tracker comment, no
+   * card — which is the one outcome that feature must not have.
+   */
+  static adoptExited(
+    meta: SessionMeta,
+    exitCode: number,
+    endedAt: number,
+    scrollback: Buffer | undefined,
+    notifyGate: GateNotifier = () => {},
+    notifyRunEnd: RunEndNotifier = () => {},
+  ): PtySession {
+    const session = new PtySession(meta, notifyGate, notifyRunEnd);
+    if (scrollback) session.seedScrollback(scrollback);
+    session.status = "exited";
+    session.exitCode = exitCode;
+    session.endedAtValue = endedAt;
+    // We CAN tell a deliberate stop from a crash, because `/kill` records the
+    // intent in the index before it sends the signal. That matters twice over:
+    // signalling a process exits it 129/137/143, so without this the branch
+    // below would mark a run somebody deliberately stopped as FAILED and post
+    // "nobody was watching when this stopped — please pick it up" to its ticket
+    // (DRY-49's trap 2, which this path would otherwise have reintroduced by
+    // the back door), and it keeps this ending the same shape as the one the
+    // live path produces — transcript kept, no tracker comment.
+    session.stoppedByRequest = Boolean(meta.killedAt);
+    if (exitCode !== 0 && !session.stoppedByRequest) {
+      session.failure = {
+        at: endedAt,
+        reason: `exited ${exitCode} while the daemon was down`,
+        lastLine: session.lastOutputLine(),
+      };
+    }
+    return session;
+  }
+
+  /** Replace the buffer wholesale — the supervisor's copy is authoritative. */
+  private seedScrollback(replay: Buffer): void {
+    this.scrollback = replay.byteLength ? [replay] : [];
+    this.scrollbackBytes = replay.byteLength;
+  }
+
+  /** Wire a link's output, exit and reattach into this session. */
+  private bind(link: SupervisorLink): void {
+    this.link = link;
+    link.onReattach((replay) => {
+      // A dropped-and-recovered connection hands back the whole buffer. Replace
+      // rather than append: we can't know how much of it we already had, and
+      // appending would print the session's history to every attached pane a
+      // second time.
+      this.seedScrollback(replay);
+      log.info("supervisor reattached — scrollback resynced", {
+        id: this.id,
+        bytes: this.scrollbackBytes,
+      });
+    });
+    link.onData((data) => this.onData(data));
+    link.onExit((exitCode) => this.onExit(exitCode));
+  }
+
+  /** Drop the connection WITHOUT killing the agent (daemon shutdown). */
+  detachSupervisor(): void {
+    this.link?.dispose();
   }
 
   // --- daemon-typed first prompt (DRY-49) --------------------------------
@@ -345,7 +558,7 @@ export class PtySession {
       bytes: Buffer.byteLength(text),
       waitedMs: Date.now() - this.spawnedAt,
     });
-    this.pty.write(data);
+    this.link?.write(data);
 
     // The RETURN IS A SEPARATE WRITE, and that is the whole difference between
     // an autonomous run and a prompt sitting in a text box forever. Appending
@@ -357,7 +570,7 @@ export class PtySession {
     // (A supervised spawn deliberately never does this: TerminalPane pre-fills
     // and leaves the human to submit. Nobody is there to submit this one.)
     const submit = setTimeout(() => {
-      if (this.status === "running") this.pty.write("\r");
+      if (this.status === "running") this.link?.write("\r");
     }, 400);
     submit.unref?.();
   }
@@ -419,6 +632,16 @@ export class PtySession {
     this.announceRunEnd(
       this.failure ? "failed" : this.stoppedByRequest ? "stopped" : "finished",
     );
+
+    // LAST, and after the run-end announcement on purpose. The index exists so
+    // a daemon that wasn't here can find out what happened; this daemon WAS
+    // here, has the whole record in memory, and has just written whatever
+    // artefacts the run was owed. Leaving the files behind would make the next
+    // boot re-derive an ending it already handled — a second handoff document,
+    // a second tracker comment — so the invariant is: an exit record still on
+    // disk at boot means, and only means, that nobody was home when it ended.
+    this.forgotten = true;
+    forget(this.id);
   }
 
   // --- run lifecycle (DRY-49) ---------------------------------------------
@@ -446,6 +669,24 @@ export class PtySession {
     this.notifyRunEnd(this, reason);
   }
 
+  /**
+   * Announce an ending that happened while the daemon wasn't running (DRY-57).
+   *
+   * Only reachable from boot reconciliation, on a session rebuilt by
+   * `adoptExited`. `announceRunEnd` still gates on `autonomous`, so a
+   * supervised session that died with its daemon stays silent — there was a
+   * human in front of it, and the artefacts are for the runs nobody saw.
+   */
+  announceMissedEnding(): void {
+    // Deliberately the same ternary as onExit's. The two paths describe the
+    // same event — a run reaching a terminal state — and the only difference
+    // is whether the daemon was there to watch it happen, which must not be
+    // something a handoff document can tell.
+    this.announceRunEnd(
+      this.failure ? "failed" : this.stoppedByRequest ? "stopped" : "finished",
+    );
+  }
+
   /** Scrollback with the terminal control codes taken out, for humans. */
   transcript(): string {
     return stripAnsi(Buffer.concat(this.scrollback).toString("utf8"));
@@ -464,6 +705,9 @@ export class PtySession {
   /** Where this run's handoff document was written, once runs.ts has written it. */
   noteHandoff(path: string): void {
     this.handoff = path;
+    // Persisted because boot reconciliation reads its absence as "this run
+    // ended unattended and still owes a human its artefacts" (DRY-57).
+    this.persist();
   }
 
   /**
@@ -474,6 +718,9 @@ export class PtySession {
    */
   takeOver(): void {
     this.autonomous = false;
+    // Or a daemon restart would put it back on the rail, and a session somebody
+    // is sitting in front of would start writing handoff documents again.
+    this.persist();
   }
 
   /** Stop gating this tool for the rest of the run ("Always allow Bash"). */
@@ -574,7 +821,7 @@ export class PtySession {
     // Any user input means they've responded — drop the "your turn" flag so the
     // pane stops glowing the moment they start interacting again.
     this.clearIdle();
-    this.pty.write(data);
+    this.link?.write(data);
   }
 
   resize(cols: number, rows: number): void {
@@ -582,7 +829,7 @@ export class PtySession {
     this.cols = cols;
     this.rows = rows;
     try {
-      this.pty.resize(cols, rows);
+      this.link?.resize(cols, rows);
     } catch {
       // Racing a just-exited PTY; ignore.
     }
@@ -610,7 +857,16 @@ export class PtySession {
     // unanswered-gate path, which kills too — it records its failure first, so
     // the check below leaves that verdict alone.
     if (!this.failure) this.stoppedByRequest = true;
-    this.pty.kill();
+    // Recorded BEFORE the kill is sent, and that ordering is the point (DRY-57
+    // review). Everything that cleans up after a kill depends on the child
+    // actually dying and the Exit frame coming back; if it ignores the signal,
+    // or the daemon goes down inside that window, the index entry outlives the
+    // decision and the next boot would adopt a session somebody deliberately
+    // ended straight back onto the desk. This is what reconciliation reads to
+    // finish the job instead of undoing it.
+    this.killedAt = Date.now();
+    this.persist();
+    this.link?.kill();
   }
 
   /**
