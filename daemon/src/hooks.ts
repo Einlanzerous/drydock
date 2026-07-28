@@ -28,6 +28,27 @@ const SETTINGS = {
           },
         ],
       },
+      // Report-only (DRY-49): tells the daemon what the agent is doing so the
+      // rail card can say "editing src/foo.ts" instead of showing a bare clock.
+      // It NEVER gates — it prints nothing, so the CLI reads no decision from
+      // it and proceeds under its normal rules.
+      //
+      // The matcher deliberately EXCLUDES Bash so it can't overlap the gating
+      // hook above. Claude Code runs every matching hook for an event, and two
+      // hooks answering one PreToolUse is a race over whose decision wins;
+      // Bash's activity is recorded daemon-side in requestPermission() instead,
+      // where it's known for free. Keep this list and that matcher disjoint.
+      {
+        matcher: "Edit|MultiEdit|Write|NotebookEdit|Read|Glob|Grep|WebFetch|WebSearch|Task",
+        hooks: [
+          {
+            type: "command",
+            timeout: 5,
+            command:
+              'curl -s -m 3 -X POST "$DRYDOCK_DAEMON_URL/hook/activity" -H "Content-Type: application/json" -H "X-Drydock-Session: $DRYDOCK_SESSION_ID" --data-binary @- >/dev/null 2>&1 || true',
+          },
+        ],
+      },
     ],
     // When the agent ends its turn, tell the daemon so the pane shows "Your turn"
     // (DRY-18). Fire-and-forget: never block the agent from stopping. No matcher

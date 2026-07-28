@@ -180,6 +180,45 @@ export const CONFIG = {
   permissionTimeoutMs: Number(process.env.DRYDOCK_PERMISSION_TIMEOUT_MS ?? 300_000),
 
   /**
+   * Autonomous runs (DRY-49) — a session nobody is looking at.
+   */
+  autonomous: {
+    /**
+     * How long an AUTONOMOUS run holds a gate. An hour, not the supervised
+     * 300s, because the premise is that you walked away: five minutes is the
+     * length of a coffee, and the point of the rail is that a gate can wait
+     * out a meeting.
+     *
+     * This deliberately EXCEEDS Claude Code's own hook timeout (~600s), which
+     * inverts the rule the supervised path lives by. That's safe only because
+     * the autonomous timeout never resolves `"timeout"` — it denies with a
+     * reason (see session.ts). The CLI's fallback is a TUI prompt inside a PTY
+     * no human is watching, which is the exact wedge this ticket exists to
+     * remove; if the hook gives up first, the run is already over and the deny
+     * lands on a request nobody is waiting for.
+     */
+    permissionTimeoutMs: num(process.env.DRYDOCK_AUTONOMOUS_PERMISSION_TIMEOUT_MS, 3_600_000),
+    /**
+     * Where a finished run's handoff document is written. This has to outlive
+     * the run: the tracker comment tells a human to continue from it, and the
+     * alternative — a ~1 MiB scrollback ring buffer inside a dead session — is
+     * gone the moment the daemon restarts.
+     */
+    runsRoot: process.env.DRYDOCK_RUNS_ROOT ?? "~/.drydock/runs",
+    /**
+     * Public URL of the shell, used only to add a "pick it up here" link to
+     * the tracker comment. Unset by default and simply omitted when unset: the
+     * daemon knows its own host and port but has no idea where the shell is
+     * served from (dev :5320, prod :5321, possibly another host entirely), and
+     * a guessed link in a permanent ticket comment is worse than no link.
+     *
+     * NB the design's `drydock://resume/<KEY>` is deliberately not used — no
+     * handler for that scheme exists on any platform we run on.
+     */
+    shellUrl: process.env.DRYDOCK_SHELL_URL || undefined,
+  },
+
+  /**
    * Issue-tracker backend for the sidebar + Ctrl+K palette (DRY-10). Defaults
    * to `fixture` so the shell works with no credentials. Set `switchyard` or
    * `jira` plus the matching credentials to go live. Credentials stay here on

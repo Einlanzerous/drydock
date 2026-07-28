@@ -92,6 +92,33 @@ export type EventMessage =
 
 export type SessionStatus = "running" | "exited";
 
+/**
+ * Who started a run (DRY-49). Rendered on every rail card.
+ *
+ * No `sched`: the design shows one, but nothing in Drydock schedules anything,
+ * and a card that can display a state the product cannot produce is a lie with
+ * a shape. `agent` is accepted by the spawn API today but nothing sends it yet —
+ * that's DRY-46/DRY-34's launch surface.
+ */
+export type RunOrigin = "you" | "agent";
+
+/**
+ * Why an autonomous run ended badly, carried on the card so a failure can be
+ * triaged without opening anything (DRY-49).
+ */
+export interface RunFailure {
+  /** Epoch ms the run was declared failed. */
+  at: number;
+  /** One clause, already human-readable — it goes straight onto the card. */
+  reason: string;
+  /**
+   * The last non-empty line the process printed. Deliberately NOT called
+   * stderr: a PTY merges stdout and stderr into one stream, so the daemon
+   * cannot tell them apart and shouldn't claim to.
+   */
+  lastLine?: string;
+}
+
 /** Session summary returned over the HTTP control API. */
 export interface SessionInfo {
   id: string;
@@ -113,4 +140,25 @@ export interface SessionInfo {
   rows: number;
   createdAt: number;
   pendingPermissions: number;
+  // --- autonomous runs (DRY-49) ---
+  /**
+   * This session runs unattended: it has a card on the rail rather than a
+   * window, and it holds gates for an hour instead of five minutes.
+   *
+   * It lives on the SESSION, not in the saved workspace, and that is the whole
+   * trick: the rail rebuilds from /api/sessions on load, so a run is autonomous
+   * because the daemon says so — not because a browser remembered. DRY-28's
+   * workspace payload needs no change at all.
+   */
+  autonomous: boolean;
+  origin: RunOrigin;
+  /**
+   * What the agent is doing right now, in one clause ("editing src/foo.ts").
+   * Fed by the reporting PreToolUse hook; absent until the first tool call,
+   * which is exactly what the rail reads as "starting".
+   */
+  activity?: string;
+  failure?: RunFailure;
+  /** Absolute path of the handoff document written when the run ended. */
+  handoff?: string;
 }

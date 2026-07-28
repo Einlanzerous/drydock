@@ -1,5 +1,10 @@
 import { log } from "./log.js";
-import { PtySession, type GateEvent, type SpawnOptions } from "./session.js";
+import {
+  PtySession,
+  type GateEvent,
+  type RunEndReason,
+  type SpawnOptions,
+} from "./session.js";
 
 /** In-memory registry of live sessions. One per wrapped CLI / shell. */
 export class SessionManager {
@@ -32,10 +37,40 @@ export class SessionManager {
     }
   }
 
+  /**
+   * Subscribers to autonomous runs reaching a terminal state (DRY-49). Same
+   * shape and the same reason as the gate listeners above: a run that ends has
+   * to produce a durable artefact, and that work needs the tracker — which the
+   * session must not import if it's to stay a thing that owns a PTY and
+   * nothing else.
+   */
+  private readonly runEndListeners = new Set<(s: PtySession, r: RunEndReason) => void>();
+
+  onRunEnd(listener: (session: PtySession, reason: RunEndReason) => void): () => void {
+    this.runEndListeners.add(listener);
+    return () => this.runEndListeners.delete(listener);
+  }
+
   create(opts: SpawnOptions): PtySession {
-    const session = new PtySession(opts, (event) => this.emitGate(event));
+    const session = new PtySession(
+      opts,
+      (event) => this.emitGate(event),
+      (s, reason) => this.emitRunEnd(s, reason),
+    );
     this.sessions.set(session.id, session);
     return session;
+  }
+
+  private emitRunEnd(session: PtySession, reason: RunEndReason): void {
+    for (const listener of this.runEndListeners) {
+      // Writing a handoff or reaching a tracker can fail in a dozen ways, none
+      // of which may take down the process that owns every live PTY (DRY-45).
+      try {
+        listener(session, reason);
+      } catch (err) {
+        log.warn("run-end listener threw", { id: session.id, reason, err: String(err) });
+      }
+    }
   }
 
   get(id: string): PtySession | undefined {

@@ -16,10 +16,17 @@ import {
 import type { ClientMessage, EventMessage } from "./protocol.js";
 import { createTracker, trackerInfo } from "./tracker/index.js";
 import { createStore } from "./state/index.js";
+import { runEndHandler } from "./runs.js";
 
 const manager = new SessionManager();
 const tracker = createTracker();
 const store = createStore();
+
+// An autonomous run that reaches a terminal state leaves a handoff document
+// and (capability permitting) a tracker comment behind (DRY-49). Subscribed
+// here rather than inside the session so PtySession keeps knowing nothing about
+// trackers or the filesystem.
+manager.onRunEnd(runEndHandler(tracker));
 
 // Permission modes where Claude Code runs tools without asking. In these the
 // PreToolUse hook still fires, but our approve/deny is moot — so we auto-allow
@@ -205,11 +212,49 @@ const server = http.createServer(async (req, res) => {
         return send(res, 400, { error: "decision must be 'allow' or 'deny'" });
       }
       const reason = typeof body.reason === "string" ? body.reason : undefined;
+      // "Always allow <Tool>" (DRY-49, deferred here from DRY-50). Recorded
+      // BEFORE the gate is resolved: the agent's very next tool call can arrive
+      // in the same tick as the hook response, and an allow-set updated after
+      // the fact would gate it anyway — which reads as the button not working.
+      //
+      // Only meaningful alongside an allow; `deny` + `always` is incoherent (a
+      // standing denial is just a tool the agent shouldn't have), so it's
+      // ignored rather than honoured.
+      if (body.always === true && decision === "allow") {
+        const gate = session.pendingGates().find((g) => g.requestId === body.requestId);
+        if (gate) session.allowTool(gate.tool);
+      }
       // False means the gate is already gone — answered from a pane, timed out,
       // or the session exited. Not an error worth a 500; the caller raced and
       // the honest answer is "there is nothing here to answer".
       const resolved = session.resolvePermission(String(body.requestId ?? ""), decision, reason);
       return send(res, resolved ? 200 : 409, { ok: resolved });
+    }
+
+    // Take-over (DRY-49): a run stops being autonomous and becomes an ordinary
+    // supervised session. One-way by design — see PtySession.takeOver — so
+    // `autonomous: true` is refused rather than quietly ignored, which would
+    // leave a caller believing it had put a session back on the rail.
+    const autonomyMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/autonomy$/);
+    if (autonomyMatch && req.method === "POST") {
+      const session = manager.get(decodeURIComponent(autonomyMatch[1]));
+      if (!session) return send(res, 404, { error: "unknown session" });
+      let body: any;
+      try {
+        body = await readJson(req);
+      } catch (err) {
+        return send(res, 400, { error: `invalid JSON body: ${String(err)}` });
+      }
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return send(res, 400, { error: "body must be a JSON object" });
+      }
+      if (body.autonomous !== false) {
+        return send(res, 400, {
+          error: "only {autonomous:false} is supported — a session cannot be made autonomous",
+        });
+      }
+      session.takeOver();
+      return send(res, 200, { session: session.info() });
     }
 
     if (pathname === "/api/sessions" && req.method === "POST") {
@@ -268,6 +313,13 @@ const server = http.createServer(async (req, res) => {
         title: typeof body.title === "string" ? body.title : undefined,
         cols: typeof body.cols === "number" ? body.cols : undefined,
         rows: typeof body.rows === "number" ? body.rows : undefined,
+        // Autonomous runs (DRY-49). `origin` is validated rather than trusted
+        // so a typo can't put an unrenderable value on every rail card;
+        // "agent" is already accepted here even though nothing sends it yet —
+        // that's the launch surface DRY-46/DRY-34 both need.
+        autonomous: body.autonomous === true,
+        origin: body.origin === "agent" ? "agent" : "you",
+        input: typeof body.input === "string" && body.input.trim() ? body.input : undefined,
       });
       return send(res, 201, { session: session.info() });
     }
@@ -554,6 +606,24 @@ const server = http.createServer(async (req, res) => {
             (outcome.decision === "allow" ? "Approved in Drydock" : "Denied in Drydock"),
         },
       });
+    }
+
+    // --- Activity hook endpoint (DRY-49 action line) ---
+    // A SECOND PreToolUse hook, matching the tools the gating one deliberately
+    // does not (see hooks.ts). It exists because the rail's card would
+    // otherwise carry nothing but an elapsed clock: the gating hook matches
+    // Bash alone, so the daemon has never seen a Read or an Edit go past.
+    //
+    // Answers {} immediately and holds nothing open — a hook that can block is
+    // a hook that can stall the agent, and this one only feeds a caption.
+    if (pathname === "/hook/activity" && req.method === "POST") {
+      const sessionId = (req.headers["x-drydock-session"] as string | undefined) ?? "";
+      const session = manager.get(sessionId);
+      const body = await readJson(req).catch(() => ({}));
+      if (session && typeof body?.tool_name === "string") {
+        session.noteActivity(body.tool_name, body.tool_input ?? {});
+      }
+      return send(res, 200, {});
     }
 
     // --- Stop hook endpoint (DRY-18 "your turn" indicator) ---
