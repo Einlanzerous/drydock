@@ -2,6 +2,7 @@ import type {
   Project,
   Ticket,
   TicketCategory,
+  TicketComment,
   TicketDetail,
   TicketQuery,
   TrackerProvider,
@@ -57,10 +58,37 @@ interface JiraIssue {
     // it'd be one more host config knob. On such an instance epics simply
     // render flat, which is exactly today's behavior (DRY-13).
     parent?: { key?: string; fields?: { summary?: string; issuetype?: { name?: string } } } | null;
+    // Present only when `comment` is in the fields= list (DRY-53). Jira returns
+    // a PAGE here, not necessarily the thread: `total` is the real length, and
+    // the page it hands back is the OLDEST comments — the opposite end from the
+    // one worth briefing an agent with. See fetchComments.
+    comment?: {
+      comments?: JiraComment[];
+      total?: number;
+      startAt?: number;
+      maxResults?: number;
+    } | null;
   };
 }
 
+interface JiraComment {
+  /** v2 keeps this a plain string; v3 would hand back an ADF document. */
+  body?: string;
+  author?: { displayName?: string; name?: string } | null;
+  created?: string;
+}
+
 const FIELDS = "summary,status,issuetype,labels,assignee,project,components,parent";
+
+// Rungs walked upward from a ticket looking for its epic (DRY-53). `parent` on
+// an issue doesn't carry the parent's OWN parent, so a subtask costs one GET to
+// see the epic above its task. Same bound as the Switchyard provider.
+const MAX_ANCESTOR_HOPS = 2;
+
+// Newest comments pulled when the issue GET returned a short page (DRY-53).
+// The formatter windows this down further; it only has to be at least as large
+// as anything that could survive that budget.
+const COMMENT_TAIL = 20;
 
 // Same backstop as the Switchyard provider: the sidebar's unbounded list never
 // pulls more than this many issues out of a huge corporate Jira.
@@ -88,6 +116,16 @@ function mapCategory(categoryKey?: string, statusName?: string): TicketCategory 
     default:
       return "backlog";
   }
+}
+
+/**
+ * Is this issue type an epic? Jira's type names are per-instance strings, so
+ * this is a name match and nothing better exists over the REST API — the same
+ * assumption `issuetype = "Epic"` in buildJql makes, and it fails the same way
+ * on a localized or renamed instance: no epic line rather than a wrong one.
+ */
+function isEpic(typeName?: string): boolean {
+  return typeName?.toLowerCase() === "epic";
 }
 
 /** JQL string literal: backslashes and quotes escaped. */
@@ -344,7 +382,7 @@ export class JiraProvider implements TrackerProvider {
    * an older DC instance, where this throws every time and must stay harmless.
    */
   private async attachChildStats(out: Ticket[]): Promise<void> {
-    const epics = new Map(out.filter((t) => t.type?.toLowerCase() === "epic").map((t) => [t.key, t]));
+    const epics = new Map(out.filter((t) => isEpic(t.type)).map((t) => [t.key, t]));
     if (!epics.size) return;
     try {
       const jql = `parent in (${[...epics.keys()].map(jqlQuote).join(", ")})`;
@@ -387,17 +425,107 @@ export class JiraProvider implements TrackerProvider {
   }
 
   async getTicket(key: string): Promise<TicketDetail> {
+    // `comment` rides along in the same request (DRY-53) — a field, not a
+    // separate endpoint, so the thread is usually free.
     const i: JiraIssue = await this.req(
-      `/issue/${encodeURIComponent(key)}?fields=${FIELDS},description`,
+      `/issue/${encodeURIComponent(key)}?fields=${FIELDS},description,comment`,
     );
+    const [comments, epic] = await Promise.all([this.fetchComments(key, i), this.resolveEpic(i)]);
     return {
       ...this.toTicket(i),
+      epic,
       project: i.fields.project?.key ?? "",
       labels: i.fields.labels ?? [],
       // v2 keeps this a plain string (wiki markup at worst) — fine as agent
       // context, and no ADF parsing.
       description: i.fields.description ?? "",
+      ...comments,
     };
+  }
+
+  /**
+   * The comment thread, oldest first, ending at the NEWEST comment (DRY-53).
+   *
+   * That last part is the whole difficulty. Jira's `comment` field is paginated
+   * and ordered oldest-first, and deployments disagree about how much of it a
+   * `fields=comment` GET returns — so on a long thread the issue payload can
+   * hand back the twenty oldest comments, which is precisely the window that
+   * misleads: an agent briefed from the start of a thread it can't see the end
+   * of is worse off than one briefed from none of it.
+   *
+   * `total` tells us when that happened, and a second request with
+   * `startAt = total - COMMENT_TAIL` fetches the tail directly. Deliberately
+   * not `orderBy=-created`, which Jira Cloud supports and older DC does not —
+   * paging from the end works everywhere and needs no probe.
+   *
+   * `commentCount` stays the real `total` even when only the tail is kept: the
+   * formatter's job is to say "the 5 most recent of 63", and it can only say
+   * that if the 63 survives to it.
+   *
+   * Failures are swallowed. A thread we couldn't fetch must not cost the
+   * description we already have.
+   */
+  private async fetchComments(
+    key: string,
+    i: JiraIssue,
+  ): Promise<{ comments?: TicketComment[]; commentCount?: number }> {
+    const page = i.fields.comment;
+    if (!page) return {};
+    let raw = page.comments ?? [];
+    const total = typeof page.total === "number" ? page.total : raw.length;
+    const seen = (page.startAt ?? 0) + raw.length;
+    if (seen < total) {
+      try {
+        const startAt = Math.max(0, total - COMMENT_TAIL);
+        const body = await this.req(
+          `/issue/${encodeURIComponent(key)}/comment?startAt=${startAt}&maxResults=${COMMENT_TAIL}`,
+        );
+        raw = body.comments ?? raw;
+      } catch {
+        /* keep the page we have; the formatter still says how many exist */
+      }
+    }
+    const comments = raw
+      .filter((c) => typeof c.body === "string" && c.body.trim())
+      .map((c) => ({
+        author: c.author?.displayName ?? c.author?.name,
+        createdAt: c.created,
+        body: c.body!.trim(),
+      }));
+    return { comments, commentCount: Math.max(total, comments.length) };
+  }
+
+  /**
+   * Nearest ancestor of type epic (DRY-53). `parent` on the issue is the
+   * immediate one, which for a subtask is its task — so reaching the epic costs
+   * one GET per rung up, bounded by MAX_ANCESTOR_HOPS.
+   *
+   * Swallowed on failure, like the child stats: this decorates a brief, and on
+   * an instance using the legacy Epic Link custom field there is simply no epic
+   * to find (see JiraIssue.parent).
+   */
+  private async resolveEpic(i: JiraIssue): Promise<TicketDetail["epic"]> {
+    if (isEpic(i.fields.issuetype?.name)) return undefined;
+    try {
+      let cur = i;
+      for (let hop = 0; hop < MAX_ANCESTOR_HOPS; hop++) {
+        const p = cur.fields.parent;
+        if (!p?.key) return undefined;
+        if (isEpic(p.fields?.issuetype?.name)) {
+          return { key: p.key, title: p.fields?.summary };
+        }
+        // Nothing above this rung would be read, so don't pay for it.
+        if (hop + 1 >= MAX_ANCESTOR_HOPS) return undefined;
+        // The parent's own parent isn't in what we hold — fetch just enough of
+        // it to keep climbing. One request covers the whole next rung: an
+        // issue's `parent` field inlines that parent's summary and issuetype,
+        // so the grandparent can be judged without fetching IT too.
+        cur = await this.req(`/issue/${encodeURIComponent(p.key)}?fields=summary,issuetype,parent`);
+      }
+    } catch {
+      /* no epic line; the rest of the brief is unaffected */
+    }
+    return undefined;
   }
 
   async comment(key: string, body: string): Promise<void> {

@@ -27,10 +27,27 @@ export interface Ticket {
   url?: string;
 }
 
+/** One comment off a ticket's thread (DRY-53). See daemon/src/tracker/types.ts. */
+export interface TicketComment {
+  author?: string;
+  createdAt?: string;
+  body: string;
+}
+
 export interface TicketDetail extends Ticket {
   description: string;
   project: string;
   labels: string[];
+  /**
+   * Comment thread, oldest first, and the thread's TRUE length (DRY-53) —
+   * `commentCount` differs from `comments.length` when the provider capped its
+   * fetch. Both are carried for the agent brief the daemon builds at
+   * SessionStart; nothing in the shell renders them yet.
+   */
+  comments?: TicketComment[];
+  commentCount?: number;
+  /** Nearest ancestor epic, when the provider could resolve one (DRY-53). */
+  epic?: { key: string; title?: string };
 }
 
 export interface TrackerInfo {

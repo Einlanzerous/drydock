@@ -68,11 +68,60 @@ export interface Ticket {
   url?: string;
 }
 
+/**
+ * One comment off a ticket's thread (DRY-53), normalized across providers.
+ *
+ * Deleted comments are dropped by the provider rather than carried with a flag:
+ * the only consumer is agent context, and a retracted comment is exactly the
+ * thing not to brief an agent from.
+ */
+export interface TicketComment {
+  /** Display name of whoever wrote it — "claude" and a human read differently. */
+  author?: string;
+  /**
+   * Timestamp exactly as the provider wrote it — ISO-8601-ish, but Switchyard
+   * separates with a space and Jira offsets with `+0000`. Rendering parses it
+   * best-effort and falls back to the raw string, so no provider has to
+   * normalize a field whose only job is to orient a reader in time.
+   */
+  createdAt?: string;
+  body: string;
+}
+
 /** Ticket plus the body pulled into a spawned agent's context. */
 export interface TicketDetail extends Ticket {
   description: string;
   project: string;
   labels: string[];
+  /**
+   * The comment thread, oldest first (DRY-53). House style records decisions,
+   * design reviews and handoffs as comments, so on any ticket with history this
+   * — not `description` — is where current state lives. The window that
+   * actually reaches an agent is chosen at format time (tracker/context.ts);
+   * providers return what they have.
+   *
+   * `commentCount` is the thread's TRUE length, which is not `comments.length`
+   * whenever a provider capped its fetch. The formatter needs the real number
+   * to tell the agent it's seeing a window rather than the whole record.
+   *
+   * Optional on purpose: a provider that can't answer omits both, and the
+   * formatter emits no activity section at all rather than an empty one that
+   * reads as "nobody has commented".
+   */
+  comments?: TicketComment[];
+  commentCount?: number;
+  /**
+   * Nearest ancestor of type epic (DRY-53), when there is one and the provider
+   * could resolve it. `parent` (inherited from Ticket) is the IMMEDIATE parent;
+   * these differ for a subtask, whose epic sits two rungs up
+   * (epic → task/bug/spike → subtask), and coincide for a task under an epic —
+   * the formatter dedupes that case.
+   *
+   * Keys only, deliberately: enough for an agent to look the epic up and check
+   * its work against the plan, without paying for the epic's body on every
+   * spawn. The title rides along because both providers hand it over for free.
+   */
+  epic?: { key: string; title?: string };
 }
 
 export interface Project {

@@ -22,6 +22,8 @@ interface Fixture {
   type?: string;
   assignee?: string;
   parent?: { key: string; title?: string };
+  /** Oldest first, like both live providers hand them over (DRY-53). */
+  comments?: { author: string; createdAt: string; body: string }[];
 }
 
 // Ported verbatim from Drydock.dc.html's fixture, normalized onto our shape.
@@ -33,7 +35,16 @@ interface Fixture {
 // alone, the way a real backlog-bucket epic behaves under the default pull),
 // and the SWY tickets hang off nothing at all.
 const FIXTURES: Fixture[] = [
-  { key: "ARGY-89", repo: "argosy", title: "Series auto-advance: auto-play the next episode", tag: "frontend", category: "in_progress", assignee: "Ashley", parent: { key: "ARGY-64", title: "Phase 8 — Extra Credit (Stretch & Scale)" } },
+  // The only fixture with a thread (DRY-53), and it carries the case the whole
+  // ticket is about: a description that has been overtaken by its comments, so
+  // the zero-config default demonstrates why the activity section exists rather
+  // than just proving it renders.
+  { key: "ARGY-89", repo: "argosy", title: "Series auto-advance: auto-play the next episode", tag: "frontend", category: "in_progress", assignee: "Ashley", parent: { key: "ARGY-64", title: "Phase 8 — Extra Credit (Stretch & Scale)" },
+    comments: [
+      { author: "Jordan", createdAt: "2026-03-02T15:04:00Z", body: "Design review: the 10s countdown should pause when the tab is hidden, otherwise it fires against a paused player and the next episode starts to nobody." },
+      { author: "Ashley", createdAt: "2026-03-04T09:20:00Z", body: "Scope change agreed in standup: we are NOT shipping the per-series override this round — it needs the preference service from ARGY-91. Auto-advance is global-on for now, and the description's section on per-series toggles is stale." },
+      { author: "Jordan", createdAt: "2026-03-05T11:47:00Z", body: "Player emits `ended` twice on Safari when the source swaps mid-buffer. Guard the handler or the countdown double-fires and skips an episode." },
+    ] },
   { key: "ARGY-90", repo: "argosy", title: "Skip Intro / Skip Credits buttons (web player)", tag: "frontend", category: "backlog", assignee: "Ashley", parent: { key: "ARGY-64", title: "Phase 8 — Extra Credit (Stretch & Scale)" } },
   { key: "ARGY-91", repo: "argosy", title: "Global auto-play preference (opt-in, default off)", tag: "backend", category: "backlog", parent: { key: "ARGY-64", title: "Phase 8 — Extra Credit (Stretch & Scale)" } },
   // Parented to an initiative that isn't in the set: Jira's third rung
@@ -135,11 +146,24 @@ export class FixtureProvider implements TrackerProvider {
   async getTicket(key: string): Promise<TicketDetail> {
     const f = FIXTURES.find((x) => x.key === key);
     if (!f) throw new Error(`unknown ticket ${key}`);
+    // Nearest epic (DRY-53), resolved out of the fixture set the way the live
+    // providers resolve it out of the tracker. ARGY-89's epic is present and
+    // resolves; DRY-3's parent DRY-1 has no fixture row, so its epic stays
+    // unknown — which is the honest stand-in for a parent outside the pull,
+    // and keeps the unresolved branch on the zero-config path too.
+    const parent = f.parent ? FIXTURES.find((x) => x.key === f.parent!.key) : undefined;
+    const epic =
+      f.type !== "epic" && parent?.type === "epic"
+        ? { key: parent.key, title: parent.title }
+        : undefined;
     return {
       ...toTicket(f),
+      epic,
       project: f.repo,
       labels: [f.tag],
       description: `# ${f.key} — ${f.title}\n\n(Fixture ticket. Configure a live tracker via DRYDOCK_TRACKER to pull the real description.)`,
+      comments: f.comments ?? [],
+      commentCount: f.comments?.length ?? 0,
     };
   }
 }

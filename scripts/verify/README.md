@@ -1,14 +1,39 @@
-# Partition harnesses for the workspace store (DRY-58)
+# Verification harnesses
 
 There are no automated tests in this repo; CLAUDE.md's curls are the regression
-suite. These are the part of that suite the curls can't express, because the
-claims they check are about **latency and recovery**, not status codes.
+suite. These are the part of that suite the curls can't express.
 
-Nothing here runs in CI or on install. They are ad-hoc, they start throwaway
-daemons, and they take a few minutes. Run them when touching
-`daemon/src/state/` or `shell/src/composables/layoutStore.ts`.
+Nothing here runs in CI or on install. Two groups:
 
-## Why a proxy and not `docker stop`
+- **The workspace store's partition harnesses (DRY-58)** — everything below,
+  because the claims are about **latency and recovery**, not status codes. They
+  start throwaway daemons and take a few minutes. Run them when touching
+  `daemon/src/state/` or `shell/src/composables/layoutStore.ts`.
+- **The ticket brief (DRY-53)** — [next section](#the-ticket-brief-dry-53).
+  In-process, no daemon, seconds. Run them when touching
+  `daemon/src/tracker/`.
+
+## The ticket brief (DRY-53)
+
+```sh
+(cd daemon && node --import tsx ../scripts/verify/ticket-brief.mts)
+(cd daemon && node --import tsx ../scripts/verify/tracker-getticket.mts)
+```
+
+Both run from `daemon/` because that's where `tsx` resolves from in this
+workspace. They need no credentials and touch no network.
+
+| harness | what it holds down |
+|---|---|
+| `ticket-brief.mts` | What a spawned agent actually receives. Claude Code truncates a SessionStart hook's `additionalContext` past **10000 characters** and says nothing about it (measured, v2.1.220), so the brief is budgeted rather than concatenated: the thread keeps a reserve a long description can't eat, the newest comment is never dropped, and every truncation is announced. |
+| `tracker-getticket.mts` | Stub Jira and Switchyard instances, asserting on the requests each provider makes. Switchyard's single-ticket GET returns a bare `parent_id` where the list endpoint hydrates `parent`; Jira pages the `comment` field oldest-first, so a short page is the wrong end of the thread. Neither shape is reachable against the live tracker here. |
+
+Why a harness and not curl: the failure is silent by construction. The daemon
+sends a complete brief, the hook returns 200, and the agent quietly never sees
+the part that fell off the end — which is exactly how the first cut of DRY-53
+passed inspection while delivering none of its comments.
+
+## Workspace store: why a proxy and not `docker stop`
 
 `docker stop` frees the port, so every connect fails instantly with
 ECONNREFUSED and every latency bug hides. A real partition is host-up,

@@ -2,6 +2,7 @@ import type {
   Project,
   Ticket,
   TicketCategory,
+  TicketComment,
   TicketDetail,
   TicketQuery,
   TrackerProvider,
@@ -30,11 +31,26 @@ interface SwitchyardTicket {
   project?: { key?: string; name?: string; repo_url?: string | null };
   labels?: { name: string }[];
   assignee?: { id?: string; name?: string } | null;
-  // Both the list and single-ticket endpoints inline the parent as
-  // {id, key, title} alongside the raw `parent_id` — so the epic rollup needs
-  // no second fetch. No `type` here, which is why the sidebar falls back to
-  // the CHILD's type to decide whether an unloaded parent is an epic (DRY-13).
+  // The LIST endpoint inlines the parent as {id, key, title} alongside the raw
+  // `parent_id`, so the epic rollup needs no second fetch. No `type` here,
+  // which is why the sidebar falls back to the CHILD's type to decide whether
+  // an unloaded parent is an epic (DRY-13).
+  //
+  // GET /v1/tickets/:key does NOT hydrate it (DRY-53): `parent_id` comes back
+  // populated with `parent: null` beside it. So getTicket — the one that feeds
+  // a spawned agent — has to resolve the UUID itself; see resolveAncestry.
   parent?: { key?: string; title?: string } | null;
+  parent_id?: string | null;
+  // Inlined by the single-ticket endpoint only (DRY-53), oldest first.
+  comments?: SwitchyardComment[] | null;
+}
+
+interface SwitchyardComment {
+  body?: string;
+  author?: { name?: string } | null;
+  created_at?: string;
+  /** Retracted. Body still ships; dropping it is the caller's job. */
+  deleted?: boolean;
 }
 
 // The list endpoint has no `open` flag; "open" = every non-closed category.
@@ -52,6 +68,11 @@ const MAX_TICKETS = 2000;
 // How many epics may have their children counted at once (DRY-13). Each slot is
 // a cursor chain, not a single request, so this is the real concurrency knob.
 const CHILD_STATS_POOL = 6;
+
+// Rungs walked upward from a ticket looking for its epic (DRY-53). The
+// hierarchy is epic → {task,bug,spike} → subtask, so two hops is the whole
+// ladder; the bound is also what keeps a parent cycle from spinning forever.
+const MAX_ANCESTOR_HOPS = 2;
 
 const CATEGORY_LABEL: Record<TicketCategory, string> = {
   backlog: "Backlog",
@@ -99,6 +120,28 @@ function toTicket(t: SwitchyardTicket): Ticket {
     tag: t.labels?.[0]?.name,
     assignee: t.assignee?.name ? { id: t.assignee.id, name: t.assignee.name } : undefined,
   };
+}
+
+/**
+ * Thread → the normalized shape, oldest first (DRY-53).
+ *
+ * The API returns every comment on the ticket in one go, ascending by
+ * created_at, with no pagination envelope — so what arrives is the whole thread
+ * and `commentCount` can be counted here rather than asked for. (Verified
+ * against the server's loadTicketDetail: unbounded query, `orderBy(asc)`.)
+ *
+ * Deleted comments arrive as tombstones with the body redacted, so they are
+ * dropped before counting — "showing 3 of 11" must not count 4 tombstones an
+ * agent can never read.
+ */
+function toComments(raw: SwitchyardComment[] | null | undefined): {
+  comments: TicketComment[];
+  commentCount: number;
+} {
+  const comments = (raw ?? [])
+    .filter((c) => !c.deleted && c.body?.trim())
+    .map((c) => ({ author: c.author?.name, createdAt: c.created_at, body: c.body!.trim() }));
+  return { comments, commentCount: comments.length };
 }
 
 export class SwitchyardProvider implements TrackerProvider {
@@ -262,12 +305,70 @@ export class SwitchyardProvider implements TrackerProvider {
 
   async getTicket(key: string): Promise<TicketDetail> {
     const t: SwitchyardTicket = await this.req(`/v1/tickets/${encodeURIComponent(key)}`);
+    const { parent, epic } = await this.resolveAncestry(t);
     return {
       ...toTicket(t),
+      // toTicket reads the inlined `parent`, which this endpoint leaves null —
+      // so the resolved one replaces it rather than merging with it (DRY-53).
+      parent,
+      epic,
       project: t.project?.key ?? "",
       labels: (t.labels ?? []).map((l) => l.name),
       description: t.description ?? "",
+      // Comments ride along on this response already, so the thread costs no
+      // extra request. Retracted ones are dropped here: the consumer is agent
+      // context, and a deleted comment is precisely what not to brief from.
+      ...toComments(t.comments),
     };
+  }
+
+  /**
+   * Walk up to the immediate parent and the nearest epic (DRY-53).
+   *
+   * Costs one GET per rung because this endpoint hands back a bare UUID (see
+   * SwitchyardTicket.parent_id) — there's no bulk resolve and no key in the
+   * payload to shortcut with. Bounded at MAX_ANCESTOR_HOPS: the hierarchy is
+   * epic → {task,bug,spike} → subtask, so two hops reaches an epic from the
+   * bottom rung, and the bound also means a cycle in the data can't spin here.
+   *
+   * A ticket that is ITSELF an epic still gets its parent named — Jira's does,
+   * because that provider reads the parent straight off the issue, and the two
+   * disagreeing about whether an epic has a parent would be a difference in the
+   * brief with no reason behind it. It just stops after that one rung: there is
+   * no epic above an epic to go looking for.
+   *
+   * Failures are swallowed. This decorates a brief; a tracker hiccup resolving
+   * an epic must not cost the description and comments we already hold — and on
+   * the SessionStart path, throwing here would drop the agent's whole context
+   * for the sake of one line of it.
+   */
+  private async resolveAncestry(
+    t: SwitchyardTicket,
+  ): Promise<{ parent?: Ticket["parent"]; epic?: TicketDetail["epic"] }> {
+    let parent: Ticket["parent"];
+    let epic: TicketDetail["epic"];
+    const seekEpic = t.type !== "epic";
+    try {
+      let cur = t;
+      for (let hop = 0; hop < MAX_ANCESTOR_HOPS && cur.parent_id; hop++) {
+        // Keys work here too, but a UUID is what we're given and the endpoint
+        // accepts either.
+        const up: SwitchyardTicket = await this.req(
+          `/v1/tickets/${encodeURIComponent(cur.parent_id)}`,
+        );
+        if (!up?.key) break;
+        if (hop === 0) parent = { key: up.key, title: up.title, type: up.type };
+        if (!seekEpic) break;
+        if (up.type === "epic") {
+          epic = { key: up.key, title: up.title };
+          break;
+        }
+        cur = up;
+      }
+    } catch {
+      /* keep whatever rung we got to; the brief degrades a line at a time */
+    }
+    return { parent, epic };
   }
 
   // NOTE: paths verified live; the write *bodies* below are not yet exercised

@@ -17,6 +17,7 @@ import {
 } from "./worktree.js";
 import type { ClientMessage, EventMessage } from "./protocol.js";
 import { createTracker, trackerInfo } from "./tracker/index.js";
+import { ticketContext } from "./tracker/context.js";
 import { createStore } from "./state/index.js";
 import { runEndHandler } from "./runs.js";
 import { SessionHistoryRecorder } from "./history.js";
@@ -808,13 +809,13 @@ const server = http.createServer(async (req, res) => {
       if (!session?.ticket) return send(res, 200, {});
       try {
         const t = await tracker.getTicket(session.ticket);
-        const additionalContext =
-          `You are working on tracker ticket ${t.key}.\n\n` +
-          `# ${t.key}: ${t.title}\n` +
-          `Status: ${t.status.label} · Repo: ${t.repo}\n\n` +
-          `${t.description}`;
         return send(res, 200, {
-          hookSpecificOutput: { hookEventName: "SessionStart", additionalContext },
+          hookSpecificOutput: {
+            hookEventName: "SessionStart",
+            // Comment thread + epic keys, windowed to a budget (DRY-53). The
+            // shape of the brief lives in tracker/context.ts.
+            additionalContext: ticketContext(t),
+          },
         });
       } catch {
         // Tracker hiccup: don't block session start — just skip the context.
