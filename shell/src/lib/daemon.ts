@@ -266,17 +266,39 @@ export async function fetchWorkspace(): Promise<WorkspaceEnvelope | null> {
   return body.workspace ?? null;
 }
 
+/**
+ * Budget for a write. Longer than the read's 3s because there is no first paint
+ * waiting on it, and it has to clear the daemon's own worst honest latency —
+ * a partitioned Postgres costs it `connectionTimeoutMillis` (5s) before it can
+ * answer 503, and aborting a request that was about to explain itself would
+ * trade a good error for a vague one.
+ *
+ * It exists at all because of DRY-58. While a failed push was fire-and-forget,
+ * a request that hung forever cost nothing: the mirror had the desk and nobody
+ * was waiting. Now a push failing is what ARMS the retry, and the retry loop
+ * awaits this call — so a daemon that accepts the connection and then goes
+ * silent (a real partition, as opposed to a refused connect) would leave the
+ * recovery permanently in flight, having neither succeeded nor reported. No
+ * notice, no retry, no roaming, and nothing in the console to say so. The one
+ * failure mode this whole ticket is about, reintroduced by its own fix.
+ */
+const WRITE_TIMEOUT_MS = 8000;
+
 export async function putWorkspace(data: WorkspaceEnvelope): Promise<void> {
   const res = await fetch(`${DAEMON_HTTP}/api/workspace`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
+    signal: AbortSignal.timeout(WRITE_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`daemon returned ${res.status}`);
 }
 
 export async function deleteWorkspace(): Promise<void> {
-  const res = await fetch(`${DAEMON_HTTP}/api/workspace`, { method: "DELETE" });
+  const res = await fetch(`${DAEMON_HTTP}/api/workspace`, {
+    method: "DELETE",
+    signal: AbortSignal.timeout(WRITE_TIMEOUT_MS),
+  });
   if (!res.ok) throw new Error(`daemon returned ${res.status}`);
 }
 
