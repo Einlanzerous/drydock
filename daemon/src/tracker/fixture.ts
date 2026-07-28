@@ -3,6 +3,7 @@ import type {
   Ticket,
   TicketCategory,
   TicketDetail,
+  TicketDetailOptions,
   TicketQuery,
   TrackerProvider,
 } from "./types.js";
@@ -143,25 +144,36 @@ export class FixtureProvider implements TrackerProvider {
       .map(toTicket);
   }
 
-  async getTicket(key: string): Promise<TicketDetail> {
+  async getTicket(key: string, opts?: TicketDetailOptions): Promise<TicketDetail> {
     const f = FIXTURES.find((x) => x.key === key);
     if (!f) throw new Error(`unknown ticket ${key}`);
-    // Nearest epic (DRY-53), resolved out of the fixture set the way the live
-    // providers resolve it out of the tracker. ARGY-89's epic is present and
-    // resolves; DRY-3's parent DRY-1 has no fixture row, so its epic stays
-    // unknown — which is the honest stand-in for a parent outside the pull,
-    // and keeps the unresolved branch on the zero-config path too.
-    const parent = f.parent ? FIXTURES.find((x) => x.key === f.parent!.key) : undefined;
-    const epic =
-      f.type !== "epic" && parent?.type === "epic"
-        ? { key: parent.key, title: parent.title }
-        : undefined;
-    return {
+    const detail: TicketDetail = {
       ...toTicket(f),
-      epic,
       project: f.repo,
       labels: [f.tag],
       description: `# ${f.key} — ${f.title}\n\n(Fixture ticket. Configure a live tracker via DRYDOCK_TRACKER to pull the real description.)`,
+    };
+    if (!opts?.thread) return detail;
+    // Nearest epic (DRY-53), resolved out of the fixture set the way the live
+    // providers resolve it out of the tracker. ARGY-89's epic is present and
+    // resolves; DRY-3's parent DRY-1 has no fixture row, so its epic stays
+    // unknown — the honest stand-in for a parent outside the pull, which keeps
+    // the unresolved branch on the zero-config path too.
+    //
+    // Only the immediate parent is checked, where the live providers climb two
+    // rungs. That's the whole ladder this set has: DRY-13 chose these rows for
+    // the shapes the SIDEBAR must render and deliberately stops nesting at one
+    // level, so there is no subtask→task→epic chain here to walk. A loop would
+    // be generality with nothing to exercise it, and inventing a subtask row to
+    // feed it would change fixture coverage that another ticket picked on
+    // purpose.
+    const parent = f.parent ? FIXTURES.find((x) => x.key === f.parent!.key) : undefined;
+    return {
+      ...detail,
+      epic:
+        f.type !== "epic" && parent?.type === "epic"
+          ? { key: parent.key, title: parent.title }
+          : undefined,
       comments: f.comments ?? [],
       commentCount: f.comments?.length ?? 0,
     };

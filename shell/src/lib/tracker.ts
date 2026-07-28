@@ -41,8 +41,14 @@ export interface TicketDetail extends Ticket {
   /**
    * Comment thread, oldest first, and the thread's TRUE length (DRY-53) —
    * `commentCount` differs from `comments.length` when the provider capped its
-   * fetch. Both are carried for the agent brief the daemon builds at
-   * SessionStart; nothing in the shell renders them yet.
+   * fetch.
+   *
+   * **`/api/tracker/ticket/<KEY>` does not populate these**, and neither is
+   * `epic` below. They cost extra tracker round trips (up to two on Switchyard,
+   * whose single-ticket endpoint hands back a bare parent UUID) and only the
+   * daemon's SessionStart brief reads them, so the daemon asks for them there
+   * and not on the path this panel uses. Rendering them here means teaching
+   * that route to pass `{thread: true}` first.
    */
   comments?: TicketComment[];
   commentCount?: number;

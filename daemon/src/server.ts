@@ -686,6 +686,11 @@ const server = http.createServer(async (req, res) => {
     const ticketMatch = pathname.match(/^\/api\/tracker\/ticket\/([^/]+)$/);
     if (ticketMatch && req.method === "GET") {
       try {
+        // No `thread` (DRY-53): this serves the shell's ticket panel, which
+        // renders the description and nothing from the comment history or the
+        // epic walk. Asking for them here would put 2 extra Switchyard round
+        // trips behind every ticket click for data that goes straight in the
+        // bin.
         const ticket = await tracker.getTicket(decodeURIComponent(ticketMatch[1]));
         return send(res, 200, { ticket });
       } catch (err) {
@@ -808,7 +813,9 @@ const server = http.createServer(async (req, res) => {
       }
       if (!session?.ticket) return send(res, 200, {});
       try {
-        const t = await tracker.getTicket(session.ticket);
+        // The one caller that reads the thread and the epic, so the one that
+        // pays for them (DRY-53).
+        const t = await tracker.getTicket(session.ticket, { thread: true });
         return send(res, 200, {
           hookSpecificOutput: {
             hookEventName: "SessionStart",

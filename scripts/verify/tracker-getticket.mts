@@ -31,6 +31,7 @@ console.log("--- jira ---");
 {
   const seen: string[] = [];
   let failNext: RegExp | undefined;
+  let emptyTail = false;
 
   const issue = (key: string, type: string, parent?: { key: string; type: string }) => ({
     key,
@@ -89,7 +90,10 @@ console.log("--- jira ---");
       const startAt = Number(url.searchParams.get("startAt") ?? 0);
       const maxResults = Number(url.searchParams.get("maxResults") ?? 50);
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ startAt, maxResults, total, comments: comments(total, startAt, maxResults) }));
+      res.end(JSON.stringify({
+        startAt, maxResults, total,
+        comments: emptyTail ? [] : comments(total, startAt, maxResults),
+      }));
       return;
     }
     const fields = (url.searchParams.get("fields") ?? "").split(",");
@@ -111,7 +115,7 @@ console.log("--- jira ---");
   // --- 1. long thread on a subtask two rungs under its epic ---
   {
     seen.length = 0;
-    const t = await jira.getTicket("SRE-1");
+    const t = await jira.getTicket("SRE-1", { thread: true });
     check("issue GET asks for description + comment", /fields=[^&]*description[^&]*comment|fields=[^&]*comment/.test(seen[0]!), seen[0]);
     check("comment tail is fetched from the END", seen.some((u) => u.includes("/comment?startAt=43&maxResults=20")), seen);
     check("commentCount is the tracker's total, not the page", t.commentCount === 63, t.commentCount);
@@ -126,7 +130,7 @@ console.log("--- jira ---");
   // --- 2. task directly under an epic: no walk, no tail fetch ---
   {
     seen.length = 0;
-    const t = await jira.getTicket("SRE-9");
+    const t = await jira.getTicket("SRE-9", { thread: true });
     check("short thread arrives whole (no tail fetch)", !seen.some((u) => u.includes("/comment?")), seen);
     check("whole thread is kept", t.comments?.length === 2 && t.commentCount === 2, [t.comments?.length, t.commentCount]);
     check("epic one rung up costs no extra request", t.epic?.key === "SRE-3" && seen.length === 1, [t.epic, seen]);
@@ -134,7 +138,7 @@ console.log("--- jira ---");
 
   // --- 3. no parent, no comments ---
   {
-    const t = await jira.getTicket("SRE-42");
+    const t = await jira.getTicket("SRE-42", { thread: true });
     check("orphan has no epic", t.epic === undefined, t.epic);
     check("empty thread reports zero", t.comments?.length === 0 && t.commentCount === 0, [t.comments, t.commentCount]);
   }
@@ -142,7 +146,7 @@ console.log("--- jira ---");
   // --- 4. a failing tail fetch must not cost the ticket ---
   {
     failNext = /\/comment\?/;
-    const t = await jira.getTicket("SRE-1");
+    const t = await jira.getTicket("SRE-1", { thread: true });
     failNext = undefined;
     check("tail failure keeps the page we had", t.comments?.length === PAGE, t.comments?.length);
     check("tail failure keeps the real total", t.commentCount === 63, t.commentCount);
@@ -152,11 +156,32 @@ console.log("--- jira ---");
   // --- 5. a failing parent walk must not cost the ticket ---
   {
     failNext = /\/issue\/SRE-2\?/;
-    const t = await jira.getTicket("SRE-1");
+    const t = await jira.getTicket("SRE-1", { thread: true });
     failNext = undefined;
     check("parent-walk failure leaves epic unset", t.epic === undefined, t.epic);
     check("parent-walk failure keeps parent + description", t.parent?.key === "SRE-2" && t.description === "the plan", [t.parent, t.description]);
     check("parent-walk failure keeps the comments", (t.comments?.length ?? 0) > 0, t.comments?.length);
+  }
+
+  // --- 6. an EMPTY tail is not an answer. `total` and the page can disagree
+  //     when comments are deleted between the two requests, and taking `[]` as
+  //     success discards the page already in hand — leaving a ticket that
+  //     reports 63 comments and shows none.
+  {
+    emptyTail = true;
+    const t = await jira.getTicket("SRE-1", { thread: true });
+    emptyTail = false;
+    check("an empty tail keeps the page we had", t.comments?.length === PAGE, t.comments?.length);
+    check("an empty tail keeps the real total", t.commentCount === 63, t.commentCount);
+  }
+
+  // --- 7. the panel path buys none of it ---
+  {
+    seen.length = 0;
+    const t = await jira.getTicket("SRE-1");
+    check("no thread: one request, no comment field", seen.length === 1 && !seen[0]!.includes("comment"), seen);
+    check("no thread: no comments, no epic", t.comments === undefined && t.epic === undefined, [t.comments, t.epic]);
+    check("no thread: description still arrives", t.description === "the plan", t.description);
   }
 
   server.close();
@@ -229,7 +254,7 @@ console.log("\n--- switchyard ---");
 
   {
     seen.length = 0;
-    const t = await swy.getTicket("DRY-90");
+    const t = await swy.getTicket("DRY-90", { thread: true });
     check("parent resolved from a bare UUID", t.parent?.key === "DRY-49", t.parent);
     check("parent carries its title and type", t.parent?.title === "the task" && t.parent?.type === "task", t.parent);
     check("epic resolved two rungs up", t.epic?.key === "DRY-1" && t.epic?.title === "the epic", t.epic);
@@ -242,21 +267,21 @@ console.log("\n--- switchyard ---");
 
   {
     seen.length = 0;
-    const t = await swy.getTicket("DRY-1");
+    const t = await swy.getTicket("DRY-1", { thread: true });
     check("an epic looks for no epic above it", t.epic === undefined, t.epic);
     check("an epic with no parent stops at one request", seen.length === 1, seen);
   }
 
   {
     seen.length = 0;
-    const t = await swy.getTicket("DRY-12");
+    const t = await swy.getTicket("DRY-12", { thread: true });
     check("an epic still names its own parent", t.parent?.key === "DRY-0", t.parent);
     check("...and doesn't climb past it", t.epic === undefined && seen.length === 2, [t.epic, seen]);
   }
 
   {
     failNext = /uuid-task/;
-    const t = await swy.getTicket("DRY-90");
+    const t = await swy.getTicket("DRY-90", { thread: true });
     failNext = undefined;
     check("a failed walk leaves parent+epic unset", t.parent === undefined && t.epic === undefined, [t.parent, t.epic]);
     check("a failed walk keeps description + comments", t.description === "the plan" && t.comments?.length === 2, [t.description, t.comments?.length]);
@@ -264,7 +289,7 @@ console.log("\n--- switchyard ---");
 
   {
     failNext = /uuid-epic/;
-    const t = await swy.getTicket("DRY-90");
+    const t = await swy.getTicket("DRY-90", { thread: true });
     failNext = undefined;
     check("a walk failing mid-climb keeps the rung it reached", t.parent?.key === "DRY-49" && t.epic === undefined, [t.parent, t.epic]);
   }

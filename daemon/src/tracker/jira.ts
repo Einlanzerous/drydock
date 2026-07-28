@@ -4,6 +4,7 @@ import type {
   TicketCategory,
   TicketComment,
   TicketDetail,
+  TicketDetailOptions,
   TicketQuery,
   TrackerProvider,
 } from "./types.js";
@@ -89,6 +90,20 @@ const MAX_ANCESTOR_HOPS = 2;
 // The formatter windows this down further; it only has to be at least as large
 // as anything that could survive that budget.
 const COMMENT_TAIL = 20;
+
+/**
+ * Budget for the requests that DECORATE a brief — the comment tail and the walk
+ * up to the epic (DRY-53).
+ *
+ * These are optional by construction: each one is already wrapped in a catch
+ * that degrades a line rather than failing. Without a deadline, though, a slow
+ * tracker turns them into a way to lose the whole brief — they're sequential
+ * after the issue GET, and the hook that's waiting is a `curl -s -m 25` with no
+ * retry. Better to hand over a brief missing its epic line than to hand over
+ * nothing at 25 seconds.
+ */
+const EXTRAS_TIMEOUT_MS = 6_000;
+const extrasDeadline = (): AbortSignal => AbortSignal.timeout(EXTRAS_TIMEOUT_MS);
 
 // Same backstop as the Switchyard provider: the sidebar's unbounded list never
 // pulls more than this many issues out of a huge corporate Jira.
@@ -424,23 +439,23 @@ export class JiraProvider implements TrackerProvider {
     return this.listTickets({ text, projects, limit: 50 });
   }
 
-  async getTicket(key: string): Promise<TicketDetail> {
+  async getTicket(key: string, opts?: TicketDetailOptions): Promise<TicketDetail> {
     // `comment` rides along in the same request (DRY-53) — a field, not a
-    // separate endpoint, so the thread is usually free.
-    const i: JiraIssue = await this.req(
-      `/issue/${encodeURIComponent(key)}?fields=${FIELDS},description,comment`,
-    );
-    const [comments, epic] = await Promise.all([this.fetchComments(key, i), this.resolveEpic(i)]);
-    return {
+    // separate endpoint, so the thread costs nothing extra when it's wanted and
+    // isn't asked for when it isn't.
+    const fields = opts?.thread ? `${FIELDS},description,comment` : `${FIELDS},description`;
+    const i: JiraIssue = await this.req(`/issue/${encodeURIComponent(key)}?fields=${fields}`);
+    const detail: TicketDetail = {
       ...this.toTicket(i),
-      epic,
       project: i.fields.project?.key ?? "",
       labels: i.fields.labels ?? [],
       // v2 keeps this a plain string (wiki markup at worst) — fine as agent
       // context, and no ADF parsing.
       description: i.fields.description ?? "",
-      ...comments,
     };
+    if (!opts?.thread) return detail;
+    const [comments, epic] = await Promise.all([this.fetchComments(key, i), this.resolveEpic(i)]);
+    return { ...detail, epic, ...comments };
   }
 
   /**
@@ -479,8 +494,14 @@ export class JiraProvider implements TrackerProvider {
         const startAt = Math.max(0, total - COMMENT_TAIL);
         const body = await this.req(
           `/issue/${encodeURIComponent(key)}/comment?startAt=${startAt}&maxResults=${COMMENT_TAIL}`,
+          { signal: extrasDeadline() },
         );
-        raw = body.comments ?? raw;
+        // An EMPTY tail is not an answer — `total` and the page can disagree
+        // when comments are deleted between the two requests, and `?? raw`
+        // would take `[]` as success and discard the page already in hand,
+        // leaving a ticket that reports 63 comments and shows none.
+        const tail: JiraComment[] = body?.comments ?? [];
+        if (tail.length) raw = tail;
       } catch {
         /* keep the page we have; the formatter still says how many exist */
       }
@@ -506,6 +527,9 @@ export class JiraProvider implements TrackerProvider {
    */
   private async resolveEpic(i: JiraIssue): Promise<TicketDetail["epic"]> {
     if (isEpic(i.fields.issuetype?.name)) return undefined;
+    // One deadline for the whole climb, not per request: two rungs against a
+    // struggling Jira is exactly the case worth bounding.
+    const signal = extrasDeadline();
     try {
       let cur = i;
       for (let hop = 0; hop < MAX_ANCESTOR_HOPS; hop++) {
@@ -520,7 +544,9 @@ export class JiraProvider implements TrackerProvider {
         // it to keep climbing. One request covers the whole next rung: an
         // issue's `parent` field inlines that parent's summary and issuetype,
         // so the grandparent can be judged without fetching IT too.
-        cur = await this.req(`/issue/${encodeURIComponent(p.key)}?fields=summary,issuetype,parent`);
+        cur = await this.req(`/issue/${encodeURIComponent(p.key)}?fields=summary,issuetype,parent`, {
+          signal,
+        });
       }
     } catch {
       /* no epic line; the rest of the brief is unaffected */

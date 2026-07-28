@@ -88,6 +88,19 @@ export interface TicketComment {
   body: string;
 }
 
+/**
+ * What a `getTicket` caller actually needs (DRY-53).
+ *
+ * `thread` buys the comment history and the walk up to the epic, which cost
+ * extra tracker round trips: up to two on Switchyard, whose single-ticket
+ * endpoint hands back a bare parent UUID, plus a comment page on Jira. Only the
+ * SessionStart brief reads any of it — the shell's ticket panel renders none of
+ * it — so it is opt-in rather than a tax on every ticket click.
+ */
+export interface TicketDetailOptions {
+  thread?: boolean;
+}
+
 /** Ticket plus the body pulled into a spawned agent's context. */
 export interface TicketDetail extends Ticket {
   description: string;
@@ -171,7 +184,7 @@ export interface TrackerProvider {
   listProjects(): Promise<Project[]>;
   listTickets(q: TicketQuery): Promise<Ticket[]>; // sidebar (grouped by repo in the shell)
   searchTickets(text: string, projects?: string[]): Promise<Ticket[]>; // Ctrl+K palette / search endpoint
-  getTicket(key: string): Promise<TicketDetail>; // pulled into the spawned agent
+  getTicket(key: string, opts?: TicketDetailOptions): Promise<TicketDetail>;
 
   comment?(key: string, body: string): Promise<void>;
   transition?(key: string, to: string): Promise<void>;

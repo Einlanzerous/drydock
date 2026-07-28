@@ -4,6 +4,7 @@ import type {
   TicketCategory,
   TicketComment,
   TicketDetail,
+  TicketDetailOptions,
   TicketQuery,
   TrackerProvider,
 } from "./types.js";
@@ -74,6 +75,25 @@ const CHILD_STATS_POOL = 6;
 // ladder; the bound is also what keeps a parent cycle from spinning forever.
 const MAX_ANCESTOR_HOPS = 2;
 
+/**
+ * Budget for the whole ancestry walk (DRY-53). The walk decorates a brief and
+ * already degrades a rung at a time on failure, but without a deadline it's a
+ * way to lose the brief entirely: it's sequential after the ticket GET, and the
+ * hook waiting on the answer is a `curl -s -m 25` with no retry.
+ */
+const ANCESTRY_TIMEOUT_MS = 6_000;
+
+/**
+ * Switchyard's `type` is a validated enum — `spike|task|bug|epic|subtask`, from
+ * the API's own schema — so this is an exact match, not the case-insensitive
+ * one the Jira provider needs for a free-text issue-type NAME. Two predicates
+ * on purpose; folding them together would hide that one side is guaranteed and
+ * the other is whatever an admin typed.
+ */
+function isEpic(type?: string): boolean {
+  return type === "epic";
+}
+
 const CATEGORY_LABEL: Record<TicketCategory, string> = {
   backlog: "Backlog",
   planning: "Planning",
@@ -135,10 +155,14 @@ function toTicket(t: SwitchyardTicket): Ticket {
  * agent can never read.
  */
 function toComments(raw: SwitchyardComment[] | null | undefined): {
-  comments: TicketComment[];
-  commentCount: number;
+  comments?: TicketComment[];
+  commentCount?: number;
 } {
-  const comments = (raw ?? [])
+  // No field at all is "we don't know", not "there are none" — the contract in
+  // types.ts turns on that difference, and answering 0 to an unasked question
+  // is the kind of confident wrong number this module keeps refusing to print.
+  if (!Array.isArray(raw)) return {};
+  const comments = raw
     .filter((c) => !c.deleted && c.body?.trim())
     .map((c) => ({ author: c.author?.name, createdAt: c.created_at, body: c.body!.trim() }));
   return { comments, commentCount: comments.length };
@@ -235,7 +259,7 @@ export class SwitchyardProvider implements TrackerProvider {
    */
   private async attachChildStats(rows: SwitchyardTicket[], out: Ticket[]): Promise<void> {
     const byKey = new Map(out.map((t) => [t.key, t]));
-    const epics = rows.filter((r) => r.type === "epic" && r.id);
+    const epics = rows.filter((r) => isEpic(r.type) && r.id);
     let cursor = 0;
     const worker = async (): Promise<void> => {
       for (let i = cursor++; i < epics.length; i = cursor++) {
@@ -303,18 +327,26 @@ export class SwitchyardProvider implements TrackerProvider {
     return this.listTickets({ text, projects, limit: 50 });
   }
 
-  async getTicket(key: string): Promise<TicketDetail> {
+  async getTicket(key: string, opts?: TicketDetailOptions): Promise<TicketDetail> {
     const t: SwitchyardTicket = await this.req(`/v1/tickets/${encodeURIComponent(key)}`);
-    const { parent, epic } = await this.resolveAncestry(t);
-    return {
-      ...toTicket(t),
-      // toTicket reads the inlined `parent`, which this endpoint leaves null —
-      // so the resolved one replaces it rather than merging with it (DRY-53).
-      parent,
-      epic,
+    const base = toTicket(t);
+    const detail: TicketDetail = {
+      ...base,
       project: t.project?.key ?? "",
       labels: (t.labels ?? []).map((l) => l.name),
       description: t.description ?? "",
+    };
+    if (!opts?.thread) return detail;
+
+    const { parent, epic } = await this.resolveAncestry(t);
+    return {
+      ...detail,
+      // toTicket reads the inlined `parent`, which this endpoint leaves null —
+      // so the resolved one replaces it (DRY-53). Falls back rather than
+      // overwriting, so a walk that fails doesn't blank a parent the response
+      // did carry, should this endpoint ever start hydrating one.
+      parent: parent ?? base.parent,
+      epic,
       // Comments ride along on this response already, so the thread costs no
       // extra request. Retracted ones are dropped here: the consumer is agent
       // context, and a deleted comment is precisely what not to brief from.
@@ -347,7 +379,11 @@ export class SwitchyardProvider implements TrackerProvider {
   ): Promise<{ parent?: Ticket["parent"]; epic?: TicketDetail["epic"] }> {
     let parent: Ticket["parent"];
     let epic: TicketDetail["epic"];
-    const seekEpic = t.type !== "epic";
+    const seekEpic = !isEpic(t.type);
+    // One deadline for the whole climb, not per request — see
+    // ANCESTRY_TIMEOUT_MS. The catch below turns a blown budget into a missing
+    // line, which is the point.
+    const signal = AbortSignal.timeout(ANCESTRY_TIMEOUT_MS);
     try {
       let cur = t;
       for (let hop = 0; hop < MAX_ANCESTOR_HOPS && cur.parent_id; hop++) {
@@ -355,11 +391,12 @@ export class SwitchyardProvider implements TrackerProvider {
         // accepts either.
         const up: SwitchyardTicket = await this.req(
           `/v1/tickets/${encodeURIComponent(cur.parent_id)}`,
+          { signal },
         );
         if (!up?.key) break;
         if (hop === 0) parent = { key: up.key, title: up.title, type: up.type };
         if (!seekEpic) break;
-        if (up.type === "epic") {
+        if (isEpic(up.type)) {
           epic = { key: up.key, title: up.title };
           break;
         }
