@@ -267,15 +267,48 @@ The traps, all of them found the hard way:
    empty composer and the card reads "starting" forever. A worktree of an
    already-trusted repo inherits the trust, which is why the normal path is
    clean. Test in one; if you use a scratch cwd, expect to answer it once.
-   NB testing from inside a claude session leaks `CLAUDE_CODE_CHILD_SESSION`
-   into the daemon's env and suppresses the dialog anyway, which makes for a
-   convincing false negative: `env -u` the `CLAUDE_*` vars.
+   This note used to add that a daemon started from inside a claude session
+   leaks `CLAUDE_CODE_CHILD_SESSION` and suppresses the dialog, so `env -u` the
+   `CLAUDE_*` vars. **Neither half still applies** (DRY-59): the leak is real
+   but the supervisor now strips it, and re-measuring against v2.1.220 found
+   the dialog fires whether or not the marker is set — an untrusted cwd
+   prompted identically both ways. It cost a false negative for a different
+   reason: transcripts (below).
 
 Verify the tracker comment against **both** providers — it is the first thing
 to exercise `comment()` on either. Switchyard against a throwaway ticket; Jira
 against a stub asserting `POST /rest/api/2/issue/<KEY>/comment` with a plain
 string `{body}` (v2 is chosen precisely so no ADF document is needed), plus the
 fixture provider (`comment: false`) to prove the rail stands alone without one.
+
+## What a spawned agent inherits (DRY-59)
+
+A daemon started from inside a `claude` session inherits that session's
+`CLAUDE_CODE_*` markers, and they used to reach every PTY it spawned down three
+hops of plain inheritance. `supervisor/main.ts` deletes them when it builds the
+PTY env (`INHERITED_SESSION_MARKERS`); everything else, `ANTHROPIC_*` and
+`CLAUDE_CONFIG_DIR` included, is host config and passes through.
+
+1. **The bug cannot reproduce from a bare terminal**, which is where anyone
+   would naturally test it — there is nothing to inherit, so the leaking build
+   and the fixed one behave identically. Start the throwaway daemon from
+   *inside* a claude session or the test proves nothing.
+2. **It costs nothing you can see while the session is alive.** `CLAUDE_CODE_
+   CHILD_SESSION` turns transcript persistence off, and DRY-57's durability,
+   scrollback and reattach don't go through transcripts. The damage is entirely
+   after the PTY dies: DRY-49 hands you a document saying "please pick it up"
+   for a conversation `claude --resume` can no longer open, and DRY-56 files an
+   `agent_session_id` pointing at nothing. So assert on the transcript
+   (`~/.claude/projects/<escaped-cwd>/<agent session id>.jsonl` appearing at
+   all) and then on `claude --resume <id>` — not on anything the pane shows.
+3. **`meta.env` cannot express this.** It overlays keys onto `process.env` and
+   has no way to remove one; setting a marker to `""` guesses at how the CLI
+   tests it. Hence the strip in the supervisor rather than a new entry there.
+4. The list is targeted rather than a `CLAUDE_CODE_*` prefix sweep, because the
+   CLI takes real host config under that prefix too (`CLAUDE_CODE_USE_BEDROCK`,
+   `CLAUDE_CODE_MAX_OUTPUT_TOKENS`). It was read off v2.1.220 — the vars the CLI
+   injects into a child, plus the ones its own scrub-before-spawning-a-clean-
+   claude helper deletes. Re-read them if a CLI upgrade changes behaviour.
 
 ## Verifying session durability (DRY-57)
 

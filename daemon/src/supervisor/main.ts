@@ -78,16 +78,95 @@ const scrollbackPath = path.join(dir, `${meta.id}${SUFFIX.scrollback}`);
 
 // --- the PTY ---------------------------------------------------------------
 
+/**
+ * Markers that say "a claude session started this process" (DRY-59).
+ *
+ * A daemon launched from inside a `claude` session inherits these, and they
+ * reach the PTY down three hops of ordinary inheritance — nothing does it on
+ * purpose. The spawned agent then believes it is its launcher's child process
+ * rather than a session of its own, and quietly changes behaviour: with
+ * `CLAUDE_CODE_CHILD_SESSION` set, transcript persistence is OFF.
+ *
+ * Nothing about a LIVE session notices — durability, scrollback and reattach
+ * (DRY-57) don't go through transcripts. What breaks is everything after the
+ * PTY dies: `claude --resume` on the agent, which is the whole point of
+ * DRY-49's "nobody was watching, please pick it up" handoff and of the
+ * `agent_session_id` DRY-56 records against a run. Measured: an agent spawned
+ * by a leaking daemon wrote no transcript at all, and the same spawn with
+ * these keys deleted wrote one that `--resume` reopens.
+ *
+ * Stripping rather than setting `CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1`,
+ * which would buy back the transcript and leave the agent still claiming to be
+ * a child of a session that has nothing to do with it — one symptom treated,
+ * with the next one to hang off the same marker arriving silently. It also
+ * makes a dev daemon behave like a prod one, where the systemd unit inherits
+ * no interactive shell and none of this was ever set. (The leak was ALSO
+ * believed to suppress claude's trust dialog — DRY-49's trap 6. It doesn't, on
+ * v2.1.220: an untrusted cwd prompts identically with the marker and without.)
+ *
+ * The list is targeted, not `CLAUDE_CODE_*`-prefixed, because that prefix is
+ * also how the CLI takes host config a spawned agent legitimately needs
+ * (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, …). `ANTHROPIC_*`
+ * and `CLAUDE_CONFIG_DIR` are host config for the same reason and stay.
+ * Measured against Claude Code v2.1.220: the first five are what the CLI itself
+ * injects into a child process, and the rest are what its own scrub-before-
+ * spawning-a-clean-claude helper deletes.
+ */
+const INHERITED_SESSION_MARKERS = [
+  "CLAUDECODE",
+  "CLAUDE_CODE_SESSION_ID",
+  "CLAUDE_CODE_CHILD_SESSION",
+  "CLAUDE_PID",
+  "CLAUDE_EFFORT",
+  "AI_AGENT",
+  "CLAUDE_CODE_BRIDGE_SESSION_ID",
+  "CLAUDE_CODE_ENTRYPOINT",
+  "CLAUDE_CODE_EXECPATH",
+];
+
+/**
+ * The daemon's environment, inherited the ordinary way, minus the markers
+ * above, plus the handful of variables the daemon adds.
+ *
+ * `meta.env` carries ONLY those additions — a snapshot of process.env in the
+ * index file would mean writing the host's tracker credentials to disk next to
+ * a socket, to gain nothing. It is also why the strip has to happen HERE and
+ * cannot be expressed as a `meta.env` entry: that map overlays keys onto
+ * process.env and has no way to remove one.
+ */
+function ptyEnv(): Record<string, string> {
+  // `?? {}` earns its keep: `in` throws on undefined where the spread below
+  // would shrug, and this runs before the PTY exists — a throw here is a
+  // session that never starts, in the process with nothing underneath it.
+  const added = meta.env ?? {};
+  const env = { ...(process.env as Record<string, string>), ...added };
+  const stripped: string[] = [];
+  for (const key of INHERITED_SESSION_MARKERS) {
+    // Only ever the inherited value: a marker the daemon set deliberately in
+    // meta.env is an instruction, not a leak.
+    if (key in added) continue;
+    if (!(key in env)) continue;
+    delete env[key];
+    stripped.push(key);
+  }
+  // Logged because the symptom this prevents is invisible from inside the
+  // session — an agent whose transcript was never written looks completely
+  // normal until somebody tries to resume it a day later.
+  if (stripped.length) {
+    emit("INFO", "stripped inherited claude session markers from the PTY env", {
+      id: meta.id,
+      vars: stripped.join(","),
+    });
+  }
+  return env;
+}
+
 const child = pty.spawn(meta.exec.file, meta.exec.args, {
   name: "xterm-256color",
   cols: meta.cols,
   rows: meta.rows,
   cwd: meta.cwd,
-  // The daemon's environment, inherited the ordinary way, plus the handful of
-  // variables it adds. `meta.env` carries ONLY those additions — a snapshot of
-  // process.env in the index file would mean writing the host's tracker
-  // credentials to disk next to a socket, to gain nothing.
-  env: { ...(process.env as Record<string, string>), ...meta.env },
+  env: ptyEnv(),
 });
 
 emit("INFO", "supervising", {
