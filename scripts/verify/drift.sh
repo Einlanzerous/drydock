@@ -19,23 +19,76 @@ PASS=0; FAIL=0
 ok()  { echo "  PASS  $1"; PASS=$((PASS+1)); }
 no()  { echo "  FAIL  $1 — $2"; FAIL=$((FAIL+1)); }
 
+# Each phase gets its own daemon, so start/stop have to be exact. An earlier
+# version matched processes by reading DRYDOCK_PORT out of /proc/<pid>/environ,
+# which fails silently on a permission error — leaving the old daemon listening,
+# the new one dead on EADDRINUSE (config.ts keeps it alive, serving nothing), and
+# every check below quietly asserting against the PREVIOUS phase's state. Track
+# the pid we started and wait on the port instead of sleeping and hoping.
+DAEMON_PID=""
 start() { # port logfile
-  cd "$WT/daemon" || exit 1
-  DRYDOCK_PORT=$1 DRYDOCK_HOST=127.0.0.1 DRYDOCK_TRACKER=fixture \
-    DRYDOCK_DATABASE_URL="$URL" setsid nohup node --import tsx src/index.ts \
-    > "$2" 2>&1 < /dev/null &
-  sleep 5
+  if curl -s -m 1 "localhost:$1/healthz" > /dev/null 2>&1; then
+    echo "  something is already listening on :$1 — refusing to test against it"
+    exit 1
+  fi
+  ( cd "$WT/daemon" || exit 1
+    DRYDOCK_PORT=$1 DRYDOCK_HOST=127.0.0.1 DRYDOCK_TRACKER=fixture \
+      DRYDOCK_DATABASE_URL="$URL" nohup node --import tsx src/index.ts \
+      > "$2" 2>&1 < /dev/null &
+    echo $! > /tmp/dry58-daemon.pid )
+  DAEMON_PID=$(cat /tmp/dry58-daemon.pid)
+  # A drifted migration makes /api/workspace 503 while /healthz stays 200, so
+  # poll the endpoint that answers either way.
+  for _ in $(seq 1 40); do
+    curl -s -m 2 "localhost:$1/healthz" > /dev/null 2>&1 && return 0
+    sleep 1
+  done
+  echo "  daemon on :$1 never came up — see $2"
+  exit 1
 }
 stop() { # port
-  for p in $(pgrep -f "node --import tsx src/index.ts"); do
-    tr '\0' '\n' < /proc/$p/environ 2>/dev/null | grep -q "^DRYDOCK_PORT=$1$" && kill $p
+  [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null
+  for _ in $(seq 1 20); do
+    curl -s -m 1 "localhost:$1/healthz" > /dev/null 2>&1 || { DAEMON_PID=""; return 0; }
+    sleep 1
   done
-  sleep 2
+  echo "  WARNING: daemon on :$1 is still listening — later phases are unreliable"
 }
 psql() { docker exec "$PGC" psql -U postgres -d drydock -tAc "$1"; }
 
 cp "$MIG" /tmp/dry58-mig.orig
-trap 'cp /tmp/dry58-mig.orig "$MIG"' EXIT
+SLOW=$(dirname "$MIG")/002_slow_probe.sql
+trap 'cp /tmp/dry58-mig.orig "$MIG"; rm -f "$SLOW"; [ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null' EXIT
+# Clear a probe left behind by a previous run that died past its trap (kill -9,
+# a crashed terminal). It matters more than the usual stale-tempfile grumble:
+# this directory is real migration input, so anything left here is applied by
+# the next daemon to boot against that database — including the dev and prod
+# ones, which is the very arrangement §1 is about. Also gitignored, so it can't
+# be committed by accident.
+rm -f "$SLOW"
+
+# Wait for the database before starting anything. Not hygiene: every check below
+# asserts on a SPECIFIC 503 (the drift message), and a store that is merely
+# still connecting 503s too — so a cold container turns this whole file red for
+# a reason that has nothing to do with what it tests. Caught exactly that way.
+for _ in $(seq 1 30); do
+  psql "select 1" > /dev/null 2>&1 && break
+  sleep 1
+done
+psql "select 1" > /dev/null 2>&1 || { echo "  database at $URL never came up"; exit 1; }
+
+echo
+echo "0. baseline — the migrations apply cleanly first"
+# Everything below turns on 001 being ALREADY APPLIED with its original bytes.
+# Against a fresh database it isn't, and §1 then applies the *edited* file as a
+# first-time migration: no drift, 200, three red checks and a §2 that fails the
+# other way because the ledger now holds the edited checksum. The README hands
+# you a brand-new container, so this phase is what makes the rest mean anything.
+start 4377 /tmp/dry58-base.log
+CODE=$(curl -s -m 60 -o /dev/null -w '%{http_code}' localhost:4377/api/workspace)
+[ "$CODE" = "200" ] && ok "migrations applied against a clean database" \
+  || no "baseline migrate" "got $CODE — $(tail -2 /tmp/dry58-base.log)"
+stop 4377
 
 echo
 echo "1. an applied migration edited on disk"
@@ -96,12 +149,16 @@ echo "4. a migration slower than the ordinary query ceiling still applies"
 # cancelled, roll back, and retry forever with nothing but a 57014 to explain
 # it. migrate() exempts the DDL (MIGRATION_TIMEOUT_MS) — this proves it, because
 # nothing else here would notice it being taken away.
-SLOW=$(dirname "$MIG")/002_slow_probe.sql
+#
+# NB this writes a real file into daemon/src/state/migrations for ~20s. The trap
+# removes it on any normal exit or Ctrl-C, and the top of this script clears a
+# leftover before anything starts — but a kill -9 in this window leaves a 13s
+# sleep and a junk table for the next daemon that boots against this database.
+# It's gitignored, so it shows up as nothing worse than a stale local file.
 cat > "$SLOW" <<'SQL'
 do $$ begin perform pg_sleep(13); end $$;
 create table if not exists dry58_slow_probe (x int);
 SQL
-trap 'cp /tmp/dry58-mig.orig "$MIG"; rm -f "$SLOW"' EXIT
 start 4376 /tmp/dry58-slow.log
 CODE=$(curl -s -m 60 -o /dev/null -w '%{http_code}' localhost:4376/api/workspace)
 [ "$CODE" = "200" ] && ok "a 13s migration applies under a 10s query ceiling" \

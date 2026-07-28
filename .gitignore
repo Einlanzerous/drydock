@@ -11,3 +11,8 @@ dist/
 # Ad-hoc playwright install for scripts/verify (see its README)
 scripts/verify/node_modules/
 scripts/verify/package*.json
+
+# drift.sh writes a throwaway migration here for ~20s (scripts/verify/README.md).
+# Real migration input, so a run killed mid-flight must not be able to leave it
+# committable — the next daemon to boot would apply it.
+daemon/src/state/migrations/*_probe.sql
