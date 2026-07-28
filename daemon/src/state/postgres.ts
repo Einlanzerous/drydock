@@ -175,7 +175,17 @@ export class PostgresStore implements StateStore {
    */
   private async guard<T>(fn: () => Promise<T>): Promise<T> {
     if (this.cooldownRemaining() > 0) {
-      throw new Error("postgres unavailable (retrying shortly)");
+      // Carry the reason, not just the state. A bare "retrying shortly" is
+      // accurate and useless: the request that actually hit the fault is the
+      // only one that ever saw why, and everything behind it in the window got
+      // a sentence that fits a network blip, a wrong password and an edited
+      // migration equally well. That last one never self-heals, so the generic
+      // message is worst exactly where a real explanation matters most — and
+      // /healthz already reports `lastError` for the same reason. Same rule as
+      // DRY-51: the cause travels with the failure.
+      throw new Error(
+        `postgres unavailable, retrying shortly${this.lastError ? `: ${this.lastError}` : ""}`,
+      );
     }
     try {
       await this.ensureReady();
