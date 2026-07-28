@@ -7,3 +7,7 @@ dist/
 .env
 .env.*
 !.env.example
+
+# Ad-hoc playwright install for scripts/verify (see its README)
+scripts/verify/node_modules/
+scripts/verify/package*.json

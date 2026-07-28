@@ -148,6 +148,14 @@ Non-negotiable properties, all of them regressions waiting to happen:
    with a null checksum (written before DRY-58) must be adopted and logged, not
    reported as drift.
 
+Properties 6-9 have harnesses — `scripts/verify/` (see its README), which is
+where the partition proxies live. Run them against **both** tiers. They aren't
+wired into anything and never run on install; they exist because the claims are
+about latency and recovery, which curl can't express. Before trusting a green
+run, confirm the harness still discriminates by pointing it at the unpatched
+file (the README shows how) — a harness that passes either way is worse than no
+harness.
+
 ## Verifying autonomous runs (DRY-49)
 
 An autonomous run's premise is that nobody is watching, so every failure mode
