@@ -13,6 +13,7 @@
 // That rule stays in the CLIENT on purpose — the daemon stores the version but
 // cannot know which shapes this build of the UI is able to read.
 import { deleteWorkspace, fetchWorkspace, putWorkspace } from "../lib/daemon.js";
+import { clearNotice, setNotice } from "./notices.js";
 import type { LayoutMode, Win } from "./useWindowManager.js";
 
 const PREFIX = "drydock.layout";
@@ -124,6 +125,15 @@ function noteDegraded(err: unknown): void {
   if (!degraded) {
     degraded = true;
     console.warn("[drydock] layout is not reaching the daemon — using this browser's copy", err);
+    // The console line is for whoever is already debugging; the notice is for
+    // whoever isn't. Phrased as where the desk IS rather than what broke,
+    // because the actionable half is "this browser is the only copy" — the rest
+    // of Drydock is fine and nothing here is worth interrupting for (DRY-58).
+    setNotice(
+      "workspace-store",
+      "Desk changes aren't reaching the daemon — this browser is holding them",
+      String(err),
+    );
   }
   // Outside the `if` on purpose: the transition is what's worth SAYING once,
   // but every failure has to leave a retry armed. Arming it only on the
@@ -141,6 +151,7 @@ function noteRecovered(): void {
   attempt = 0;
   if (!degraded) return;
   degraded = false;
+  clearNotice("workspace-store");
   console.info("[drydock] layout persistence restored");
 }
 

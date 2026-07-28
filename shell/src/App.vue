@@ -11,6 +11,7 @@ import RunRail from "./components/RunRail.vue";
 import { openGates, startGateStream, stopGateStream } from "./composables/gateStore.js";
 import { askToNotify, notifyGate, useAttention } from "./composables/attention.js";
 import { runState } from "./composables/runState.js";
+import { noticeList } from "./composables/notices.js";
 import { useWindowManager, type LayoutMode, type Win } from "./composables/useWindowManager.js";
 import {
   DAEMON_HTTP,
@@ -845,6 +846,13 @@ onBeforeUnmount(() => {
       {{ actionError }}
       <button class="banner-x" title="Dismiss" @click="actionError = null">✕</button>
     </p>
+    <!-- Continuing conditions (DRY-58): something still works, just not the way
+         you'd assume. Muted rather than red, and NOT dismissible — whoever
+         raised it clears it when it stops being true, so an ✕ would only hide a
+         fact that's still the case. -->
+    <p v-for="n in noticeList" :key="n.key" class="notice">
+      {{ n.text }}<span v-if="n.detail" class="notice-detail">{{ n.detail }}</span>
+    </p>
 
     <!-- BODY -->
     <div class="body">
@@ -1090,6 +1098,22 @@ onBeforeUnmount(() => {
   color: #f0c9c4;
   font-size: 12.5px;
   border-bottom: 1px solid #5c2b2b;
+}
+/* Deliberately quieter than .error: amber-on-slate, one line, no dismiss
+   affordance. It reports a condition you should know about while you keep
+   working — not a fault to go and deal with (DRY-58). */
+.notice {
+  margin: 0;
+  padding: 6px 14px;
+  background: #21201a;
+  color: #d8c9a3;
+  font-size: 12px;
+  border-bottom: 1px solid #4a4130;
+}
+.notice-detail {
+  margin-left: 8px;
+  opacity: 0.6;
+  font-size: 11.5px;
 }
 .banner-x {
   float: right;
