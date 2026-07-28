@@ -114,6 +114,12 @@ export class JiraProvider implements TrackerProvider {
   private readonly repoOverrides: Set<string>;
   /** Resolved on first search: true = Cloud (`/search/jql`), false = DC (`/search`). */
   private cloudSearch: boolean | undefined;
+  /**
+   * Latched off the first time this instance rejects `issuetype = "Epic"`
+   * (DRY-13), so the downgrade is paid once rather than on every sidebar
+   * refresh. Same one-way-probe shape as `cloudSearch` above.
+   */
+  private epicClauseUsable = true;
 
   constructor(cfg: JiraConfig) {
     this.baseUrl = cfg.baseUrl.replace(/\/$/, "");
@@ -183,7 +189,7 @@ export class JiraProvider implements TrackerProvider {
     };
   }
 
-  private buildJql(q: TicketQuery): string {
+  private buildJql(q: TicketQuery, epicsToo = this.epicClauseUsable): string {
     const clauses: string[] = [];
     if (q.project) clauses.push(`project = ${jqlQuote(q.project)}`);
     if (q.projects?.length) clauses.push(`project in (${q.projects.map(jqlQuote).join(", ")})`);
@@ -200,10 +206,19 @@ export class JiraProvider implements TrackerProvider {
       // its in-flight children hang under. Without this the sidebar's usual
       // state is a child whose epic is missing. JQL expresses it in the same
       // request, so this costs nothing.
+      //
+      // `epicsToo=false` is the downgrade listTickets falls back to: JQL
+      // validates issuetype VALUES against the instance, so `issuetype = "Epic"`
+      // is a hard 400 wherever no type is named that — a localized Jira, a
+      // renamed type, a scope with none visible. This is the only new query in
+      // DRY-13 that sits in the sidebar's critical path, so unlike the child
+      // stats it can't just be swallowed: failing it means an empty sidebar.
       clauses.push(
         q.includeBacklog
           ? `statusCategory != Done`
-          : `(statusCategory = "In Progress" OR (issuetype = Epic AND statusCategory != Done))`,
+          : epicsToo
+            ? `(statusCategory = "In Progress" OR (issuetype = ${jqlQuote("Epic")} AND statusCategory != Done))`
+            : `statusCategory = "In Progress"`,
       );
     }
     if (q.text) clauses.push(`text ~ ${jqlQuote(q.text)}`);
@@ -270,11 +285,30 @@ export class JiraProvider implements TrackerProvider {
     // "everything matching", paginated to the MAX_TICKETS backstop; an explicit
     // limit (the palette) is a single page.
     const paginate = q.limit === undefined;
-    const jql = this.buildJql(q);
+    const pageSize = Math.min(q.limit ?? PAGE_SIZE, PAGE_SIZE);
     const out: Ticket[] = [];
     let next: string | undefined;
+    let jql = this.buildJql(q);
+    let first = true;
     do {
-      const page = await this.searchPage(jql, Math.min(q.limit ?? PAGE_SIZE, PAGE_SIZE), next);
+      let page;
+      try {
+        page = await this.searchPage(jql, pageSize, next);
+      } catch (e) {
+        // Retry once, without the epic clause, if the instance rejected it on
+        // the FIRST page — mid-pagination the cursor belongs to the old query,
+        // and a 400 there is a different problem. See buildJql: this keeps a
+        // sidebar that used to work from going blank on an instance with no
+        // issue type literally named "Epic".
+        if (!first || !this.epicClauseUsable || !/-> 400/.test(String(e))) throw e;
+        this.epicClauseUsable = false;
+        console.warn(
+          `[drydock] jira rejected the epic clause; epics will follow the backlog rule: ${e}`,
+        );
+        jql = this.buildJql(q, false);
+        page = await this.searchPage(jql, pageSize, next);
+      }
+      first = false;
       out.push(...page.issues.map((i) => this.toTicket(i)));
       next = page.next;
     } while (paginate && next && out.length < MAX_TICKETS);
@@ -305,6 +339,15 @@ export class JiraProvider implements TrackerProvider {
         kids.push(...page.issues);
         next = page.next;
       } while (next && kids.length < MAX_TICKETS);
+      // Hitting the cap must ABANDON the stats, not truncate them. This query
+      // spans every status — years of closed work — so 20 epics of 100 children
+      // reaches 2000 on an ordinary corporate Jira. Keeping partial counts
+      // would mark them authoritative and render "13/40 done" when the truth is
+      // 13/78: precisely the false ratio this whole design refuses to show.
+      // Returning early leaves childStats unset, and the shell falls back to
+      // counting loaded children without a ratio. Narrowing
+      // DRYDOCK_TRACKER_PROJECTS is the lever that brings the real numbers back.
+      if (next) return;
       for (const k of kids) {
         const epic = k.fields.parent?.key ? epics.get(k.fields.parent.key) : undefined;
         if (!epic) continue;

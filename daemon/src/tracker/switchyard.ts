@@ -49,6 +49,10 @@ const OPEN_CATEGORIES_WITH_BACKLOG = `backlog,${OPEN_CATEGORIES}`;
 // huge tracker can't pull the whole world into one sidebar.
 const MAX_TICKETS = 2000;
 
+// How many epics may have their children counted at once (DRY-13). Each slot is
+// a cursor chain, not a single request, so this is the real concurrency knob.
+const CHILD_STATS_POOL = 6;
+
 const CATEGORY_LABEL: Record<TicketCategory, string> = {
   backlog: "Backlog",
   planning: "Planning",
@@ -149,7 +153,7 @@ export class SwitchyardProvider implements TrackerProvider {
       );
       return per.flat();
     }
-    const rows = await this.fetchPages(
+    const { rows } = await this.fetchPages(
       q,
       q.open ? (q.includeBacklog ? OPEN_CATEGORIES_WITH_BACKLOG : OPEN_CATEGORIES) : undefined,
     );
@@ -161,7 +165,8 @@ export class SwitchyardProvider implements TrackerProvider {
     // second request. Still bounded: `type=epic` is a small slice by definition.
     if (q.open && !q.includeBacklog) {
       const seen = new Set(rows.map((t) => t.key));
-      for (const e of await this.fetchPages(q, OPEN_CATEGORIES_WITH_BACKLOG, "epic")) {
+      const epics = await this.fetchPages(q, OPEN_CATEGORIES_WITH_BACKLOG, "epic");
+      for (const e of epics.rows) {
         if (!seen.has(e.key)) rows.push(e);
       }
     }
@@ -173,31 +178,47 @@ export class SwitchyardProvider implements TrackerProvider {
   /**
    * Fill in each epic's child breakdown (DRY-13). One request per epic — the
    * list filter takes a single `parent_id`, with no OR and no count
-   * aggregation, so there's no batching to be had here. Bounded by the number
-   * of epics, and issued in parallel.
+   * aggregation, so there's no batching to be had here (Jira gets one query for
+   * all of them; this API can't).
+   *
+   * Run through a small pool rather than Promise.all over every epic. The count
+   * being bounded by the epic count does NOT bound the concurrency: each epic
+   * is itself a cursor-following chain, so 40 open epics would open 40
+   * simultaneous chains from a single sidebar refresh — per browser — at a
+   * tracker that may rate-limit.
    *
    * Failures are swallowed deliberately: this is decoration on a sidebar that
    * must still draw. The shell falls back to counting the children it loaded.
    */
   private async attachChildStats(rows: SwitchyardTicket[], out: Ticket[]): Promise<void> {
-    await Promise.all(
-      rows.map(async (row, i) => {
-        if (row.type !== "epic" || !row.id) return;
+    const byKey = new Map(out.map((t) => [t.key, t]));
+    const epics = rows.filter((r) => r.type === "epic" && r.id);
+    let cursor = 0;
+    const worker = async (): Promise<void> => {
+      for (let i = cursor++; i < epics.length; i = cursor++) {
+        const row = epics[i]!;
+        const ticket = byKey.get(row.key);
+        if (!ticket) continue;
         try {
           // No limit → follows cursors, so an epic with more children than one
           // page holds is counted in full.
           const kids = await this.fetchPages({}, undefined, undefined, row.id);
+          // Same rule as the Jira provider: a capped count is a wrong number
+          // wearing an authoritative badge, so drop it and let the shell fall
+          // back rather than render a false ratio.
+          if (kids.truncated) continue;
           const byCategory: Partial<Record<TicketCategory, number>> = {};
-          for (const k of kids) {
+          for (const k of kids.rows) {
             const c = mapCategory(k.status?.category, k.status?.display_name);
             byCategory[c] = (byCategory[c] ?? 0) + 1;
           }
-          out[i]!.childStats = { total: kids.length, byCategory };
+          ticket.childStats = { total: kids.rows.length, byCategory };
         } catch {
           /* leave childStats unset; the shell degrades to loaded children */
         }
-      }),
-    );
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(CHILD_STATS_POOL, epics.length) }, worker));
   }
 
   /**
@@ -210,7 +231,7 @@ export class SwitchyardProvider implements TrackerProvider {
     status?: string,
     type?: string,
     parentId?: string,
-  ): Promise<SwitchyardTicket[]> {
+  ): Promise<{ rows: SwitchyardTicket[]; truncated: boolean }> {
     const paginate = q.limit === undefined;
     const pageSize = q.limit ?? 200;
     const out: SwitchyardTicket[] = [];
@@ -228,7 +249,9 @@ export class SwitchyardProvider implements TrackerProvider {
       out.push(...this.items(body));
       cursor = body?.page?.next_cursor ?? undefined;
     } while (paginate && cursor && out.length < MAX_TICKETS);
-    return out;
+    // `truncated` matters to the caller counting children: a partial count that
+    // still looks authoritative is a wrong number presented as a right one.
+    return { rows: out, truncated: paginate && !!cursor };
   }
 
   async searchTickets(text: string, projects?: string[]): Promise<Ticket[]> {

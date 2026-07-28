@@ -241,10 +241,23 @@ boolean params are literal `true`, not `1`.
    - Non-epics must have no `childStats`, and the palette (`/search`) must issue
      no child query at all — it has no `open` flag, so the pass must not fire.
    - Jira answers every epic in one `parent in (…)` search; Switchyard has no OR
-     in its list filter, so it's one request per epic. On an older DC instance
-     `parent` isn't queryable and that search 400s — it must be swallowed,
-     leaving `childStats` unset so the shell falls back rather than the sidebar
-     failing to draw. Stub it and confirm the pull still returns tickets.
+     in its list filter, so it's one request per epic, through a small pool
+     (`CHILD_STATS_POOL`). Bounding the epic *count* does not bound concurrency:
+     each one is a cursor chain, so an unpooled fan-out opens dozens of them per
+     sidebar refresh, per browser.
+   - **A capped count must be abandoned, not truncated.** The child query spans
+     every status, so `MAX_TICKETS` is reachable on an ordinary corporate Jira
+     (20 epics × 100 children). Truncating leaves `childStats` present and
+     wrong, and the shell renders it as authoritative — "13/40 done" when the
+     truth is 13/78. Both providers bail instead. Drive it with a stub that
+     always returns another page and assert `childStats` comes back UNSET.
+   - Two queries here are allowed to fail and must stay harmless: `parent` isn't
+     queryable on older Jira DC (child stats 400 — swallowed), and
+     `issuetype = "Epic"` doesn't validate on an instance with no type named
+     that, localized or renamed. The second is the dangerous one because it sits
+     in the sidebar's *critical path*: unhandled it means an empty sidebar where
+     one previously worked. It downgrades to the plain clause on a first-page
+     400 and latches (`epicClauseUsable`), so the probe is paid once.
 9. End-to-end: point a browser at the dev shell, switch it to the throwaway
    daemon port, open a ticket, **Send to agent** — verifies repo→cwd resolution
    (`DRYDOCK_REPOS_ROOT` / `DRYDOCK_REPO_PATHS`, keyed by component slug for

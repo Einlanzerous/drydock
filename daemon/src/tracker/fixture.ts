@@ -36,7 +36,11 @@ const FIXTURES: Fixture[] = [
   { key: "ARGY-89", repo: "argosy", title: "Series auto-advance: auto-play the next episode", tag: "frontend", category: "in_progress", assignee: "Ashley", parent: { key: "ARGY-64", title: "Phase 8 — Extra Credit (Stretch & Scale)" } },
   { key: "ARGY-90", repo: "argosy", title: "Skip Intro / Skip Credits buttons (web player)", tag: "frontend", category: "backlog", assignee: "Ashley", parent: { key: "ARGY-64", title: "Phase 8 — Extra Credit (Stretch & Scale)" } },
   { key: "ARGY-91", repo: "argosy", title: "Global auto-play preference (opt-in, default off)", tag: "backend", category: "backlog", parent: { key: "ARGY-64", title: "Phase 8 — Extra Credit (Stretch & Scale)" } },
-  { key: "ARGY-64", repo: "argosy", title: "Phase 8 — Extra Credit (Stretch & Scale)", tag: "epic", category: "in_progress", type: "epic", assignee: "Jordan" },
+  // Parented to an initiative that isn't in the set: Jira's third rung
+  // (initiative → epic → task). Nesting deliberately stops at one level, so
+  // this stays a top-level epic and merely wears a chip naming its parent —
+  // the case that would otherwise drop the link with nothing to show for it.
+  { key: "ARGY-64", repo: "argosy", title: "Phase 8 — Extra Credit (Stretch & Scale)", tag: "epic", category: "in_progress", type: "epic", assignee: "Jordan", parent: { key: "ARGY-1", title: "Argosy 2026 roadmap" } },
   { key: "SWY-12", repo: "switchyard", title: "Saved filters in the board view", tag: "frontend", category: "review", assignee: "Jordan" },
   { key: "SWY-7", repo: "switchyard", title: "Webhook retries with exponential backoff", tag: "backend", category: "backlog" },
   { key: "DRY-3", repo: "drydock", title: "Tile layout snapping + window persistence", tag: "frontend", category: "in_progress", assignee: "Ashley", parent: { key: "DRY-1", title: "AI Agent Orchestrator — web terminal multiplexer for AI CLIs" } },

@@ -2,10 +2,12 @@
 import { computed, reactive, ref } from "vue";
 import {
   CATEGORY_COLOR,
+  epicNodeId,
   epicRollup,
   groupTickets,
   tagColor,
   type EpicNode,
+  type RepoGroup,
   type Rollup,
   type Ticket,
 } from "../lib/tracker.js";
@@ -100,12 +102,14 @@ const assignees = computed(() => [
 ].sort());
 const hasUnassigned = computed(() => props.tickets.some((t) => !t.assignee));
 
-// Epic filter options. Derived by grouping the set against itself, so the list
-// is exactly the epics the sidebar can actually show — including the ones only
-// named by a child — rather than a second, subtly different rule.
+// The unfiltered grouping. Epic filter options come off this rather than a
+// second, subtly different rule, so the list offers exactly the epics the
+// sidebar can show — including those only named by a child.
+const allGroups = computed(() => groupTickets(props.tickets, props.tickets));
+
 const epicOptions = computed(() => {
   const seen = new Map<string, string>();
-  for (const g of groupTickets(props.tickets, props.tickets)) {
+  for (const g of allGroups.value) {
     for (const e of g.epics) if (!seen.has(e.key)) seen.set(e.key, e.title);
   }
   return [...seen].map(([key, title]) => ({ key, title })).sort((a, b) => a.key.localeCompare(b.key));
@@ -148,10 +152,10 @@ type Row =
   | { kind: "epic"; id: string; node: EpicNode; roll: Rollup }
   | { kind: "ticket"; id: string; t: Ticket; child: boolean };
 
-function rowsOf(g: { repo: string; epics: EpicNode[]; loose: Ticket[] }): Row[] {
+function rowsOf(g: RepoGroup): Row[] {
   const out: Row[] = [];
   for (const node of g.epics) {
-    out.push({ kind: "epic", id: `${g.repo} ${node.key}`, node, roll: epicRollup(node) });
+    out.push({ kind: "epic", id: epicNodeId(g.repo, node.key), node, roll: epicRollup(node) });
     if (isEpicOpen(g.repo, node.key)) {
       for (const t of node.shown) out.push({ kind: "ticket", id: t.key, t, child: true });
     }
@@ -160,6 +164,13 @@ function rowsOf(g: { repo: string; epics: EpicNode[]; loose: Ticket[] }): Row[] 
   return out;
 }
 
+// Rows are built in a computed, not called from the template: rendering there
+// re-runs rowsOf — and every epicRollup inside it — on each patch. It reads the
+// same reactive state either way, so this only changes how often it runs.
+const rendered = computed(() =>
+  groups.value.map((g) => ({ ...g, rows: isOpen(g.repo) ? rowsOf(g) : [] })),
+);
+
 function isOpen(repo: string): boolean {
   return filtering.value || !!expanded[repo];
 }
@@ -167,11 +178,10 @@ function toggle(repo: string): void {
   expanded[repo] = !expanded[repo];
 }
 function isEpicOpen(repo: string, key: string): boolean {
-  return filtering.value || !!epicExpanded[`${repo} ${key}`];
+  return filtering.value || !!epicExpanded[epicNodeId(repo, key)];
 }
 function toggleEpic(repo: string, key: string): void {
-  const id = `${repo} ${key}`;
-  epicExpanded[id] = !isEpicOpen(repo, key);
+  epicExpanded[epicNodeId(repo, key)] = !isEpicOpen(repo, key);
 }
 /**
  * Clicking the epic row opens its ticket and expands it, the way clicking any
@@ -180,7 +190,7 @@ function toggleEpic(repo: string, key: string): void {
  */
 function onEpicRow(repo: string, node: EpicNode): void {
   if (node.ticket) {
-    epicExpanded[`${repo} ${node.key}`] = true;
+    epicExpanded[epicNodeId(repo, node.key)] = true;
     emit("launch", node.ticket);
   } else {
     toggleEpic(repo, node.key);
@@ -294,20 +304,23 @@ function clearFilters(): void {
 
     <div class="list">
       <p v-if="!groups.length" class="empty">No tickets match.</p>
-      <template v-for="grp in groups" :key="grp.repo">
+      <template v-for="grp in rendered" :key="grp.repo">
         <button class="grp" :class="{ open: isOpen(grp.repo) }" @click="toggle(grp.repo)">
           <span class="chev">▸</span>
           <span class="grp-name">{{ grp.repo }}</span>
           <span class="grp-count">{{ grp.count }}</span>
         </button>
         <template v-if="isOpen(grp.repo)">
-          <template v-for="row in rowsOf(grp)" :key="row.id">
+          <template v-for="row in grp.rows" :key="row.id">
             <!-- epic row: header for its children, and a ticket in its own
                  right unless it was never pulled -->
             <div
               v-if="row.kind === 'epic'"
               class="row epic"
               :class="{ ghost: !row.node.ticket }"
+              :title="row.node.ticket
+                ? `Open ${row.node.key} — use the chevron to expand without opening it`
+                : `${row.node.key} isn't in this pull; the chevron expands its children`"
               @click="onEpicRow(grp.repo, row.node)"
             >
               <button
@@ -330,6 +343,16 @@ function clearFilters(): void {
                   >not pulled</span>
                 </div>
                 <div class="ttitle">{{ row.node.title }}</div>
+                <!-- An epic can itself hang off something (Jira initiative →
+                     epic). Nesting stops at one level by choice, but the link
+                     shouldn't vanish with it — epic rows have no .tagrow, so
+                     the chip loose rows get would otherwise never render. -->
+                <div v-if="row.node.ticket?.parent" class="tagrow">
+                  <span
+                    class="parent-chip"
+                    :title="`Child of ${row.node.ticket.parent.key}${row.node.ticket.parent.title ? ` — ${row.node.ticket.parent.title}` : ''}`"
+                  >↳ {{ row.node.ticket.parent.key }}</span>
+                </div>
                 <div v-if="row.roll.total" class="rollup" :title="row.roll.hint">
                   <span class="bar">
                     <span
