@@ -88,8 +88,27 @@ export class PostgresStore implements StateStore {
       // 10s rather than matching the 5s connect timeout, because this also
       // covers `select pg_advisory_lock(...)` in migrate(), which legitimately
       // waits on another daemon migrating the same database (CLAUDE.md's
-      // dev/prod/throwaway-all-pointed-at-one-database setup).
+      // dev/prod/throwaway-all-pointed-at-one-database setup). The shell's
+      // write budget is chosen against THIS number (lib/daemon.ts) — a client
+      // that gives up first turns a 503 the daemon was about to send into an
+      // anonymous timeout.
       query_timeout: 10_000,
+      // The same deadline again, server-side, and the two are not redundant.
+      // `query_timeout` is a bare client timer (pg 8.22 `lib/client.js`): it
+      // rejects the promise, sends NO cancel, does not destroy the socket, and
+      // calls `_pulseQueryQueue()` — so the next query goes out on a connection
+      // the server is still answering the last one on. In migrate() that means
+      // a timed-out `pg_advisory_lock` is followed by `pg_advisory_unlock` on a
+      // desynced client, and if the server then grants the lock this daemon
+      // holds a session-level lock it doesn't know about, blocking every other
+      // daemon until idleTimeoutMillis retires the connection.
+      //
+      // `statement_timeout` rides in the startup packet, so the SERVER aborts
+      // the statement and the connection stays in sync. It's the one that
+      // matters whenever the server can still hear us; `query_timeout` remains
+      // the belt for the case it can't (a partition, where nothing server-side
+      // is ever enforced because nothing server-side ever arrives).
+      statement_timeout: 10_000,
     });
     // Load-bearing, not decoration — this is DRY-45's bug class exactly. An
     // idle pooled client that dies (database restarted, network dropped)
@@ -125,8 +144,13 @@ export class PostgresStore implements StateStore {
    */
   private cooldownRemaining(): number {
     if (!this.downSince) return 0;
-    const window = RETRY_COOLDOWN_MS[Math.min(this.failures - 1, RETRY_COOLDOWN_MS.length - 1)];
-    return Math.max(0, this.downSince + window - Date.now());
+    // The lower clamp isn't reachable today (guard writes both fields together)
+    // but it's free, and the failure mode if it ever is would be silent: index
+    // -1 gives undefined, the arithmetic gives NaN, `NaN > 0` is false, and the
+    // cooldown quietly stops existing — a partition back to one 5s dial per
+    // request, which is the DRY-28 bug returning by the back door.
+    const step = Math.min(Math.max(0, this.failures - 1), RETRY_COOLDOWN_MS.length - 1);
+    return Math.max(0, this.downSince + RETRY_COOLDOWN_MS[step] - Date.now());
   }
 
   /**
