@@ -46,7 +46,16 @@ export const DAEMON_WS = override
  * answers 502 with an error body.
  */
 export async function getJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init);
+  return unwrap<T>(await fetch(url, init));
+}
+
+/**
+ * The body-parse-and-check half of `getJson`, so a caller that has to inspect
+ * the status FIRST (see fetchSessionHistory's 501) doesn't have to reimplement
+ * it — the copy that did dropped both guards below, which this module documents
+ * as load-bearing.
+ */
+async function unwrap<T>(res: Response): Promise<T> {
   // Parsed BEFORE the status check so a daemon that explains itself in `error`
   // gets to. A body that isn't JSON at all (nginx's HTML 502, a wrong port
   // serving an SPA's index.html with a cheerful 200) leaves it undefined.
@@ -122,18 +131,17 @@ export interface SessionRecord {
  * degrades the desk rather than silently claiming nothing ever ran.
  */
 export async function fetchSessionHistory(): Promise<SessionRecord[] | null> {
-  const res = await fetch(`${DAEMON_HTTP}/api/sessions/history`);
+  // Budgeted, like fetchWorkspace's. This runs behind the session poll, and a
+  // partitioned Postgres costs the daemon its full query deadline — without a
+  // ceiling here that becomes the shell's deadline too (DRY-58).
+  const res = await fetch(`${DAEMON_HTTP}/api/sessions/history`, {
+    signal: AbortSignal.timeout(5_000),
+  });
   // 501 is the tier speaking, not a fault — checked before the body is read so
   // it can't be mistaken for one.
   if (res.status === 501) return null;
-  let body: any;
-  try {
-    body = await res.json();
-  } catch {
-    if (res.ok) throw new Error(`daemon returned a non-JSON body (${res.status})`);
-  }
-  if (!res.ok) throw new Error(`daemon returned ${res.status}${suffix(body)}`);
-  return expectList<SessionRecord>(body?.sessions, "session history");
+  const body = await unwrap<{ sessions?: SessionRecord[] }>(res);
+  return expectList<SessionRecord>(body.sessions, "session history");
 }
 
 export async function createSession(opts: {

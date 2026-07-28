@@ -214,7 +214,7 @@ export class SessionManager {
       );
       // History has to learn about this one too, or it has a hole exactly where
       // the daemon was absent — which is the case a tombstone exists for.
-      this.history?.endedWhileAway(session);
+      this.history?.ended(session);
       // Not returned to the registry. It is a dead session with no PTY behind
       // it, so putting it in `/api/sessions` would draw a pane for something
       // that can never produce another byte; the durable record of a run is its

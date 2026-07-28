@@ -156,12 +156,15 @@ const server = http.createServer(async (req, res) => {
         sessions: manager.list().length,
         store: {
           ...(await store.health()),
-          // What this backend can do, not just whether it's up (DRY-56). The
-          // shell gates the tombstone surface on this: on a tier that keeps no
-          // history it must SAY so where the tombstone would be, because an
-          // absent tombstone is otherwise indistinguishable from a lost
-          // session. Derived from whether the port exists, so it can't drift
-          // from what the store actually implements.
+          // What this backend can do, not just whether it's up (DRY-56).
+          //
+          // For an operator, not the shell — this endpoint's audience is
+          // whoever is asking "what is this daemon". The shell learns the same
+          // fact from /api/sessions/history answering 501, which is the answer
+          // it needs at the moment it needs it; making it poll /healthz to
+          // decide would be a second source for one truth. Derived from whether
+          // the port exists, so neither source can drift from what the store
+          // actually implements.
           capabilities: { sessionHistory: Boolean(store.history) },
         },
       });

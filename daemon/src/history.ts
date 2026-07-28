@@ -19,7 +19,7 @@
 import { CONFIG } from "./config.js";
 import { log } from "./log.js";
 import type { PtySession } from "./session.js";
-import type { SessionEndReason, SessionHistory } from "./state/types.js";
+import type { SessionHistory } from "./state/types.js";
 
 /**
  * How long a session must go quiet before another `last_active_at` write.
@@ -44,6 +44,8 @@ const TOUCH_DEBOUNCE_MS = 60_000;
 export class SessionHistoryRecorder {
   /** Last time we wrote last_active_at, per session id. */
   private readonly touched = new Map<string, number>();
+  /** Sessions whose agent id is already on record; see noteAgentSessionId. */
+  private readonly agentIdRecorded = new Set<string>();
 
   constructor(
     private readonly history: SessionHistory | undefined,
@@ -78,31 +80,29 @@ export class SessionHistoryRecorder {
     this.fire("stamp session activity", session.id, this.history.touch(this.owner, session.id));
   }
 
+  /**
+   * Record an ending — from the live exit handler OR from boot reconciliation
+   * for a session that ended while the daemon was down (DRY-57).
+   *
+   * `start` is REPLAYED first, and that is not belt-and-braces. Every write here
+   * is fire-and-forget, so a store outage at spawn drops the insert silently; a
+   * bare UPDATE would then match zero rows and the session would end with no
+   * history at all — no row, no tombstone, exactly the silent loss this feature
+   * exists to prevent, on the tier that is supposed to fix it. The insert is
+   * `on conflict do nothing`, so replaying it costs one statement and makes the
+   * ending self-sufficient regardless of what happened at spawn.
+   *
+   * One path for both cases on purpose: the boot path used to do this and the
+   * live path didn't, which is precisely the asymmetry that let an outage at
+   * spawn erase a session.
+   */
   ended(session: PtySession): void {
     if (!this.history) return;
-    this.touched.delete(session.id);
+    const row = session.historyStart();
+    this.touched.delete(row.id);
+    this.agentIdRecorded.delete(row.id);
     this.fire(
       "record a session ending",
-      session.id,
-      this.history.end(this.owner, session.id, session.ending()),
-    );
-  }
-
-  /**
-   * Record an ending the daemon wasn't running for (DRY-57's reconciliation).
-   *
-   * Called from boot for a session whose supervisor flushed an exit record while
-   * we were down. Without it, history would have a hole exactly where the daemon
-   * was absent — which is the case a tombstone exists for, so the feature would
-   * be missing precisely when it matters. The row may not exist at all if the
-   * spawn predates this feature or the store was down then, so `start` is
-   * replayed first and the insert is `on conflict do nothing`.
-   */
-  endedWhileAway(session: PtySession): void {
-    if (!this.history) return;
-    const row = session.historyStart();
-    this.fire(
-      "backfill a session that ended while the daemon was down",
       row.id,
       this.history
         .start(this.owner, row)
@@ -110,9 +110,18 @@ export class SessionHistoryRecorder {
     );
   }
 
-  /** The wrapped CLI told us its own session id, via a hook. */
+  /**
+   * The wrapped CLI told us its own session id, via a hook.
+   *
+   * Recorded ONCE per session. Claude Code sends `session_id` on every hook, and
+   * the UPDATE is `where agent_session_id is null` — so without this, every hook
+   * after the first would be a guaranteed-zero-row round trip on the rail's
+   * hottest path, which is the exact cost the debounce beside it exists to
+   * avoid. Cleared when the session ends, with the debounce entry.
+   */
   noteAgentSessionId(sessionId: string, agentSessionId: string): void {
-    if (!this.history) return;
+    if (!this.history || this.agentIdRecorded.has(sessionId)) return;
+    this.agentIdRecorded.add(sessionId);
     this.fire(
       "record an agent session id",
       sessionId,
@@ -152,6 +161,3 @@ export class SessionHistoryRecorder {
     });
   }
 }
-
-/** Re-exported so callers don't reach into state/ for one type. */
-export type { SessionEndReason };

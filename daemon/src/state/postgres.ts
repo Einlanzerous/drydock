@@ -523,7 +523,11 @@ export class PostgresStore implements StateStore {
                   agent_session_id, created_at, last_active_at, ended_at, exit_code, end_reason
              from pty_sessions
             where owner_id = $1
-         order by created_at desc
+         -- By when it last MATTERED, not when it started. Ordering by
+         -- created_at alone pushed a long-lived session that just ended below
+         -- 50 newer short ones, so the window waiting on its tombstone was
+         -- dropped instead — the silent loss this feature exists to prevent.
+         order by coalesce(ended_at, last_active_at, created_at) desc
             limit $2`,
           [owner, limit],
         );
