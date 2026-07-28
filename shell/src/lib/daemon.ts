@@ -269,9 +269,15 @@ export async function fetchWorkspace(): Promise<WorkspaceEnvelope | null> {
 /**
  * Budget for a write. Longer than the read's 3s because there is no first paint
  * waiting on it, and it has to clear the daemon's own worst honest latency —
- * a partitioned Postgres costs it `connectionTimeoutMillis` (5s) before it can
- * answer 503, and aborting a request that was about to explain itself would
- * trade a good error for a vague one.
+ * aborting a request that was about to explain itself trades a good error for
+ * a vague one.
+ *
+ * That worst case is the daemon's `query_timeout` (10s, see state/postgres.ts),
+ * not its 5s connect timeout: a write landing on a warm-but-partitioned pooled
+ * client waits out the query, and a warm pool is the normal case since clients
+ * stay idle for 30s. The two numbers have to be picked together — at 8s this
+ * aborted two seconds before the daemon would have answered 503, which is
+ * precisely the trade this comment claims to avoid.
  *
  * It exists at all because of DRY-58. While a failed push was fire-and-forget,
  * a request that hung forever cost nothing: the mirror had the desk and nobody
@@ -282,7 +288,7 @@ export async function fetchWorkspace(): Promise<WorkspaceEnvelope | null> {
  * notice, no retry, no roaming, and nothing in the console to say so. The one
  * failure mode this whole ticket is about, reintroduced by its own fix.
  */
-const WRITE_TIMEOUT_MS = 8000;
+const WRITE_TIMEOUT_MS = 12_000;
 
 export async function putWorkspace(data: WorkspaceEnvelope): Promise<void> {
   const res = await fetch(`${DAEMON_HTTP}/api/workspace`, {
