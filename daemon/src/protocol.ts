@@ -60,6 +60,17 @@ export type ServerMessage =
  * session has a window open.
  */
 export type EventMessage =
+  /**
+   * The complete set of open gates, sent once when a stream opens. A client
+   * REPLACES its state with this rather than merging it.
+   *
+   * A stream of gate-opens alone is not enough to stay correct: any resolution
+   * that happens while the stream is down is never delivered, so a client that
+   * merely accumulates would keep gates for sessions that are long gone,
+   * held-time ticking up. The dev daemon runs under `--watch` and restarts on
+   * every save, so that outage is the common case, not the exotic one.
+   */
+  | { type: "gate-snapshot"; gates: { sessionId: string; gate: PendingGate }[] }
   | { type: "gate-open"; sessionId: string; gate: PendingGate }
   | {
       type: "gate-resolved";

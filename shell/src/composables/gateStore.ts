@@ -26,30 +26,32 @@ export interface OpenGate extends PendingGate {
 }
 
 const gates = ref<OpenGate[]>([]);
-const connected = ref(false);
 let source: EventSource | null = null;
 
 /** Oldest first, matching the daemon's insertion order. */
 export const openGates = computed(() => gates.value);
 
-export const gatesConnected = computed(() => connected.value);
-
-/** Every open gate for one session, oldest first. */
-export function gatesForSession(sessionId: string): OpenGate[] {
-  return gates.value.filter((g) => g.sessionId === sessionId);
-}
-
 function onEvent(event: EventMessage): void {
-  if (event.type === "gate-open") {
-    // The daemon replays pending gates on every (re)connect, so the same gate
-    // arrives again after a dropped stream. Keyed by requestId rather than
-    // appended blindly — otherwise a flaky connection multiplies one gate into
-    // a stack of identical prompts.
-    if (gates.value.some((g) => g.requestId === event.gate.requestId)) return;
-    gates.value = [...gates.value, { sessionId: event.sessionId, ...event.gate }];
-    return;
+  switch (event.type) {
+    case "gate-snapshot":
+      // REPLACE, never merge. Every reconnect delivers one of these, and the
+      // gates it omits are gates that were resolved while the stream was down
+      // — their gate-resolved events went to a socket that no longer existed.
+      // Merging would strand them here forever, held-time climbing, attached
+      // to sessions the poll has already dropped. Under the dev daemon's
+      // --watch restarts that is the normal path, not an edge case.
+      gates.value = event.gates.map((g) => ({ sessionId: g.sessionId, ...g.gate }));
+      return;
+    case "gate-open":
+      // Deduped by requestId: a gate present in the snapshot must not double
+      // if a gate-open for it also races in.
+      if (gates.value.some((g) => g.requestId === event.gate.requestId)) return;
+      gates.value = [...gates.value, { sessionId: event.sessionId, ...event.gate }];
+      return;
+    case "gate-resolved":
+      gates.value = gates.value.filter((g) => g.requestId !== event.requestId);
+      return;
   }
-  gates.value = gates.value.filter((g) => g.requestId !== event.requestId);
 }
 
 /**
@@ -62,9 +64,6 @@ function onEvent(event: EventMessage): void {
 export function startGateStream(): void {
   if (source) return;
   source = new EventSource(eventsUrl());
-  source.onopen = () => {
-    connected.value = true;
-  };
   source.onmessage = (e) => {
     try {
       onEvent(JSON.parse(e.data) as EventMessage);
@@ -72,31 +71,46 @@ export function startGateStream(): void {
       /* a frame we can't parse is not worth killing the stream over */
     }
   };
-  source.onerror = () => {
-    connected.value = false;
-  };
+  // EventSource reconnects on its own — nothing to do here but decline to tear
+  // the stream down over a transient drop. The gate-snapshot on the next
+  // successful connect is what puts this client back in sync.
+  source.onerror = () => {};
 }
 
 export function stopGateStream(): void {
   source?.close();
   source = null;
-  connected.value = false;
   gates.value = [];
 }
 
 /**
  * Answer a gate from outside a pane.
  *
- * Drops it locally before the request settles: the click has to feel decided,
- * and the daemon's gate-resolved event removes it again idempotently. If the
- * POST fails the gate is still open daemon-side and the next reconnect replays
- * it, so an optimistic removal can't strand a real gate.
+ * Drops it locally before the request settles so the click feels decided, then
+ * puts it back if the answer never landed. The gate must reappear: a failed
+ * POST does not drop the SSE stream, so there is no reconnect coming to replay
+ * it — the gate would simply vanish from the UI while the agent stayed blocked
+ * for the full permissionTimeoutMs with nothing to explain why.
+ *
+ * Restored at its original index so a pending queue keeps its order (the UI
+ * numbers gates "1 of 2").
  */
 export async function resolveGate(
   gate: OpenGate,
   decision: "allow" | "deny",
   reason?: string,
 ): Promise<void> {
+  const index = gates.value.findIndex((g) => g.requestId === gate.requestId);
+  if (index === -1) return; // already resolved by another surface
   gates.value = gates.value.filter((g) => g.requestId !== gate.requestId);
-  await answerGate(gate.sessionId, gate.requestId, decision, reason);
+  try {
+    await answerGate(gate.sessionId, gate.requestId, decision, reason);
+  } catch (err) {
+    if (!gates.value.some((g) => g.requestId === gate.requestId)) {
+      const restored = [...gates.value];
+      restored.splice(index, 0, gate);
+      gates.value = restored;
+    }
+    throw err;
+  }
 }

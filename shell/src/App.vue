@@ -364,10 +364,22 @@ const visible = computed(() => wm.windows.filter((w) => !w.minimized));
 
 // Sessions with a live pane. Everything NOT in here is a session whose gates
 // have nowhere to render, which is exactly what GateTray picks up (DRY-50).
-// A workspace window hosts two sessions, so it contributes both.
+//
+// A workspace window hosts two sessions, but its shell pane is behind
+// `v-if="!shellCollapsed"` (WorkspacePane.vue) — a collapsed shell has no more
+// pane than a minimized window does, so claiming its gates would suppress them
+// from the tray with nothing left to show them.
 const panedSessionIds = computed(() =>
-  visible.value.flatMap((w) => (w.shellId ? [w.id, w.shellId] : [w.id])),
+  visible.value.flatMap((w) => (w.shellId && !w.shellCollapsed ? [w.id, w.shellId] : [w.id])),
 );
+
+// The tray knows session ids; wm.restore() matches window ids. Those differ for
+// a workspace's shell PTY, which has no window of its own — restore(shellId)
+// would find nothing and the button would silently do nothing.
+function openSessionWindow(sessionId: string): void {
+  const w = wm.windows.find((x) => x.id === sessionId || x.shellId === sessionId);
+  if (w) wm.restore(w.id);
+}
 
 const dockItems = computed(() =>
   wm.windows
@@ -674,7 +686,7 @@ onBeforeUnmount(() => {
         <GateTray
           :paned-session-ids="panedSessionIds"
           :sessions="Object.values(sessionsById)"
-          @open="wm.restore"
+          @open="openSessionWindow"
         />
       </div>
     </div>

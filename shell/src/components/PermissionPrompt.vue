@@ -11,7 +11,7 @@
 // it. That's what lets the pane keep its exact pre-DRY-50 appearance.
 import { ref } from "vue";
 
-defineProps<{
+const props = defineProps<{
   tool: string;
   input: unknown;
   /** Show the deny-reason field. Off in-pane, where a terminal is right there. */
@@ -29,10 +29,20 @@ function approve() {
   emit("resolve", "allow");
 }
 
-// Deny opens a field rather than firing immediately, per the Autonomous Runs
-// design: a bare denial tends to make the agent retry the identical call, so
-// the reason is what turns "no" into a redirect. The second click sends it.
+// With a reason field, deny is two-step: the first click opens the field rather
+// than firing, per the Autonomous Runs design — a bare denial tends to make the
+// agent retry the identical call, so the reason is what turns "no" into a
+// redirect.
+//
+// WITHOUT the field it must stay one click. Gating on `denying` alone made the
+// in-pane Deny button swallow its first click with nothing to show for it (the
+// field and the "Send denial" label are both behind allowReason), which is a
+// regression from the single-click deny the pane has always had.
 function deny() {
+  if (!props.allowReason) {
+    emit("resolve", "deny");
+    return;
+  }
   if (!denying.value) {
     denying.value = true;
     return;

@@ -131,11 +131,19 @@ const server = http.createServer(async (req, res) => {
       // Catch-up: every gate already waiting, from the same snapshot the
       // per-pane replay uses. A tab opened *after* a gate was raised has to
       // learn about it, otherwise "reload the page" loses an unanswered gate.
-      for (const session of manager.list()) {
-        for (const gate of session.pendingGates()) {
-          write({ type: "gate-open", sessionId: session.id, gate });
-        }
-      }
+      //
+      // Sent as one authoritative snapshot rather than a burst of gate-opens.
+      // A reconnecting client missed every gate-resolved that fired while it
+      // was away, so anything it merges into is already wrong — it has to be
+      // told the whole truth and replace what it had.
+      write({
+        type: "gate-snapshot",
+        gates: manager
+          .list()
+          .flatMap((session) =>
+            session.pendingGates().map((gate) => ({ sessionId: session.id, gate })),
+          ),
+      });
 
       const unsubscribe = manager.onGate(write);
       // Load-bearing, same class as the pg pool listener in DRY-28 and the

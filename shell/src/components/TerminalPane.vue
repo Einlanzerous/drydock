@@ -229,8 +229,12 @@ onBeforeUnmount(() => {
 
     <!-- Same component the out-of-pane tray uses (DRY-50); the pane keeps its
          own placement and answers over its own socket. -->
+    <!-- Keyed by requestId: a second gate can replace `pending` without it ever
+         going null, so without this the same instance is reused and any
+         half-entered state carries over to a decision about a different tool. -->
     <PermissionPrompt
       v-if="pending"
+      :key="pending.requestId"
       class="permission-host"
       :tool="pending.tool"
       :input="pending.input"

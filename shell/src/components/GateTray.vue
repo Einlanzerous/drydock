@@ -84,7 +84,14 @@ async function onResolve(gate: OpenGate, decision: "allow" | "deny", reason?: st
   position: fixed;
   right: 18px;
   bottom: 18px;
-  z-index: 40;
+  /* Above the dock's 9000, not in the windows' band. Window z is not a fixed
+     ceiling to clear: computeRects gives the focused window 50 in tile and
+     focus, and in float w.z starts at 30 and climbs on every spawn/focus/
+     restore, with hydrate() carrying the high-water mark across reloads. Any
+     value picked to sit "just above windows" is one the desk grows past. This
+     must outrank all of it — a gate the user cannot see is the bug DRY-50
+     exists to fix, and it would reappear as "the prompt is behind a window". */
+  z-index: 9001;
   display: flex;
   flex-direction: column;
   gap: 10px;
