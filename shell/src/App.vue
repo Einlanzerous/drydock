@@ -25,7 +25,7 @@ import {
   type SessionRecord,
 } from "./lib/daemon.js";
 import type { PermissionMode } from "./lib/protocol.js";
-import { getTrackerInfo, listTickets, type Ticket } from "./lib/tracker.js";
+import { TICKET_POLL_MS, getTrackerInfo, listTickets, type Ticket } from "./lib/tracker.js";
 import type { SessionInfo } from "./lib/protocol.js";
 
 // Persist the workspace arrangement per daemon host (DRY-14) so a reload
@@ -34,6 +34,18 @@ const wm = useWindowManager({ persistKey: DAEMON_HTTP });
 
 const tickets = ref<Ticket[]>([]);
 const providerName = ref("Switchyard");
+/**
+ * Did /api/tracker/info actually answer? (DRY-55)
+ *
+ * `providerName`'s default is optimistic on purpose (DRY-51: the name stays at
+ * its default when the call doesn't produce one), which is harmless for a
+ * header LABEL and not harmless at all in an error, where it becomes a claim
+ * about which system is down. A Jira host whose daemon is unreachable would
+ * otherwise be told "Can't reach Switchyard" — naming a tracker it has never
+ * been configured with, and sending whoever reads it somewhere that doesn't
+ * exist. When we haven't confirmed the name, the outage copy says "the tracker".
+ */
+const providerNamed = ref(false);
 
 // The host's autonomous-run policy (DRY-49). Only the launch panel uses it, and
 // only to say what "host default" actually means; a daemon that doesn't serve
@@ -124,10 +136,29 @@ let poll: ReturnType<typeof setInterval> | null = null;
 let ticketPoll: ReturnType<typeof setInterval> | null = null;
 const refreshingTickets = ref(false);
 
+/**
+ * Why the last ticket pull failed, or null while they're working (DRY-55).
+ *
+ * A tracker outage was the one daemon failure the desk absorbed in silence.
+ * Keeping the last-good list (below) is right on a REFRESH — a hiccup must not
+ * blank the sidebar — but on the first load there is no last-good list, so
+ * `tickets` stays `[]` and the sidebar renders its ordinary "No tickets match.",
+ * which is indistinguishable from a tracker that is up and genuinely has
+ * nothing in scope. With the scope chips (DRY-30) making "no tickets" a
+ * plausible state, that sends you hunting through filters and project keys for
+ * tickets that were never fetched.
+ *
+ * Owned by the 20s poll, so it's a CONDITION in the DRY-51 sense — cleared by
+ * the next success, never dismissible — which is why it also raises a notice
+ * rather than reusing `actionError`.
+ */
+const trackerError = ref<string | null>(null);
+
 // Re-pull tickets so the sidebar reflects external status changes (DRY-17).
 // Replaces the data only — TrackerSidebar keeps its own search/filter/expand
 // state, so a refresh doesn't disturb what the user is looking at. A tracker
-// hiccup keeps the last-good list rather than blanking the sidebar.
+// hiccup keeps the last-good list rather than blanking the sidebar — and since
+// DRY-55, says so, instead of letting it pass for current.
 // Epoch guard: scope changes (backlog toggle, chips) refetch immediately, so a
 // slow older request can resolve AFTER a newer one — without the guard it
 // overwrites the fresh list and the sidebar looks "stuck" on the old scope.
@@ -142,9 +173,33 @@ async function loadTickets() {
       projects: [...scopeProjects.value, ...userProjects.value],
       backlog: showBacklog.value,
     });
-    if (epoch === loadEpoch) tickets.value = list;
-  } catch {
-    /* keep last-good list */
+    if (epoch === loadEpoch) {
+      tickets.value = list;
+      trackerError.value = null;
+      clearNotice("tracker");
+    }
+  } catch (e) {
+    // Keep the last-good list, but SAY that's what's on screen (DRY-55). The
+    // two cases are worded apart on purpose: an empty sidebar is a claim to
+    // correct, whereas a populated one is real data that has merely stopped
+    // being current — and only the second is how somebody spawns an agent
+    // against a ticket that closed an hour ago.
+    //
+    // Epoch-guarded like the success path, which the old bare `catch` didn't
+    // need: a slow pull failing after a newer one succeeded must not raise an
+    // outage over a list that just arrived.
+    if (epoch === loadEpoch) {
+      trackerError.value = String(e);
+      // Never the optimistic default — see providerNamed.
+      const who = providerNamed.value ? providerName.value : "the tracker";
+      setNotice(
+        "tracker",
+        tickets.value.length
+          ? `Tickets aren't refreshing from ${who} — the sidebar is showing the last list it returned`
+          : `Tickets aren't loading from ${who} — the sidebar is empty because of that, not because nothing matched`,
+        String(e),
+      );
+    }
   } finally {
     if (epoch === loadEpoch) refreshingTickets.value = false;
   }
@@ -933,6 +988,7 @@ onMounted(async () => {
   try {
     const info = await getTrackerInfo();
     providerName.value = info.name;
+    providerNamed.value = true;
     scopeProjects.value = info.projects ?? [];
   } catch {
     // The name stays at its default when the call doesn't produce one. That
@@ -964,7 +1020,10 @@ onMounted(async () => {
   // Tickets change far less often than sessions and each fetch hits Switchyard
   // live, so poll them on a slower cadence (DRY-17). The sidebar refresh button
   // forces an immediate re-pull between ticks.
-  ticketPoll = setInterval(loadTickets, 20000);
+  // The interval is imported rather than written here because the pull's own
+  // budget is chosen against it — see LIST_TIMEOUT_MS, where the two being
+  // equal silently disables the reporting this feature is.
+  ticketPoll = setInterval(loadTickets, TICKET_POLL_MS);
 
   if (deskEl.value) {
     const r = deskEl.value.getBoundingClientRect();
@@ -1079,6 +1138,8 @@ onBeforeUnmount(() => {
         :name="providerName"
         :tickets="tickets"
         :refreshing="refreshingTickets"
+        :pull-error="trackerError"
+        :name-confirmed="providerNamed"
         :scope-projects="scopeProjects"
         :user-projects="userProjects"
         :show-backlog="showBacklog"

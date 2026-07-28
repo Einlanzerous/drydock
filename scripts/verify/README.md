@@ -3,15 +3,20 @@
 There are no automated tests in this repo; CLAUDE.md's curls are the regression
 suite. These are the part of that suite the curls can't express.
 
-Nothing here runs in CI or on install. Two groups:
+Nothing here runs in CI or on install. Three groups:
 
-- **The workspace store's partition harnesses (DRY-58)** — everything below,
-  because the claims are about **latency and recovery**, not status codes. They
-  start throwaway daemons and take a few minutes. Run them when touching
-  `daemon/src/state/` or `shell/src/composables/layoutStore.ts`.
+- **The workspace store's partition harnesses (DRY-58)** — everything from
+  [Setup](#setup) down, because the claims are about **latency and recovery**,
+  not status codes. They start throwaway daemons and take a few minutes. Run
+  them when touching `daemon/src/state/` or
+  `shell/src/composables/layoutStore.ts`.
 - **The ticket brief (DRY-53)** — [next section](#the-ticket-brief-dry-53).
   In-process, no daemon, seconds. Run them when touching
   `daemon/src/tracker/`.
+- **The tracker sidebar (DRY-55)** —
+  [its own section](#the-tracker-sidebar-dry-55), with its own rig. A browser,
+  about a minute. Run it when touching the sidebar's empty/outage states or
+  `loadTickets` in `App.vue`.
 
 ## The ticket brief (DRY-53)
 
@@ -32,6 +37,45 @@ Why a harness and not curl: the failure is silent by construction. The daemon
 sends a complete brief, the hook returns 200, and the agent quietly never sees
 the part that fell off the end — which is exactly how the first cut of DRY-53
 passed inspection while delivering none of its comments.
+
+## The tracker sidebar (DRY-55)
+
+Self-contained — its own daemon, proxy and vite, so touching the sidebar
+doesn't mean standing up the workspace-store rig below. From the repo root:
+
+```sh
+npm i playwright --prefix scripts/verify     # ad-hoc; not a repo dependency
+
+(cd daemon && DRYDOCK_PORT=4374 DRYDOCK_HOST=127.0.0.1 DRYDOCK_TRACKER=fixture \
+   DRYDOCK_STATE_FILE=/tmp/dry55-state.json node --import tsx src/index.ts &)
+node scripts/verify/proxy-tracker.mjs &                   # :4375 → :4374
+(cd shell && VITE_DAEMON_URL=http://127.0.0.1:4375 bunx vite --port 5375 --strictPort &)
+
+node scripts/verify/sidebar.mjs
+```
+
+| harness | what it holds down |
+|---|---|
+| `sidebar.mjs` | A tracker outage names itself. Before DRY-55 a first load with the tracker down rendered "No tickets match." — true of a healthy tracker with nothing in scope, and with the scope chips (DRY-30) in the same panel it reads as a filter you got wrong rather than an outage. Asserts the empty case, the **stale** case, the **hang** case and a shell newer than its daemon separately, plus that all of them end without a reload. |
+
+The hang case is the one worth explaining. A tracker that refuses connections
+fails fast; a tracker that accepts and then goes silent doesn't fail at all —
+and neither provider's `req()` carries a deadline, so the daemon's route never
+answers either. Nothing rejects, so the catch that powers every other assertion
+here never runs: the pull just never settles, the sidebar keeps saying "No
+tickets match.", and its spinner stays latched because `finally` never runs
+either. The pull's own budget (`LIST_TIMEOUT_MS`, `shell/src/lib/tracker.ts`) is
+the only thing that ends it. Same lesson as the workspace store's, one surface
+over — see the section below.
+
+Why a browser and not curl: `curl /api/tracker/tickets` returns a 502 with a
+perfectly clear error body, which is the exact state in which this shipped. The
+claim is about what the sidebar SAYS, and only a rendered page can tell "we
+couldn't ask" from "we asked and there are none".
+
+Why a second proxy rather than a mode on `proxy-http.mjs`: that one breaks the
+state store, and the two outages are independent conditions — sharing it would
+mean a path parameter on a harness three other scripts depend on.
 
 ## Workspace store: why a proxy and not `docker stop`
 
@@ -101,15 +145,36 @@ git checkout main -- shell/src/composables/layoutStore.ts \
   shell/src/composables/useWindowManager.ts shell/src/App.vue
 node scripts/verify/roam.mjs        # expect 6 failures
 git checkout HEAD -- shell/src/composables shell/src/App.vue
+
+git checkout main -- shell/src/App.vue shell/src/components/TrackerSidebar.vue \
+  shell/src/lib/tracker.ts
+node scripts/verify/sidebar.mjs     # expect failures across (a), (c), (e), (f), (g)
+git checkout HEAD -- shell/src/App.vue shell/src/components/TrackerSidebar.vue \
+  shell/src/lib/tracker.ts
 ```
 
-Vite hot-reloads, so no restart is needed between the two runs.
+Vite hot-reloads, so no restart is needed between the two runs. Give it a
+second or two to do so — a run started too soon tests the tree you just
+replaced and reports the result you were hoping for.
+
+**Commit first.** `checkout main -- <paths>` overwrites the working tree, and
+the `checkout HEAD --` that restores it only knows about the last COMMIT — so
+any uncommitted edit in those paths is gone, silently, with no stash to recover
+it from. (Written down because it happened: a round of review fixes, discarded
+by the step meant to validate them.)
+
+**Not `git stash push -- <paths>`** as the way around that. On a committed
+branch the tree is clean, so it saves nothing, exits 0, and the run you thought
+was testing `main` tests your own code and prints "all passed" — the exact false
+green this section exists to prevent. The `checkout HEAD --` at the end is also
+what puts the index back, so nothing is left staged.
 
 ## Overrides
 
 `SHELL_URL`, `DAEMON`, `PROXY` for the browser harnesses; `PROXY_PORT` /
-`TARGET_PORT` for `proxy-http.mjs`; `PG_PROXY_PORT` / `PG_PORT` / `CONTROL_PORT`
-for `proxy-tcp.mjs`; `PG_URL` / `PG_CONTAINER` for `drift.sh`.
+`TARGET_PORT` for `proxy-http.mjs` and `proxy-tracker.mjs` (`BREAK_PATH` too, if
+some other route ever needs the same treatment); `PG_PROXY_PORT` / `PG_PORT` /
+`CONTROL_PORT` for `proxy-tcp.mjs`; `PG_URL` / `PG_CONTAINER` for `drift.sh`.
 
 **`DAEMON` must point at whatever `proxy-http.mjs` forwards to.** Getting that
 wrong makes the harness assert against a different daemon than the browser is
