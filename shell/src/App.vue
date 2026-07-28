@@ -87,7 +87,15 @@ const selectedTicket = ref<Ticket | null>(null);
 // session so it lives outside wm.windows, but it draws its z from the same
 // counter so it layers against (and can be raised above) the terminals.
 const ticketZ = ref(0);
+// Two different things wear the same banner and they must not clobber each
+// other. `error` is a CONTINUING condition owned by the 3s poll: set while the
+// daemon won't answer, cleared the moment it does. An action failure is a past
+// event that nothing will re-raise — a kill that didn't take, a spawn that
+// failed — so the poll's next success must not erase it. Sharing one ref gave
+// every action error a ≤3s life, and the one dismissRun raises was wiped by the
+// refresh() on its very next line, in the same task that set it (DRY-51).
 const error = ref<string | null>(null);
+const actionError = ref<string | null>(null);
 
 // Markdown doc viewer (DRY-35): opened by Ctrl/Cmd-clicking a file token in
 // any terminal pane. Like the ticket detail it's a floating non-window (no
@@ -201,7 +209,15 @@ async function refresh() {
     reconcile(await listSessions());
     error.value = null;
   } catch (e) {
-    error.value = `Daemon unreachable — is it running on :4317? (${String(e)})`;
+    // Names the daemon it actually tried, not the dev default: this banner is
+    // what you read during a version skew, and a prod shell pointed at :4318
+    // telling you to check :4317 sends you to the wrong machine (DRY-51).
+    //
+    // It also stops asserting the daemon is unreachable. Since listSessions()
+    // checks its status, this throw now covers daemons that answered perfectly
+    // well — a 404 from a missing route, a 500 — and the getJson message that
+    // follows carries the code that tells the two apart.
+    error.value = `Can't list sessions from ${DAEMON_HTTP} (${String(e)})`;
   }
 }
 
@@ -266,7 +282,7 @@ async function spawnFresh(kind: "claude" | "shell") {
     await refresh();
     wm.bringFront(s.id);
   } catch (e) {
-    error.value = String(e);
+    actionError.value = String(e);
   }
 }
 
@@ -328,7 +344,7 @@ async function spawnWorkspace(
     await refresh();
     wm.bringFront(agent.id);
   } catch (e) {
-    error.value = String(e);
+    actionError.value = String(e);
   }
 }
 
@@ -410,7 +426,7 @@ async function spawnAutonomous(opts: {
     // and the button looked broken.
     void askToNotify();
   } catch (e) {
-    error.value = String(e);
+    actionError.value = String(e);
   }
 }
 
@@ -437,11 +453,22 @@ async function closeWindow(id: string) {
   // kill it alongside the agent so closing the window leaves nothing running.
   const w = wm.windows.find((x) => x.id === id);
   const shellId = w?.kind === "workspace" ? w.shellId : undefined;
-  try {
-    await killSession(id);
-    if (shellId) await killSession(shellId);
-  } catch (e) {
-    error.value = String(e);
+  // Both PTYs are killed independently, and the window only goes once both are
+  // actually dead. Sequential awaits meant a failed agent kill skipped the
+  // shell entirely; removing the window regardless then left a live PTY with no
+  // window, no dock entry and no way back to it — an orphan you can only find
+  // from the API (DRY-51 review). Killing is what the X promises, so if it
+  // didn't happen the window is the only handle you have left: keep it.
+  const outcomes = await Promise.allSettled([
+    killSession(id),
+    ...(shellId ? [killSession(shellId)] : []),
+  ]);
+  const failed = outcomes.filter((o) => o.status === "rejected");
+  if (failed.length) {
+    actionError.value = `Couldn't stop that session — it may still be running: ${failed
+      .map((f) => String((f as PromiseRejectedResult).reason))
+      .join("; ")}`;
+    return;
   }
   wm.remove(id);
   delete initialInputById[id];
@@ -503,7 +530,7 @@ async function takeOver(sessionId: string): Promise<void> {
     await takeOverRun(sessionId);
     await refresh();
   } catch (e) {
-    error.value = `Couldn't take over that run: ${String(e)}`;
+    actionError.value = `Couldn't take over that run: ${String(e)}`;
     return;
   }
   // restore(), not bringFront(): bringFront only bumps z and focus, so a run
@@ -522,7 +549,10 @@ async function dismissRun(sessionId: string): Promise<void> {
   try {
     await killSession(sessionId);
   } catch (e) {
-    error.value = String(e);
+    // Keep the card: dismissing it is only meaningful once the daemon has
+    // actually dropped the session, and the next poll would re-add it anyway.
+    actionError.value = `Couldn't dismiss that run: ${String(e)}`;
+    return;
   }
   wm.remove(sessionId);
   await refresh();
@@ -679,14 +709,17 @@ onMounted(async () => {
   try {
     startGateStream();
   } catch (e) {
-    error.value = `Gate stream unavailable: ${String(e)}`;
+    actionError.value = `Gate stream unavailable: ${String(e)}`;
   }
   try {
     const info = await getTrackerInfo();
     providerName.value = info.name;
     scopeProjects.value = info.projects ?? [];
   } catch {
-    /* provider name stays default if the tracker info call is unreachable */
+    // The name stays at its default when the call doesn't produce one. That
+    // only became true in DRY-51: a daemon answering 404/502 with an error body
+    // resolved this promise instead of rejecting it, so the catch never ran and
+    // `undefined` reached a template that uppercases it.
   }
   // Best-effort and never awaited-on for anything that blocks the desk: an
   // older daemon 404s here and the launch panel just names `manual`.
@@ -807,6 +840,11 @@ onBeforeUnmount(() => {
     </header>
 
     <p v-if="error" class="error">{{ error }}</p>
+    <!-- Sticky: nothing re-raises a failed action, so it waits to be read. -->
+    <p v-if="actionError" class="error">
+      {{ actionError }}
+      <button class="banner-x" title="Dismiss" @click="actionError = null">✕</button>
+    </p>
 
     <!-- BODY -->
     <div class="body">
@@ -1052,6 +1090,20 @@ onBeforeUnmount(() => {
   color: #f0c9c4;
   font-size: 12.5px;
   border-bottom: 1px solid #5c2b2b;
+}
+.banner-x {
+  float: right;
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: #f0c9c4;
+  font-size: 12px;
+  line-height: 1;
+  opacity: 0.6;
+  cursor: pointer;
+}
+.banner-x:hover {
+  opacity: 1;
 }
 .body {
   flex: 1;
