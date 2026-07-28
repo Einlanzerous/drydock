@@ -114,9 +114,15 @@ const server = http.createServer(async (req, res) => {
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
         Connection: "keep-alive",
-        // Nginx buffers text/event-stream by default, which holds events until
-        // the buffer fills — a gate would surface minutes late through the prod
-        // shell's proxy, or never (docs/deploy.md).
+        // Nginx buffers text/event-stream by default, holding events until the
+        // buffer fills — a gate would surface minutes late, or never.
+        //
+        // NB nothing proxies this today: the prod shell container serves static
+        // files only (no proxy_pass in shell/docker/nginx.conf) and the browser
+        // reaches the daemon directly on :4318 (docs/deploy.md). This is cheap
+        // insurance for the day something is put in front, not a description of
+        // the current deployment — don't go hunting a proxy on the strength of
+        // this header.
         "X-Accel-Buffering": "no",
         "Access-Control-Allow-Origin": "*",
       });
@@ -138,6 +144,7 @@ const server = http.createServer(async (req, res) => {
       // told the whole truth and replace what it had.
       write({
         type: "gate-snapshot",
+        serverNow: Date.now(),
         gates: manager
           .list()
           .flatMap((session) =>
@@ -179,7 +186,20 @@ const server = http.createServer(async (req, res) => {
     if (answerMatch && req.method === "POST") {
       const session = manager.get(decodeURIComponent(answerMatch[1]));
       if (!session) return send(res, 404, { error: "unknown session" });
-      const body = await readJson(req);
+      // This route's contract is 400/404/409, so neither a parse failure nor a
+      // body of literal `null` may escape as a 500 with a raw stack — `null`
+      // parses fine and only becomes a TypeError at `body.decision`. Same trap
+      // documented on /api/workspace below; the guard belongs on every route
+      // that reaches into a parsed body.
+      let body: any;
+      try {
+        body = await readJson(req);
+      } catch (err) {
+        return send(res, 400, { error: `invalid JSON body: ${String(err)}` });
+      }
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return send(res, 400, { error: "body must be a JSON object" });
+      }
       const decision = body.decision;
       if (decision !== "allow" && decision !== "deny") {
         return send(res, 400, { error: "decision must be 'allow' or 'deny'" });

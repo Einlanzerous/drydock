@@ -83,9 +83,13 @@ export function eventsUrl(): string {
  * the whole point: a minimized window has no socket, so the WebSocket path
  * cannot answer for it.
  *
- * A 409 means the gate was already resolved — answered from a pane, timed out,
- * or the session exited underneath us. That's a race, not a failure, so it
- * resolves quietly; the stream's gate-resolved event is what clears the UI.
+ * 409 (gate already resolved) and 404 (session already gone) both mean the same
+ * thing to a caller: there is nothing left to answer. Neither is a failure to
+ * retry or restore from. 404 is routinely reachable — the kill route calls
+ * manager.remove(), which drops the session from the registry synchronously,
+ * before the PTY's onExit has announced its dangling gates — so treating it as
+ * an error puts back a row that can never be answered and re-fails on every
+ * subsequent click.
  */
 export async function answerGate(
   sessionId: string,
@@ -101,7 +105,7 @@ export async function answerGate(
       body: JSON.stringify({ requestId, decision, reason }),
     },
   );
-  if (!res.ok && res.status !== 409) {
+  if (!res.ok && res.status !== 409 && res.status !== 404) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error ?? `daemon returned ${res.status}`);
   }

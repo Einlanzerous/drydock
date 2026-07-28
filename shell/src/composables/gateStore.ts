@@ -14,7 +14,7 @@ import type { EventMessage, PendingGate } from "../lib/protocol.js";
  * The fix is a subscription whose lifetime is the *shell's*, not a pane's. One
  * EventSource per tab carries every session's gates, so a gate survives its
  * window being minimized, and a tab opened after the gate was raised still
- * learns about it (the daemon replays what's pending on connect).
+ * learns about it.
  *
  * Module-scoped singleton on purpose: two EventSources would double every gate
  * and race each other's answers.
@@ -26,91 +26,161 @@ export interface OpenGate extends PendingGate {
 }
 
 const gates = ref<OpenGate[]>([]);
+const answering = ref<string[]>([]);
+const connected = ref(false);
+
+/**
+ * Daemon clock minus browser clock. `requestedAt` is stamped daemon-side and
+ * config.ts binds 0.0.0.0 precisely so the browser can be on another machine;
+ * without this correction held-time reports the skew between two boxes, and
+ * pins at 0:00 whenever the browser's clock is behind.
+ */
+const skewMs = ref(0);
+
 let source: EventSource | null = null;
+let retry: ReturnType<typeof setTimeout> | null = null;
+let backoffMs = 1000;
+let stopped = true;
 
 /** Oldest first, matching the daemon's insertion order. */
 export const openGates = computed(() => gates.value);
+
+/** False while the stream is down — the UI has to say so; see startGateStream. */
+export const gatesConnected = computed(() => connected.value);
+
+/** Gates whose answer is in flight; their controls disable rather than vanish. */
+export function isAnswering(requestId: string): boolean {
+  return answering.value.includes(requestId);
+}
+
+/** How long a gate has waited, measured against the daemon's clock. */
+export function heldMs(gate: OpenGate, now: number): number {
+  return Math.max(0, now + skewMs.value - gate.requestedAt);
+}
+
+// --- which sessions currently have a pane -----------------------------------
+// Observed, not derived. Inferring it from window state means restating every
+// condition App.vue renders a pane under (visible, not minimized, not a
+// collapsed workspace shell, session present in sessionsById…) and getting it
+// silently wrong each time one is added — the failure being a gate suppressed
+// from the tray with no pane showing it either. The pane itself is the only
+// thing that knows. Refcounted because two can briefly overlap across a
+// re-mount.
+const paneRefs = ref<Record<string, number>>({});
+
+export function claimPane(sessionId: string): void {
+  paneRefs.value = { ...paneRefs.value, [sessionId]: (paneRefs.value[sessionId] ?? 0) + 1 };
+}
+
+export function releasePane(sessionId: string): void {
+  const next = { ...paneRefs.value };
+  const count = (next[sessionId] ?? 0) - 1;
+  if (count > 0) next[sessionId] = count;
+  else delete next[sessionId];
+  paneRefs.value = next;
+}
+
+/** Gates no mounted pane is showing — precisely what the tray is for. */
+export const orphanGates = computed(() => gates.value.filter((g) => !paneRefs.value[g.sessionId]));
 
 function onEvent(event: EventMessage): void {
   switch (event.type) {
     case "gate-snapshot":
       // REPLACE, never merge. Every reconnect delivers one of these, and the
-      // gates it omits are gates that were resolved while the stream was down
-      // — their gate-resolved events went to a socket that no longer existed.
-      // Merging would strand them here forever, held-time climbing, attached
-      // to sessions the poll has already dropped. Under the dev daemon's
-      // --watch restarts that is the normal path, not an edge case.
+      // gates it omits are gates resolved while the stream was down — their
+      // gate-resolved events went to a socket that no longer existed. Merging
+      // strands them here forever, held-time climbing, attached to sessions the
+      // poll has already dropped.
+      skewMs.value = event.serverNow - Date.now();
       gates.value = event.gates.map((g) => ({ sessionId: g.sessionId, ...g.gate }));
       return;
     case "gate-open":
-      // Deduped by requestId: a gate present in the snapshot must not double
-      // if a gate-open for it also races in.
       if (gates.value.some((g) => g.requestId === event.gate.requestId)) return;
       gates.value = [...gates.value, { sessionId: event.sessionId, ...event.gate }];
       return;
     case "gate-resolved":
       gates.value = gates.value.filter((g) => g.requestId !== event.requestId);
+      answering.value = answering.value.filter((id) => id !== event.requestId);
       return;
   }
 }
 
 /**
- * Open the stream. Idempotent — safe to call from more than one component.
+ * Open the stream, and keep it open. Idempotent.
  *
- * EventSource reconnects on its own, which is most of why SSE was chosen here;
- * `onerror` fires on every transient drop as well as a dead daemon, so it only
- * flags the connection state rather than tearing anything down.
+ * EventSource only retries when a live connection *drops*. Per spec it FAILS
+ * the connection — readyState CLOSED, no retry timer, ever — when the response
+ * is non-2xx or isn't `text/event-stream`. Both are reachable: a shell newer
+ * than its daemon (independent GHCR image vs. pinned checkout) hits the
+ * daemon's `404 {error}` fallthrough, which is application/json, and a fronting
+ * proxy's 502 does the same. Left to the browser, that tab silently never sees
+ * another gate — DRY-50's exact failure, restored.
  */
 export function startGateStream(): void {
+  stopped = false;
   if (source) return;
-  source = new EventSource(eventsUrl());
-  source.onmessage = (e) => {
+  const es = new EventSource(eventsUrl());
+  source = es;
+
+  es.onopen = () => {
+    connected.value = true;
+    backoffMs = 1000;
+  };
+  es.onmessage = (e) => {
     try {
       onEvent(JSON.parse(e.data) as EventMessage);
     } catch {
       /* a frame we can't parse is not worth killing the stream over */
     }
   };
-  // EventSource reconnects on its own — nothing to do here but decline to tear
-  // the stream down over a transient drop. The gate-snapshot on the next
-  // successful connect is what puts this client back in sync.
-  source.onerror = () => {};
+  es.onerror = () => {
+    connected.value = false;
+    // CLOSED means the browser has given up permanently; any other state is its
+    // own retry already in flight, which must not be duplicated.
+    if (es.readyState !== EventSource.CLOSED || stopped) return;
+    es.close();
+    if (source === es) source = null;
+    if (retry) clearTimeout(retry);
+    retry = setTimeout(() => {
+      retry = null;
+      if (!stopped) startGateStream();
+    }, backoffMs);
+    backoffMs = Math.min(backoffMs * 2, 30_000);
+  };
 }
 
 export function stopGateStream(): void {
+  stopped = true;
+  if (retry) clearTimeout(retry);
+  retry = null;
   source?.close();
   source = null;
+  connected.value = false;
   gates.value = [];
+  answering.value = [];
 }
 
 /**
  * Answer a gate from outside a pane.
  *
- * Drops it locally before the request settles so the click feels decided, then
- * puts it back if the answer never landed. The gate must reappear: a failed
- * POST does not drop the SSE stream, so there is no reconnect coming to replay
- * it — the gate would simply vanish from the UI while the agent stayed blocked
- * for the full permissionTimeoutMs with nothing to explain why.
- *
- * Restored at its original index so a pending queue keeps its order (the UI
- * numbers gates "1 of 2").
+ * The row is marked in-flight rather than removed. Removing it optimistically
+ * unmounts the prompt and destroys any deny reason typed into it, so a failed
+ * answer brought the row back blank — the user's words gone, with nothing but a
+ * console line to show for it. Removal on success is immediate because
+ * answerGate treats 404/409 as "already gone"; otherwise the daemon's
+ * gate-resolved is the authority.
  */
 export async function resolveGate(
   gate: OpenGate,
   decision: "allow" | "deny",
   reason?: string,
 ): Promise<void> {
-  const index = gates.value.findIndex((g) => g.requestId === gate.requestId);
-  if (index === -1) return; // already resolved by another surface
-  gates.value = gates.value.filter((g) => g.requestId !== gate.requestId);
+  if (isAnswering(gate.requestId)) return;
+  answering.value = [...answering.value, gate.requestId];
   try {
     await answerGate(gate.sessionId, gate.requestId, decision, reason);
-  } catch (err) {
-    if (!gates.value.some((g) => g.requestId === gate.requestId)) {
-      const restored = [...gates.value];
-      restored.splice(index, 0, gate);
-      gates.value = restored;
-    }
-    throw err;
+    gates.value = gates.value.filter((g) => g.requestId !== gate.requestId);
+  } finally {
+    answering.value = answering.value.filter((id) => id !== gate.requestId);
   }
 }

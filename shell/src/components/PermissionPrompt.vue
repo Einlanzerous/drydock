@@ -16,6 +16,8 @@ const props = defineProps<{
   input: unknown;
   /** Show the deny-reason field. Off in-pane, where a terminal is right there. */
   allowReason?: boolean;
+  /** An answer is in flight — disable, don't unmount (that would eat the reason). */
+  busy?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -68,8 +70,10 @@ function deny() {
     </div>
 
     <div class="permission-actions">
-      <button class="approve" @click="approve">Approve</button>
-      <button class="deny" @click="deny">
+      <button class="approve" :disabled="busy" @click="approve">
+        {{ busy ? "Sending…" : "Approve" }}
+      </button>
+      <button class="deny" :disabled="busy" @click="deny">
         {{ allowReason && denying ? "Send denial" : "Deny" }}
       </button>
     </div>
@@ -135,6 +139,10 @@ function deny() {
   font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
+}
+.permission-actions button:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 .approve {
   background: #2a6db0;

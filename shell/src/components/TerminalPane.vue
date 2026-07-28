@@ -3,6 +3,7 @@ import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { Terminal, type ILink } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { attachUrl } from "../lib/daemon.js";
+import { claimPane, releasePane } from "../composables/gateStore.js";
 import PermissionPrompt from "./PermissionPrompt.vue";
 import type { ClientMessage, ServerMessage, SessionInfo } from "../lib/protocol.js";
 
@@ -62,6 +63,13 @@ let sentInitial = false;
 
 const connected = ref(false);
 const pending = ref<{ requestId: string; tool: string; input: unknown } | null>(null);
+
+// Claimed for the life of this pane. While it's mounted this session's gates
+// render here, so the shell-wide tray must not also show them; once it goes,
+// the tray is the only surface left (DRY-50). Claimed at setup rather than in
+// onMounted, which awaits font loading first — a gate arriving in that gap
+// would otherwise belong to neither surface.
+claimPane(props.session.id);
 
 // DRY-41: a dead PTY's pane is otherwise a frozen frame of whatever the CLI
 // last drew (often claude's slash menu after /exit) — indistinguishable from a
@@ -209,6 +217,9 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  // Release before the socket closes: from here on this session's gates have
+  // nowhere to render but the tray (DRY-50).
+  releasePane(props.session.id);
   resizeObserver?.disconnect();
   ws.value?.close();
   term.value?.dispose();

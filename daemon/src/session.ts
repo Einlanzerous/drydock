@@ -6,6 +6,7 @@ import { CONFIG } from "./config.js";
 import { CLAUDE_SETTINGS_PATH } from "./hooks.js";
 import { log } from "./log.js";
 import type {
+  EventMessage,
   PendingGate,
   PermissionDecision,
   ServerMessage,
@@ -76,14 +77,8 @@ interface PendingPermission {
  */
 export type GateNotifier = (event: GateEvent) => void;
 
-export type GateEvent =
-  | { type: "gate-open"; sessionId: string; gate: PendingGate }
-  | {
-      type: "gate-resolved";
-      sessionId: string;
-      requestId: string;
-      decision: PermissionDecision | "timeout";
-    };
+/** Derived, not restated: these ARE the stream's gate variants. */
+export type GateEvent = Extract<EventMessage, { type: "gate-open" | "gate-resolved" }>;
 
 /**
  * One terminal session. The daemon — not any client — owns the PTY master for
@@ -195,8 +190,10 @@ export class PtySession {
     // with a held-time ticking up forever (DRY-50).
     for (const [requestId, p] of this.pending) {
       clearTimeout(p.timer);
-      this.broadcast({ type: "permission-resolved", requestId, decision: "timeout" });
-      this.notifyGate({ type: "gate-resolved", sessionId: this.id, requestId, decision: "timeout" });
+      this.announceGate(
+        { type: "permission-resolved", requestId, decision: "timeout" },
+        { type: "gate-resolved", sessionId: this.id, requestId, decision: "timeout" },
+      );
       p.resolve({ decision: "timeout" });
       this.pending.delete(requestId);
     }
@@ -231,6 +228,19 @@ export class PtySession {
    * copies of "what does a newly-arrived client need to know" is exactly how
    * one surface ends up showing a gate the other has already forgotten.
    */
+  /**
+   * Announce a gate change to BOTH surfaces at once.
+   *
+   * Panes and the shell-wide stream have to agree, and leaving that to four
+   * call sites remembering two lines each is how onExit() came to resolve its
+   * dangling gates while telling the stream nothing — a gate rendered forever
+   * for a dead process. One method, so the pairing is structural.
+   */
+  private announceGate(msg: ServerMessage, event: GateEvent): void {
+    this.broadcast(msg);
+    this.notifyGate(event);
+  }
+
   pendingGates(): PendingGate[] {
     return [...this.pending].map(([requestId, p]) => ({
       requestId,
@@ -313,18 +323,19 @@ export class PtySession {
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
-        this.broadcast({ type: "permission-resolved", requestId, decision: "timeout" });
-        this.notifyGate({ type: "gate-resolved", sessionId: this.id, requestId, decision: "timeout" });
+        this.announceGate(
+          { type: "permission-resolved", requestId, decision: "timeout" },
+          { type: "gate-resolved", sessionId: this.id, requestId, decision: "timeout" },
+        );
         resolve({ decision: "timeout" });
       }, CONFIG.permissionTimeoutMs);
 
       this.pending.set(requestId, { tool, input, requestedAt, resolve, timer });
       const gate: PendingGate = { requestId, tool, input, requestedAt };
-      // Both surfaces, always together. broadcast() reaches attached panes;
-      // notifyGate() reaches the shell-wide stream, which is the only one that
-      // exists when this session's window is minimized (DRY-50).
-      this.broadcast({ type: "permission-request", ...gate });
-      this.notifyGate({ type: "gate-open", sessionId: this.id, gate });
+      this.announceGate(
+        { type: "permission-request", ...gate },
+        { type: "gate-open", sessionId: this.id, gate },
+      );
     });
   }
 
@@ -333,8 +344,10 @@ export class PtySession {
     if (!p) return false;
     clearTimeout(p.timer);
     this.pending.delete(requestId);
-    this.broadcast({ type: "permission-resolved", requestId, decision });
-    this.notifyGate({ type: "gate-resolved", sessionId: this.id, requestId, decision });
+    this.announceGate(
+      { type: "permission-resolved", requestId, decision },
+      { type: "gate-resolved", sessionId: this.id, requestId, decision },
+    );
     p.resolve({ decision, reason });
     return true;
   }

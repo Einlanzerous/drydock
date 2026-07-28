@@ -70,7 +70,18 @@ export type EventMessage =
    * held-time ticking up. The dev daemon runs under `--watch` and restarts on
    * every save, so that outage is the common case, not the exotic one.
    */
-  | { type: "gate-snapshot"; gates: { sessionId: string; gate: PendingGate }[] }
+  | {
+      type: "gate-snapshot";
+      /**
+       * The daemon's clock at send. `requestedAt` is stamped daemon-side, and
+       * the browser may be on another machine entirely (config.ts binds
+       * 0.0.0.0 for exactly that), so a client subtracting its own Date.now()
+       * reports the clock skew as held-time. Held-time is the signal a wedge
+       * is read from, so it has to be measured against one clock.
+       */
+      serverNow: number;
+      gates: { sessionId: string; gate: PendingGate }[];
+    }
   | { type: "gate-open"; sessionId: string; gate: PendingGate }
   | {
       type: "gate-resolved";
