@@ -216,10 +216,10 @@ Two things that are easy to assume and wrong:
   one pull-and-run command with isolation, and a database container coming up
   beside it is entirely normal. The no-database tier is about zero setup, not
   about being containerless.
-- **Process durability isn't what the database buys.** A session outliving the
-  client that opened it is free in both tiers — that's the daemon holding the
-  PTY master, not the store. (A session outliving the *daemon* is DRY-57 and
-  isn't built yet, in either tier.)
+- **Process durability isn't what the database buys.** How long a session lives
+  is a property of how the daemon owns its PTYs, and it is identical in both
+  tiers — whatever survives, survives without a database, and adding one buys
+  none of it.
 
 What the file tier can't do: it's local to one host and it holds exactly one
 desk per workspace name — there's nothing to query, nothing retained about
@@ -240,9 +240,10 @@ cost you a running agent.
 
 It also recovers on its own. The shell retries in the background (5s out to 30s)
 and flushes whatever you arranged during the outage the moment the store is back
-— no page reload, no daemon restart, and a restart is precisely what would kill
-every live PTY. While it lasts, the desk says so once, quietly, and the line
-clears itself when it stops being true.
+— no page reload, and no daemon restart, which is the point: a restart is the
+most disruptive thing you can do to a host full of running agents, and needing
+one to recover a window position would be absurd. While it lasts, the desk says
+so once, quietly, and the line clears itself when it stops being true.
 
 If two clients disagree — the outage started before this browser ever read the
 daemon's copy, and both have a desk — whoever actually *arranged* one wins. A

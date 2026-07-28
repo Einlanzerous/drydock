@@ -41,9 +41,9 @@ depend on, point `DRYDOCK_DATABASE_URL` at a Postgres in that same `.env` — th
 README's two tiers, and this is the tier that side is written for. The daemon
 migrates its own schema on first use and treats an unreachable database as
 degraded rather than fatal, so adding one cannot turn a database outage into a
-daemon that won't start; it recovers on its own, without the restart that would
-cost every live PTY. Note prod and dev must not share a state file: the default
-carries the port for exactly that reason.
+daemon that won't start; it recovers on its own, without needing you to bounce a
+host full of running agents. Note prod and dev must not share a state file: the
+default carries the port for exactly that reason.
 
 Two operational notes if you do point it at a database:
 
