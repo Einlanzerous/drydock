@@ -174,11 +174,13 @@ export async function resolveGate(
   gate: OpenGate,
   decision: "allow" | "deny",
   reason?: string,
+  /** "Always allow <Tool>" — tool- and session-scoped, expires with the run. */
+  always?: boolean,
 ): Promise<void> {
   if (isAnswering(gate.requestId)) return;
   answering.value = [...answering.value, gate.requestId];
   try {
-    await answerGate(gate.sessionId, gate.requestId, decision, reason);
+    await answerGate(gate.sessionId, gate.requestId, decision, reason, always);
     gates.value = gates.value.filter((g) => g.requestId !== gate.requestId);
   } finally {
     answering.value = answering.value.filter((id) => id !== gate.requestId);

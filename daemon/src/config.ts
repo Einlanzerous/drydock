@@ -31,6 +31,34 @@ function num(raw: string | undefined, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+/**
+ * Permission modes a spawn may ask for (DRY-49).
+ *
+ * `manual` is the CLI's own no-flag default — verified: a `claude` spawned with
+ * no `--permission-mode` reports "manual mode on". It is represented here so a
+ * host and a launch panel can *name* the safe posture, but it is passed by
+ * OMITTING the flag rather than sending it, which keeps the common path
+ * byte-identical to what shipped and can't break if the CLI renames it.
+ *
+ * The rest are passed through to `--permission-mode` verbatim. The list is a
+ * whitelist, not documentation: an unrecognised value from a request must not
+ * reach a spawn argument.
+ */
+export type PermissionMode =
+  | "manual"
+  | "acceptEdits"
+  | "auto"
+  | "bypassPermissions"
+  | "dontAsk";
+
+export const PERMISSION_MODES = new Set<string>([
+  "manual",
+  "acceptEdits",
+  "auto",
+  "bypassPermissions",
+  "dontAsk",
+]);
+
 /** Read once: the default log path is per-port so concurrent daemons don't share a file. */
 const PORT = Number(process.env.DRYDOCK_PORT ?? 4317);
 
@@ -178,6 +206,67 @@ export const CONFIG = {
    * CLI never silently falls back to its TUI prompt.
    */
   permissionTimeoutMs: Number(process.env.DRYDOCK_PERMISSION_TIMEOUT_MS ?? 300_000),
+
+  /**
+   * Autonomous runs (DRY-49) — a session nobody is looking at.
+   */
+  autonomous: {
+    /**
+     * How much an unattended run is allowed to do without asking (DRY-49).
+     *
+     *   manual      every gated tool raises a Drydock gate. Safest, and the
+     *               most interruptive: a run touching twelve files asks twelve
+     *               times unless you use "Always allow <Tool>".
+     *   acceptEdits file edits pass silently; Bash and WebFetch still gate.
+     *               The middle: an isolated worktree makes edits cheap to
+     *               review after the fact, while the tools that reach OUT of it
+     *               still stop and ask.
+     *   auto        nothing gates at all (likewise bypassPermissions/dontAsk).
+     *               The rail becomes a progress display: it can still tell you
+     *               a run failed, but it will never ask you anything.
+     *
+     * Ships as `manual` because that's the posture the rail was built for, and
+     * a looser default should be a decision somebody made rather than one they
+     * inherited. Flip it here once you trust your runs; the launch panel can
+     * also override it per run.
+     */
+    permissionMode: PERMISSION_MODES.has(process.env.DRYDOCK_AUTONOMOUS_PERMISSION_MODE ?? "")
+      ? (process.env.DRYDOCK_AUTONOMOUS_PERMISSION_MODE as PermissionMode)
+      : ("manual" as PermissionMode),
+    /**
+     * How long an AUTONOMOUS run holds a gate. An hour, not the supervised
+     * 300s, because the premise is that you walked away: five minutes is the
+     * length of a coffee, and the point of the rail is that a gate can wait
+     * out a meeting.
+     *
+     * This deliberately EXCEEDS Claude Code's own hook timeout (~600s), which
+     * inverts the rule the supervised path lives by. That's safe only because
+     * the autonomous timeout never resolves `"timeout"` — it denies with a
+     * reason (see session.ts). The CLI's fallback is a TUI prompt inside a PTY
+     * no human is watching, which is the exact wedge this ticket exists to
+     * remove; if the hook gives up first, the run is already over and the deny
+     * lands on a request nobody is waiting for.
+     */
+    permissionTimeoutMs: num(process.env.DRYDOCK_AUTONOMOUS_PERMISSION_TIMEOUT_MS, 3_600_000),
+    /**
+     * Where a finished run's handoff document is written. This has to outlive
+     * the run: the tracker comment tells a human to continue from it, and the
+     * alternative — a ~1 MiB scrollback ring buffer inside a dead session — is
+     * gone the moment the daemon restarts.
+     */
+    runsRoot: process.env.DRYDOCK_RUNS_ROOT ?? "~/.drydock/runs",
+    /**
+     * Public URL of the shell, used only to add a "pick it up here" link to
+     * the tracker comment. Unset by default and simply omitted when unset: the
+     * daemon knows its own host and port but has no idea where the shell is
+     * served from (dev :5320, prod :5321, possibly another host entirely), and
+     * a guessed link in a permanent ticket comment is worse than no link.
+     *
+     * NB the design's `drydock://resume/<KEY>` is deliberately not used — no
+     * handler for that scheme exists on any platform we run on.
+     */
+    shellUrl: process.env.DRYDOCK_SHELL_URL || undefined,
+  },
 
   /**
    * Issue-tracker backend for the sidebar + Ctrl+K palette (DRY-10). Defaults

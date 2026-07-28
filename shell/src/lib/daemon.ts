@@ -1,4 +1,4 @@
-import type { SessionInfo } from "./protocol.js";
+import type { PermissionMode, SessionInfo } from "./protocol.js";
 
 // The daemon runs on the same host that served this shell, on the fixed daemon
 // port — so the shell works whether it's loaded from localhost or over the
@@ -52,6 +52,22 @@ export async function createSession(opts: {
   /** Override the branch checked out in the worktree (default `agent/<TICKET>`). */
   branch?: string;
   title?: string;
+  /** Run unattended: a rail card instead of a window, hour-long gates (DRY-49). */
+  autonomous?: boolean;
+  /** Who started it. Only the browser sends spawns today, so only "you". */
+  origin?: "you" | "agent";
+  /**
+   * How much this run may do without asking. Omit to take the host's policy —
+   * which for an autonomous run is DRYDOCK_AUTONOMOUS_PERMISSION_MODE, not
+   * necessarily `manual`.
+   */
+  permissionMode?: PermissionMode;
+  /**
+   * First prompt, typed AND submitted by the daemon once the CLI settles.
+   * Autonomous runs must use this rather than `initialInput` on a pane: there
+   * is no pane, so nothing else would ever type it.
+   */
+  input?: string;
 }): Promise<SessionInfo> {
   const res = await fetch(`${DAEMON_HTTP}/api/sessions`, {
     method: "POST",
@@ -72,6 +88,27 @@ export function attachUrl(id: string): string {
 }
 
 // --- Permission gates, independent of any pane (DRY-50) ---
+
+/** Host policy the launch panel needs to describe what a run will start as. */
+export interface DaemonConfig {
+  autonomous: { permissionMode: PermissionMode; permissionTimeoutMs: number };
+}
+
+/**
+ * Read the host's autonomous-run policy. Best-effort by design: a daemon older
+ * than this shell 404s here, and the panel simply falls back to naming `manual`
+ * — it must never stop you launching a run.
+ */
+export async function fetchConfig(): Promise<DaemonConfig | null> {
+  try {
+    const res = await fetch(`${DAEMON_HTTP}/api/config`, { signal: AbortSignal.timeout(3000) });
+    if (!res.ok) return null;
+    const body = await res.json();
+    return body?.autonomous?.permissionMode ? (body as DaemonConfig) : null;
+  } catch {
+    return null;
+  }
+}
 
 /** The shell-wide event stream. One per tab, not one per session. */
 export function eventsUrl(): string {
@@ -96,16 +133,38 @@ export async function answerGate(
   requestId: string,
   decision: "allow" | "deny",
   reason?: string,
+  /** Stop gating this tool for the rest of the run ("Always allow Bash", DRY-49). */
+  always?: boolean,
 ): Promise<void> {
   const res = await fetch(
     `${DAEMON_HTTP}/api/sessions/${encodeURIComponent(sessionId)}/permission`,
     {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ requestId, decision, reason }),
+      body: JSON.stringify({ requestId, decision, reason, always }),
     },
   );
   if (!res.ok && res.status !== 409 && res.status !== 404) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error ?? `daemon returned ${res.status}`);
+  }
+}
+
+/**
+ * Take over an autonomous run: it becomes an ordinary supervised session and
+ * leaves the rail (DRY-49). One-way — the daemon refuses the reverse, so
+ * there's no parameter to get wrong here.
+ */
+export async function takeOverRun(sessionId: string): Promise<void> {
+  const res = await fetch(
+    `${DAEMON_HTTP}/api/sessions/${encodeURIComponent(sessionId)}/autonomy`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ autonomous: false }),
+    },
+  );
+  if (!res.ok) {
     const body = await res.json().catch(() => ({}));
     throw new Error(body.error ?? `daemon returned ${res.status}`);
   }

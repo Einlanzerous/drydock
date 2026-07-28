@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import TerminalPane from "./components/TerminalPane.vue";
 import WorkspacePane from "./components/WorkspacePane.vue";
 import MarkdownPane from "./components/MarkdownPane.vue";
@@ -7,11 +7,20 @@ import WindowFrame from "./components/WindowFrame.vue";
 import TrackerSidebar from "./components/TrackerSidebar.vue";
 import TicketDetail from "./components/TicketDetail.vue";
 import QuickLaunch from "./components/QuickLaunch.vue";
-import Dock from "./components/Dock.vue";
-import GateTray from "./components/GateTray.vue";
+import RunRail from "./components/RunRail.vue";
 import { openGates, startGateStream, stopGateStream } from "./composables/gateStore.js";
+import { askToNotify, notifyGate, useAttention } from "./composables/attention.js";
+import { runState } from "./composables/runState.js";
 import { useWindowManager, type LayoutMode, type Win } from "./composables/useWindowManager.js";
-import { DAEMON_HTTP, createSession, killSession, listSessions } from "./lib/daemon.js";
+import {
+  DAEMON_HTTP,
+  createSession,
+  fetchConfig,
+  killSession,
+  listSessions,
+  takeOverRun,
+} from "./lib/daemon.js";
+import type { PermissionMode } from "./lib/protocol.js";
 import { getTrackerInfo, listTickets, type Ticket } from "./lib/tracker.js";
 import type { SessionInfo } from "./lib/protocol.js";
 
@@ -21,6 +30,11 @@ const wm = useWindowManager({ persistKey: DAEMON_HTTP });
 
 const tickets = ref<Ticket[]>([]);
 const providerName = ref("Switchyard");
+
+// The host's autonomous-run policy (DRY-49). Only the launch panel uses it, and
+// only to say what "host default" actually means; a daemon that doesn't serve
+// /api/config leaves it undefined and the panel names `manual`.
+const hostRunMode = ref<PermissionMode | undefined>(undefined);
 
 // Tracker pull scope (DRY-30). Host defaults come from /api/tracker/info
 // (DRYDOCK_TRACKER_PROJECTS — fixed chips); user-added keys and the backlog
@@ -156,6 +170,12 @@ function reconcile(list: SessionInfo[]) {
     // A workspace's shell PTY is rendered inside its workspace window, not as a
     // window of its own — don't cascade-add a standalone terminal for it.
     if (claimed.has(s.id)) continue;
+    // An autonomous run's home is the rail, not the desk (DRY-49). Without this
+    // the very next poll would hand every unattended run a window, which is the
+    // one thing the whole feature exists to avoid. Watching one adds a window
+    // deliberately (openRun); reconcile then leaves it alone, because a window
+    // for it already exists.
+    if (s.autonomous && !wm.windows.find((w) => w.id === s.id)) continue;
     if (!wm.windows.find((w) => w.id === s.id)) {
       wm.add({
         id: s.id,
@@ -276,8 +296,11 @@ async function spawnWorkspace(
       // DRY-15: isolate the agent in its own worktree (or opt out via `false`).
       worktree: opts.worktree,
       branch: opts.branch,
-      // Ticket-driven spawns can opt into hands-off "auto" permission mode.
-      args: opts.auto ? ["--permission-mode", "auto"] : undefined,
+      // Ticket-driven spawns can opt into hands-off "auto" permission mode
+      // (DRY-22). Sent as `permissionMode` rather than raw args since DRY-49,
+      // so the value is whitelisted daemon-side before it becomes part of a
+      // command line — same behaviour, one validated path.
+      permissionMode: opts.auto ? "auto" : undefined,
     });
     // Co-locate the human's shell in the agent's *resolved* cwd — which is the
     // worktree when isolated — so both panes start in exactly the same directory.
@@ -334,9 +357,61 @@ function onSendTicket(payload: {
   worktree: string | false;
   branch?: string;
   auto: boolean;
+  autonomous?: boolean;
+  permissionMode?: PermissionMode;
 }) {
   selectedTicket.value = null;
-  void spawnWorkspace(payload);
+  if (payload.autonomous) void spawnAutonomous(payload);
+  else void spawnWorkspace(payload);
+}
+
+/**
+ * Launch a run with no window (DRY-49).
+ *
+ * Deliberately NOT spawnWorkspace with a flag. A workspace is a window binding
+ * two PTYs — an agent and a co-located zsh for the human sitting in front of
+ * it. An unattended run has neither a human nor a window, so the second PTY
+ * would be a shell nobody can reach, kept alive for the length of the run.
+ *
+ * The prompt goes to the DAEMON rather than into `initialInputById`: that seed
+ * is typed by TerminalPane when its socket opens, and there is no pane here to
+ * open one. This is the one spawn path where the agent's first message is the
+ * daemon's job.
+ */
+async function spawnAutonomous(opts: {
+  ticket: Ticket;
+  prompt: string;
+  cwd: string;
+  worktree: string | false;
+  branch?: string;
+  permissionMode?: PermissionMode;
+}) {
+  try {
+    await createSession({
+      command: "claude",
+      title: opts.ticket.key,
+      cwd: opts.cwd,
+      repo: opts.ticket.repo,
+      ticket: opts.ticket.key,
+      worktree: opts.worktree,
+      branch: opts.branch,
+      autonomous: true,
+      origin: "you",
+      // Undefined means "let the host decide" — the daemon applies
+      // DRYDOCK_AUTONOMOUS_PERMISSION_MODE rather than the shell guessing.
+      permissionMode: opts.permissionMode,
+      input: opts.prompt,
+    });
+    await refresh();
+    // AFTER the spawn, and not awaited. Notification.requestPermission()
+    // resolves only when the user answers, and Chrome's permission chip can sit
+    // there unanswered indefinitely — awaited before createSession, the
+    // first-ever autonomous launch in a browser profile simply never happened
+    // and the button looked broken.
+    void askToNotify();
+  } catch (e) {
+    error.value = String(e);
+  }
 }
 
 // Seed consumed once: TerminalPane fires this after typing the pre-filled prompt,
@@ -349,6 +424,15 @@ function onInitialSent(id: string) {
 // the still-alive daemon session and re-adds the window (and the pane re-typed
 // the seed) — minimize→dock is the "keep running" path, the X means done.
 async function closeWindow(id: string) {
+  // Closing a WATCHED run's window stops watching it; it does not end the run
+  // (DRY-49). The X means "done with this window", and for an autonomous run
+  // the window was only ever a viewport onto something whose home is the rail —
+  // killing the session here would make looking at a run the way you destroy
+  // it. Take over first if you want the X to mean what it usually means.
+  if (sessionsById[id]?.autonomous) {
+    wm.remove(id);
+    return;
+  }
   // A workspace also owns a co-located shell PTY with no window of its own —
   // kill it alongside the agent so closing the window leaves nothing running.
   const w = wm.windows.find((x) => x.id === id);
@@ -382,9 +466,74 @@ function openSessionWindow(sessionId: string): void {
   if (w) wm.restore(w.id);
 }
 
+// --- the rail (DRY-49) ------------------------------------------------------
+// UNDERWAY is derived from the DAEMON's session list, not from anything the
+// desk remembers. That's what makes a run survive a reload without being in the
+// workspace payload: it is autonomous because /api/sessions says so.
+const autonomousRuns = computed(() => sessionList.value.filter((s) => s.autonomous));
+
+/** Autonomous runs that also have a window open — "watched", per the design. */
+const watchedIds = computed(() =>
+  autonomousRuns.value.filter((s) => wm.windows.some((w) => w.id === s.id)).map((s) => s.id),
+);
+
+/** Watch: a window, while the run stays autonomous and keeps its rail card. */
+function watchRun(sessionId: string): void {
+  const s = sessionsById[sessionId];
+  if (!s) return;
+  wm.setLayout("float");
+  wm.add({
+    id: s.id,
+    type: s.command === "claude" ? "agent" : "bash",
+    title: s.command === "claude" ? "claude-code" : s.command,
+    ticket: s.ticket,
+    repo: basename(s.cwd),
+  });
+  wm.bringFront(s.id);
+}
+
+/**
+ * Take over: the run stops being autonomous and becomes an ordinary session.
+ * The daemon owns that fact, so it goes first — if the call fails the run is
+ * still autonomous and the rail must keep saying so rather than showing a card
+ * that has quietly stopped matching the session behind it.
+ */
+async function takeOver(sessionId: string): Promise<void> {
+  try {
+    await takeOverRun(sessionId);
+    await refresh();
+  } catch (e) {
+    error.value = `Couldn't take over that run: ${String(e)}`;
+    return;
+  }
+  // restore(), not bringFront(): bringFront only bumps z and focus, so a run
+  // whose window was minimized stayed hidden and both "Take over" and the
+  // panel's "Open the terminal instead" appeared to do nothing at all.
+  if (!wm.windows.some((w) => w.id === sessionId)) watchRun(sessionId);
+  else wm.restore(sessionId);
+}
+
+/**
+ * Acknowledge a finished/failed card. The daemon keeps exited sessions listed
+ * so a terminal state survives until somebody sees it; removing it from the
+ * registry is what clears the card — no separate acknowledged-state to persist.
+ */
+async function dismissRun(sessionId: string): Promise<void> {
+  try {
+    await killSession(sessionId);
+  } catch (e) {
+    error.value = String(e);
+  }
+  wm.remove(sessionId);
+  await refresh();
+}
+
 const dockItems = computed(() =>
   wm.windows
-    .filter((w) => w.minimized)
+    // A watched run belongs to UNDERWAY; minimizing its window returns it
+    // there rather than adding a second card in DOCKED. A run can't be in
+    // both lanes.
+    .filter((w) => w.minimized && !sessionsById[w.id]?.autonomous)
     .map((w) => {
       const st = winStatus(w.id);
       const sub =
@@ -398,6 +547,41 @@ const dockItems = computed(() =>
       return { win: w, statusColor: st.c, statusGlow: st.g, attention: st.attention, sub };
     }),
 );
+
+// --- being in another tab (DRY-49) ------------------------------------------
+// Counted off the same derived state the rail renders, so the tab can never
+// disagree with the card: one source, two surfaces.
+const runCards = computed(() =>
+  autonomousRuns.value.map((s) => ({
+    session: s,
+    state: runState(s, openGates.value.some((g) => g.sessionId === s.id)),
+  })),
+);
+const failedRuns = computed(() => runCards.value.filter((r) => r.state === "failed"));
+
+useAttention({
+  // Gates from ANY session, not just autonomous ones: a minimized ordinary
+  // window's gate is equally invisible from another tab, and DRY-50 exists
+  // precisely because that one used to reach nobody.
+  gates: () => openGates.value.length,
+  gateLabel: () => {
+    const g = openGates.value[0];
+    return (g && sessionsById[g.sessionId]?.ticket) || "A session";
+  },
+  failed: () => failedRuns.value.length,
+  failedLabel: () => failedRuns.value[0]?.session.ticket ?? "A run",
+  running: () => runCards.value.filter((r) => r.state === "running" || r.state === "starting").length,
+  finished: () => runCards.value.filter((r) => r.state === "finished").length,
+});
+
+// One notification per gate, fired as gates arrive. Watching the list rather
+// than the count so a gate that opens as another closes still announces itself.
+watch(openGates, (gates) => {
+  for (const g of gates) {
+    const label = sessionsById[g.sessionId]?.ticket ?? "A session";
+    notifyGate(g.requestId, `${label} needs you`, `Waiting to run ${g.tool}`);
+  }
+});
 
 const focusedRepo = computed(() => {
   const w = wm.windows.find((x) => x.id === wm.focusedId.value);
@@ -504,6 +688,11 @@ onMounted(async () => {
   } catch {
     /* provider name stays default if the tracker info call is unreachable */
   }
+  // Best-effort and never awaited-on for anything that blocks the desk: an
+  // older daemon 404s here and the launch panel just names `manual`.
+  void fetchConfig().then((c) => {
+    if (c) hostRunMode.value = c.autonomous.permissionMode;
+  });
   await loadTickets();
   // Restore the saved arrangement before the first poll. reconcile() then keeps
   // restored windows whose sessions are still alive (at their saved geometry),
@@ -687,10 +876,21 @@ onBeforeUnmount(() => {
           />
         </WindowFrame>
 
-        <Dock :items="dockItems" @restore="wm.restore" />
-
-        <!-- Gates for sessions with no pane to show them in (DRY-50). -->
-        <GateTray :sessions="sessionList" @open="openSessionWindow" />
+        <!-- One rail owning the bottom edge: unattended runs on the left,
+             minimized windows on the right, and the only surface that can
+             answer a gate no pane is showing (DRY-49, absorbing DRY-50's
+             tray and the dock). -->
+        <RunRail
+          :runs="autonomousRuns"
+          :sessions="sessionList"
+          :docked="dockItems"
+          :watched-ids="watchedIds"
+          @watch="watchRun"
+          @take-over="takeOver"
+          @dismiss="dismissRun"
+          @restore="wm.restore"
+          @focus="openSessionWindow"
+        />
       </div>
     </div>
 
@@ -707,6 +907,7 @@ onBeforeUnmount(() => {
       v-if="selectedTicket"
       :ticket="selectedTicket"
       :z="ticketZ"
+      :host-mode="hostRunMode"
       @focus="ticketZ = wm.allocZ()"
       @send="onSendTicket"
       @close="selectedTicket = null"

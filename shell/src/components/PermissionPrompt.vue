@@ -1,11 +1,16 @@
 <script setup lang="ts">
 // The permission gate's decision surface, lifted out of TerminalPane (DRY-50).
 //
-// It has two hosts and must not care which one it's in: the pane renders it
-// over a live terminal, and GateTray renders it for sessions whose window is
-// minimized and therefore have no pane at all. Answering is the host's job —
-// the pane still answers over its own WebSocket, the tray over HTTP — so this
-// component only decides *what* was chosen and hands it up.
+// This is the IN-PANE gate: rendered over a live terminal, where the command
+// is already on screen above it and a human is looking at both. Answering is
+// the host's job — the pane answers over its own WebSocket — so this component
+// only decides *what* was chosen and hands it up.
+//
+// The out-of-pane case is GatePanel.vue (DRY-49), not this. It rose out of the
+// rail with a different job: it is the ONLY surface for its decision, so it has
+// to render the argument, account for what it truncated, and carry the
+// run-scoped controls. Keeping them separate is what lets this one stay the
+// small thing a pane wants.
 //
 // Deliberately positionless: no `position`/`inset` here, so each host places
 // it. That's what lets the pane keep its exact pre-DRY-50 appearance.

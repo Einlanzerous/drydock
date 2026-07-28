@@ -53,6 +53,18 @@ const STRIP_W = 210;
 const MIN_W = 300;
 const MIN_H = 180;
 
+/**
+ * Height the rail reserves along the bottom edge (DRY-49).
+ *
+ * CONSTANT, in every state — this replaced a reserve that was 72px when
+ * anything was minimized and 14px otherwise. That conditional was fine while
+ * the only thing down there was a dock you put things in yourself, but the rail
+ * fills on its own: a gate firing while you are mid-drag would have reflowed
+ * every tiled window out from under the cursor. A fixed number costs 84px of
+ * desk on an empty rail and buys a desk that never moves unless you move it.
+ */
+export const RAIL_HEIGHT = 98;
+
 export function useWindowManager(opts: { persistKey?: string } = {}) {
   const layout = ref<LayoutMode>("float");
   const windows = reactive<Win[]>([]);
@@ -266,11 +278,15 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
   // ---- geometry: ported from the prototype's computeRects() ----
   function computeRects(): Record<string, Rect> {
     const vis = windows.filter((w) => !w.minimized);
-    const anyMin = windows.some((w) => w.minimized);
-    const dockReserve = anyMin ? 72 : 14;
+    const dockReserve = RAIL_HEIGHT;
     const rects: Record<string, Rect> = {};
 
     if (layout.value === "float") {
+      // Float still honours each window's own rect, rail or no rail. These are
+      // positions a person chose and dragged to; clamping them the day the
+      // reserve changed would have silently rearranged every saved desk. The
+      // rail simply outranks a floating window in z, which is the same deal
+      // float has always had with the dock.
       for (const w of vis) rects[w.id] = { x: w.x, y: w.y, w: w.w, h: w.h, z: w.z };
       return rects;
     }
