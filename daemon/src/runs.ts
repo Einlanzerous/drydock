@@ -2,9 +2,15 @@
 //
 // A supervised session needs none of this: the record of what happened is the
 // scrollback in the window you were looking at. An unattended run has no
-// window, and its scrollback is a ~1 MiB ring buffer inside a process that
-// dies with the daemon — so if the run is to be worth starting, its ending has
-// to survive it.
+// window, and its scrollback is a ~1 MiB ring buffer that is eventually trimmed
+// and, when the run ends, freed — so if the run is to be worth starting, its
+// ending has to outlive it on disk.
+//
+// (DRY-57 moved that buffer into the session's supervisor, so it now survives a
+// daemon restart too, and a run that ends while the daemon is down still gets a
+// handoff written from the transcript the supervisor flushed. That widened when
+// these artefacts can be produced; it didn't make them optional. The ring
+// buffer is still a ring buffer.)
 //
 // Two artefacts, in strict priority order:
 //
