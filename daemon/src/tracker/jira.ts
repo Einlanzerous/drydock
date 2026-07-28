@@ -189,6 +189,19 @@ export class JiraProvider implements TrackerProvider {
     };
   }
 
+  /**
+   * Does the JQL for `q` actually carry the epic clause? The downgrade path
+   * gates on this rather than re-deriving it, because the condition lives in
+   * buildJql's shape below and the two drifting apart is the whole bug: a 400
+   * from a query with no `issuetype` in it — a mistyped project chip on the
+   * palette, say — would otherwise latch the downgrade off for the daemon's
+   * lifetime, and epics would quietly go back to obeying the backlog rule long
+   * after the typo was fixed.
+   */
+  private hasEpicClause(q: TicketQuery): boolean {
+    return this.epicClauseUsable && !!q.open && !q.includeBacklog;
+  }
+
   private buildJql(q: TicketQuery, epicsToo = this.epicClauseUsable): string {
     const clauses: string[] = [];
     if (q.project) clauses.push(`project = ${jqlQuote(q.project)}`);
@@ -300,7 +313,10 @@ export class JiraProvider implements TrackerProvider {
         // and a 400 there is a different problem. See buildJql: this keeps a
         // sidebar that used to work from going blank on an instance with no
         // issue type literally named "Epic".
-        if (!first || !this.epicClauseUsable || !/-> 400/.test(String(e))) throw e;
+        // Only downgrade when the epic clause is what could have been rejected.
+        // Retrying a query that never contained it re-issues a byte-identical
+        // request, so it throws anyway — having silently disabled epics.
+        if (!first || !this.hasEpicClause(q) || !/-> 400/.test(String(e))) throw e;
         this.epicClauseUsable = false;
         console.warn(
           `[drydock] jira rejected the epic clause; epics will follow the backlog rule: ${e}`,
