@@ -1,0 +1,64 @@
+# Compile gate for pull requests (DRY-52). Until this existed the only check on
+# a PR was GitGuardian's secret scan, so a branch that didn't compile could be
+# green, mergeable, and merged — failing later in publish-shell, after the merge,
+# on the image build.
+#
+# This is a COMPILE gate, not a test suite: the repo has no automated tests, and
+# behaviour is still verified by driving the real app (the `verify` skill) and
+# the tracker curls in CLAUDE.md. A green tick here means "it builds", nothing
+# more — don't read it as "it works".
+name: pr-checks
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+# Deliberately unfiltered by path: a required check that doesn't report on a
+# docs-only PR leaves that PR unmergeable forever.
+
+concurrency:
+  group: pr-checks-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  protocol-drift:
+    name: protocol.ts in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: daemon/src/protocol.ts == shell/src/lib/protocol.ts
+        run: |
+          # CLAUDE.md requires these duplicated verbatim; only the first two
+          # lines differ, on purpose — each header points at the other file.
+          # Drift slipped through once during DRY-50 and was caught only because
+          # vue-tsc happened to fail on it.
+          if ! diff -u <(tail -n +3 daemon/src/protocol.ts) \
+                       <(tail -n +3 shell/src/lib/protocol.ts); then
+            echo "::error file=shell/src/lib/protocol.ts::protocol.ts has drifted from daemon/src/protocol.ts — the two files must be identical below their header comments"
+            exit 1
+          fi
+
+  compile:
+    name: typecheck + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.x" # tracks package.json engines (bun >= 1.3)
+
+      # --ignore-scripts skips postinstall, i.e. node-pty's native build. That
+      # addon must be compiled by Node's node-gyp (CLAUDE.md) and takes real
+      # time, but nothing here spawns a PTY: tsc reads node-pty's shipped .d.ts
+      # and the shell never touches it. Verified on a clean clone — both steps
+      # below pass with the addon absent. Anything that actually RUNS the daemon
+      # needs a plain `bun install`.
+      - run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: daemon typecheck
+        run: bun run --filter '@drydock/daemon' typecheck
+      - name: shell build (vue-tsc + vite)
+        run: bun run --filter '@drydock/shell' build

@@ -499,6 +499,12 @@ restart it to test things.
 - Tickets live in the DRY project (Switchyard at home; fixture data otherwise).
   When the tracker is reachable, attach the PR URL to its DRY ticket on open —
   the poller auto-closes the ticket on merge, so don't close it by hand.
+- **CI on a PR is a compile gate only** (DRY-52, `.github/workflows/pr-checks.yml`):
+  the daemon typecheck, the shell's `vue-tsc -b && vite build`, and a check that
+  the two `protocol.ts` copies haven't drifted. There are no automated tests, so
+  green means "it compiles" — everything above in this file is still verified by
+  hand. CI installs with `--ignore-scripts` (no node-pty native build) because
+  nothing there spawns a PTY.
 - Comment style: explain *why* and the non-obvious constraint (see
   `daemon/src/tracker/jira.ts` for the house style); reference the DRY-NN
   ticket that introduced a behavior.
