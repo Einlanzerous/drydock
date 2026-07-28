@@ -13,7 +13,7 @@ import {
   removeWorktree,
   worktreeExists,
 } from "./worktree.js";
-import type { ClientMessage } from "./protocol.js";
+import type { ClientMessage, EventMessage } from "./protocol.js";
 import { createTracker, trackerInfo } from "./tracker/index.js";
 import { createStore } from "./state/index.js";
 
@@ -102,9 +102,114 @@ const server = http.createServer(async (req, res) => {
       });
     }
 
+    // --- Shell-wide event stream (DRY-50) ---
+    // One connection per browser tab, not per session. A pane's WebSocket dies
+    // with the pane — that is precisely why a minimized window's gate used to
+    // reach nobody — so the surface that must survive a minimize cannot be
+    // per-session. SSE rather than a second WebSocket: the traffic is one-way
+    // (answers go back over HTTP below), EventSource reconnects on its own, and
+    // it costs no upgrade handshake to get wrong.
+    if (pathname === "/api/events" && req.method === "GET") {
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        // Nginx buffers text/event-stream by default, holding events until the
+        // buffer fills — a gate would surface minutes late, or never.
+        //
+        // NB nothing proxies this today: the prod shell container serves static
+        // files only (no proxy_pass in shell/docker/nginx.conf) and the browser
+        // reaches the daemon directly on :4318 (docs/deploy.md). This is cheap
+        // insurance for the day something is put in front, not a description of
+        // the current deployment — don't go hunting a proxy on the strength of
+        // this header.
+        "X-Accel-Buffering": "no",
+        "Access-Control-Allow-Origin": "*",
+      });
+
+      const write = (event: EventMessage): void => {
+        // A client that has gone away mid-write must not throw into the gate
+        // that was being announced. res.write on a destroyed socket can also
+        // emit 'error' asynchronously — hence the listener below.
+        if (!res.writableEnded) res.write(`data: ${JSON.stringify(event)}\n\n`);
+      };
+
+      // Catch-up: every gate already waiting, from the same snapshot the
+      // per-pane replay uses. A tab opened *after* a gate was raised has to
+      // learn about it, otherwise "reload the page" loses an unanswered gate.
+      //
+      // Sent as one authoritative snapshot rather than a burst of gate-opens.
+      // A reconnecting client missed every gate-resolved that fired while it
+      // was away, so anything it merges into is already wrong — it has to be
+      // told the whole truth and replace what it had.
+      write({
+        type: "gate-snapshot",
+        serverNow: Date.now(),
+        gates: manager
+          .list()
+          .flatMap((session) =>
+            session.pendingGates().map((gate) => ({ sessionId: session.id, gate })),
+          ),
+      });
+
+      const unsubscribe = manager.onGate(write);
+      // Load-bearing, same class as the pg pool listener in DRY-28 and the
+      // socket handlers in DRY-45: an unhandled 'error' on this response throws,
+      // and this process is the lifetime of every live PTY.
+      res.on("error", (err) => {
+        log.warn("event stream errored", describe(err));
+        unsubscribe();
+      });
+      res.on("close", unsubscribe);
+
+      // Comment frames keep proxies and phones from reaping an idle stream.
+      // Unref'd so a quiet daemon can still exit.
+      const heartbeat = setInterval(() => {
+        if (!res.writableEnded) res.write(": ping\n\n");
+      }, 25_000);
+      heartbeat.unref?.();
+      res.on("close", () => clearInterval(heartbeat));
+      return;
+    }
+
     // --- Session control API ---
     if (pathname === "/api/sessions" && req.method === "GET") {
       return send(res, 200, { sessions: manager.list().map((s) => s.info()) });
+    }
+
+    // Answer a gate without holding that session's WebSocket (DRY-50). The
+    // session id stays mandatory and in the path: this daemon is
+    // unauthenticated, and while it already spawns arbitrary commands (DRY-27),
+    // that is no reason to make someone else's gates answerable by guessing a
+    // request id alone.
+    const answerMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/permission$/);
+    if (answerMatch && req.method === "POST") {
+      const session = manager.get(decodeURIComponent(answerMatch[1]));
+      if (!session) return send(res, 404, { error: "unknown session" });
+      // This route's contract is 400/404/409, so neither a parse failure nor a
+      // body of literal `null` may escape as a 500 with a raw stack — `null`
+      // parses fine and only becomes a TypeError at `body.decision`. Same trap
+      // documented on /api/workspace below; the guard belongs on every route
+      // that reaches into a parsed body.
+      let body: any;
+      try {
+        body = await readJson(req);
+      } catch (err) {
+        return send(res, 400, { error: `invalid JSON body: ${String(err)}` });
+      }
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return send(res, 400, { error: "body must be a JSON object" });
+      }
+      const decision = body.decision;
+      if (decision !== "allow" && decision !== "deny") {
+        return send(res, 400, { error: "decision must be 'allow' or 'deny'" });
+      }
+      const reason = typeof body.reason === "string" ? body.reason : undefined;
+      // False means the gate is already gone — answered from a pane, timed out,
+      // or the session exited. Not an error worth a 500; the caller raced and
+      // the honest answer is "there is nothing here to answer".
+      const resolved = session.resolvePermission(String(body.requestId ?? ""), decision, reason);
+      return send(res, resolved ? 200 : 409, { ok: resolved });
     }
 
     if (pathname === "/api/sessions" && req.method === "POST") {
@@ -432,18 +537,21 @@ const server = http.createServer(async (req, res) => {
         });
       }
       const tool = body.tool_name ?? "unknown";
-      const decision = await session.requestPermission(tool, body.tool_input ?? {});
-      if (decision === "timeout") {
+      const outcome = await session.requestPermission(tool, body.tool_input ?? {});
+      if (outcome.decision === "timeout") {
         return send(res, 200, {}); // defer to the CLI's own prompt
       }
       return send(res, 200, {
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
-          permissionDecision: decision,
+          permissionDecision: outcome.decision,
+          // The reason is what the agent actually reads as the tool result. A
+          // denial without one tends to produce a retry of the identical call,
+          // so when the human typed a reason it replaces the generic string
+          // rather than being dropped (DRY-50).
           permissionDecisionReason:
-            decision === "allow"
-              ? "Approved in Drydock"
-              : "Denied in Drydock",
+            outcome.reason?.trim() ||
+            (outcome.decision === "allow" ? "Approved in Drydock" : "Denied in Drydock"),
         },
       });
     }
@@ -605,7 +713,7 @@ function upgrade(
           session.resize(msg.cols, msg.rows);
           break;
         case "permission":
-          session.resolvePermission(msg.requestId, msg.decision);
+          session.resolvePermission(msg.requestId, msg.decision, msg.reason);
           break;
       }
     });

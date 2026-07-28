@@ -71,6 +71,46 @@ export function attachUrl(id: string): string {
   return `${DAEMON_WS}/api/sessions/${id}/attach`;
 }
 
+// --- Permission gates, independent of any pane (DRY-50) ---
+
+/** The shell-wide event stream. One per tab, not one per session. */
+export function eventsUrl(): string {
+  return `${DAEMON_HTTP}/api/events`;
+}
+
+/**
+ * Answer a gate over HTTP rather than that session's attach socket, which is
+ * the whole point: a minimized window has no socket, so the WebSocket path
+ * cannot answer for it.
+ *
+ * 409 (gate already resolved) and 404 (session already gone) both mean the same
+ * thing to a caller: there is nothing left to answer. Neither is a failure to
+ * retry or restore from. 404 is routinely reachable — the kill route calls
+ * manager.remove(), which drops the session from the registry synchronously,
+ * before the PTY's onExit has announced its dangling gates — so treating it as
+ * an error puts back a row that can never be answered and re-fails on every
+ * subsequent click.
+ */
+export async function answerGate(
+  sessionId: string,
+  requestId: string,
+  decision: "allow" | "deny",
+  reason?: string,
+): Promise<void> {
+  const res = await fetch(
+    `${DAEMON_HTTP}/api/sessions/${encodeURIComponent(sessionId)}/permission`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requestId, decision, reason }),
+    },
+  );
+  if (!res.ok && res.status !== 409 && res.status !== 404) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error ?? `daemon returned ${res.status}`);
+  }
+}
+
 // --- Workspace state (DRY-28) ---
 // The saved desk. `windows` stays `unknown[]` at this layer for the same reason
 // the daemon keeps it opaque: the Win shape belongs to the window manager, and

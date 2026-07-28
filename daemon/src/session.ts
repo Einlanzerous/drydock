@@ -6,6 +6,8 @@ import { CONFIG } from "./config.js";
 import { CLAUDE_SETTINGS_PATH } from "./hooks.js";
 import { log } from "./log.js";
 import type {
+  EventMessage,
+  PendingGate,
   PermissionDecision,
   ServerMessage,
   SessionInfo,
@@ -47,12 +49,36 @@ function resolveSpawn(command: string, args: string[]): { file: string; args: st
   return { file: command, args };
 }
 
+/**
+ * How a gate finished. Carries the reason alongside the decision so a denial
+ * can tell the agent *why* — a bare "no" usually makes it retry the identical
+ * call, which is how a denial turns into a loop instead of a redirect (DRY-50).
+ *
+ * Daemon-internal on purpose: the browser never sees this shape, so mirroring
+ * it into protocol.ts would tax the shell's copy with a type it can't use.
+ */
+export interface PermissionOutcome {
+  decision: PermissionDecision | "timeout";
+  reason?: string;
+}
+
 interface PendingPermission {
   tool: string;
   input: unknown;
-  resolve: (decision: PermissionDecision | "timeout") => void;
+  requestedAt: number;
+  resolve: (outcome: PermissionOutcome) => void;
   timer: NodeJS.Timeout;
 }
+
+/**
+ * Told when a gate opens or closes, for surfaces that aren't attached clients.
+ * The manager injects this so a gate reaches the shell-wide stream even when
+ * the session has no pane — the entire point of DRY-50.
+ */
+export type GateNotifier = (event: GateEvent) => void;
+
+/** Derived, not restated: these ARE the stream's gate variants. */
+export type GateEvent = Extract<EventMessage, { type: "gate-open" | "gate-resolved" }>;
 
 /**
  * One terminal session. The daemon — not any client — owns the PTY master for
@@ -92,7 +118,7 @@ export class PtySession {
   private readonly clients = new Set<WebSocket>();
   private readonly pending = new Map<string, PendingPermission>();
 
-  constructor(opts: SpawnOptions) {
+  constructor(opts: SpawnOptions, private readonly notifyGate: GateNotifier = () => {}) {
     this.command = opts.command;
     this.args = opts.args ?? [];
     this.cwd = opts.cwd ?? os.homedir();
@@ -158,9 +184,17 @@ export class PtySession {
     });
     this.broadcast({ type: "status", status: "exited", exitCode });
     // Resolve any dangling permission gates so the CLI isn't left hanging.
+    // These have to be *announced*, not just resolved: a pane would vanish
+    // along with the exited session, but the shell-wide stream outlives it and
+    // would otherwise keep rendering a gate for a process that no longer exists,
+    // with a held-time ticking up forever (DRY-50).
     for (const [requestId, p] of this.pending) {
       clearTimeout(p.timer);
-      p.resolve("timeout");
+      this.announceGate(
+        { type: "permission-resolved", requestId, decision: "timeout" },
+        { type: "gate-resolved", sessionId: this.id, requestId, decision: "timeout" },
+      );
+      p.resolve({ decision: "timeout" });
       this.pending.delete(requestId);
     }
   }
@@ -180,9 +214,40 @@ export class PtySession {
       exitCode: this.exitCode ?? undefined,
     });
     if (this.idle) this.send(ws, { type: "idle", idle: true });
-    for (const [requestId, p] of this.pending) {
-      this.send(ws, { type: "permission-request", requestId, tool: p.tool, input: p.input });
+    for (const gate of this.pendingGates()) {
+      this.send(ws, { type: "permission-request", ...gate });
     }
+  }
+
+  /**
+   * Every gate still waiting on an answer, oldest first (the Map is
+   * insertion-ordered and must stay that way — the UI numbers gates "1 of 2").
+   *
+   * The single source for both replay paths: the per-pane replay in attach()
+   * above and the shell-wide stream's catch-up on connect. Two hand-written
+   * copies of "what does a newly-arrived client need to know" is exactly how
+   * one surface ends up showing a gate the other has already forgotten.
+   */
+  /**
+   * Announce a gate change to BOTH surfaces at once.
+   *
+   * Panes and the shell-wide stream have to agree, and leaving that to four
+   * call sites remembering two lines each is how onExit() came to resolve its
+   * dangling gates while telling the stream nothing — a gate rendered forever
+   * for a dead process. One method, so the pairing is structural.
+   */
+  private announceGate(msg: ServerMessage, event: GateEvent): void {
+    this.broadcast(msg);
+    this.notifyGate(event);
+  }
+
+  pendingGates(): PendingGate[] {
+    return [...this.pending].map(([requestId, p]) => ({
+      requestId,
+      tool: p.tool,
+      input: p.input,
+      requestedAt: p.requestedAt,
+    }));
   }
 
   detach(ws: WebSocket): void {
@@ -249,30 +314,41 @@ export class PtySession {
    * clicks approve/deny — or when we hit our own timeout (caller then defers to
    * the CLI's normal flow).
    */
-  requestPermission(tool: string, input: unknown): Promise<PermissionDecision | "timeout"> {
+  requestPermission(tool: string, input: unknown): Promise<PermissionOutcome> {
     // A tool gate means the agent is mid-turn, not idle — the permission overlay
     // is its own attention signal, so drop any stale "your turn" flag.
     this.clearIdle();
     const requestId = randomUUID();
+    const requestedAt = Date.now();
     return new Promise((resolve) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
-        this.broadcast({ type: "permission-resolved", requestId, decision: "timeout" });
-        resolve("timeout");
+        this.announceGate(
+          { type: "permission-resolved", requestId, decision: "timeout" },
+          { type: "gate-resolved", sessionId: this.id, requestId, decision: "timeout" },
+        );
+        resolve({ decision: "timeout" });
       }, CONFIG.permissionTimeoutMs);
 
-      this.pending.set(requestId, { tool, input, resolve, timer });
-      this.broadcast({ type: "permission-request", requestId, tool, input });
+      this.pending.set(requestId, { tool, input, requestedAt, resolve, timer });
+      const gate: PendingGate = { requestId, tool, input, requestedAt };
+      this.announceGate(
+        { type: "permission-request", ...gate },
+        { type: "gate-open", sessionId: this.id, gate },
+      );
     });
   }
 
-  resolvePermission(requestId: string, decision: PermissionDecision): boolean {
+  resolvePermission(requestId: string, decision: PermissionDecision, reason?: string): boolean {
     const p = this.pending.get(requestId);
     if (!p) return false;
     clearTimeout(p.timer);
     this.pending.delete(requestId);
-    this.broadcast({ type: "permission-resolved", requestId, decision });
-    p.resolve(decision);
+    this.announceGate(
+      { type: "permission-resolved", requestId, decision },
+      { type: "gate-resolved", sessionId: this.id, requestId, decision },
+    );
+    p.resolve({ decision, reason });
     return true;
   }
 

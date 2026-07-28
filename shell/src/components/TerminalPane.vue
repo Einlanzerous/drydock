@@ -3,6 +3,8 @@ import { onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import { Terminal, type ILink } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { attachUrl } from "../lib/daemon.js";
+import { claimPane, releasePane } from "../composables/gateStore.js";
+import PermissionPrompt from "./PermissionPrompt.vue";
 import type { ClientMessage, ServerMessage, SessionInfo } from "../lib/protocol.js";
 
 // Body-only terminal: the live xterm view bound to one durable daemon session,
@@ -61,6 +63,13 @@ let sentInitial = false;
 
 const connected = ref(false);
 const pending = ref<{ requestId: string; tool: string; input: unknown } | null>(null);
+
+// Claimed for the life of this pane. While it's mounted this session's gates
+// render here, so the shell-wide tray must not also show them; once it goes,
+// the tray is the only surface left (DRY-50). Claimed at setup rather than in
+// onMounted, which awaits font loading first — a gate arriving in that gap
+// would otherwise belong to neither surface.
+claimPane(props.session.id);
 
 // DRY-41: a dead PTY's pane is otherwise a frozen frame of whatever the CLI
 // last drew (often claude's slash menu after /exit) — indistinguishable from a
@@ -156,9 +165,9 @@ function connect() {
   };
 }
 
-function resolve(decision: "allow" | "deny") {
+function resolve(decision: "allow" | "deny", reason?: string) {
   if (!pending.value) return;
-  sendWs({ type: "permission", requestId: pending.value.requestId, decision });
+  sendWs({ type: "permission", requestId: pending.value.requestId, decision, reason });
   pending.value = null;
   emit("attention", props.session.id, false);
 }
@@ -208,6 +217,9 @@ onMounted(async () => {
 });
 
 onBeforeUnmount(() => {
+  // Release before the socket closes: from here on this session's gates have
+  // nowhere to render but the tray (DRY-50).
+  releasePane(props.session.id);
   resizeObserver?.disconnect();
   ws.value?.close();
   term.value?.dispose();
@@ -226,17 +238,19 @@ onBeforeUnmount(() => {
       <span class="exited-hint">output preserved — close the window when done</span>
     </div>
 
-    <div v-if="pending" class="permission">
-      <div class="permission-text">
-        <strong>Permission needed</strong>
-        <code>{{ pending.tool }}</code>
-        <pre>{{ JSON.stringify(pending.input, null, 2) }}</pre>
-      </div>
-      <div class="permission-actions">
-        <button class="approve" @click="resolve('allow')">Approve</button>
-        <button class="deny" @click="resolve('deny')">Deny</button>
-      </div>
-    </div>
+    <!-- Same component the out-of-pane tray uses (DRY-50); the pane keeps its
+         own placement and answers over its own socket. -->
+    <!-- Keyed by requestId: a second gate can replace `pending` without it ever
+         going null, so without this the same instance is reused and any
+         half-entered state carries over to a decision about a different tool. -->
+    <PermissionPrompt
+      v-if="pending"
+      :key="pending.requestId"
+      class="permission-host"
+      :tool="pending.tool"
+      :input="pending.input"
+      @resolve="resolve"
+    />
   </div>
 </template>
 
@@ -298,58 +312,13 @@ onBeforeUnmount(() => {
   font-size: 10.5px;
   color: #5a636f;
 }
-.permission {
+/* Placement only — the prompt's own styling moved with it into
+   PermissionPrompt.vue. These are the values it had inline before (DRY-50). */
+.permission-host {
   position: absolute;
   left: 12px;
   right: 12px;
   bottom: 12px;
-  background: #141b22f5;
-  border: 1px solid #33506e;
-  border-radius: 10px;
-  padding: 12px 14px;
-  box-shadow: 0 12px 30px #000000aa;
   z-index: 6;
-}
-.permission-text strong {
-  color: #e6ecf2;
-  font-size: 13px;
-}
-.permission-text code {
-  margin-left: 8px;
-  color: #d6a651;
-  font-family: "JetBrains Mono", monospace;
-  font-size: 12px;
-}
-.permission-text pre {
-  margin: 8px 0 0;
-  max-height: 120px;
-  overflow: auto;
-  color: #9aa6b2;
-  font-size: 11.5px;
-  font-family: "JetBrains Mono", monospace;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-.permission-actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 10px;
-}
-.permission-actions button {
-  flex: 1;
-  padding: 7px;
-  border-radius: 7px;
-  border: none;
-  font-size: 12.5px;
-  font-weight: 600;
-  cursor: pointer;
-}
-.approve {
-  background: #2a6db0;
-  color: #eef5fb;
-}
-.deny {
-  background: #5c2b2b;
-  color: #f0c9c4;
 }
 </style>

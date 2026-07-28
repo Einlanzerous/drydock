@@ -1,12 +1,39 @@
 import { log } from "./log.js";
-import { PtySession, type SpawnOptions } from "./session.js";
+import { PtySession, type GateEvent, type SpawnOptions } from "./session.js";
 
 /** In-memory registry of live sessions. One per wrapped CLI / shell. */
 export class SessionManager {
   private readonly sessions = new Map<string, PtySession>();
 
+  /**
+   * Subscribers to gate activity across *every* session (DRY-50). Kept on the
+   * manager rather than per-session because the shell-wide stream must also
+   * receive gates from sessions spawned after it connected — subscribing to
+   * each session individually would silently miss exactly those.
+   */
+  private readonly gateListeners = new Set<(event: GateEvent) => void>();
+
+  /** Subscribe to gate activity. Returns its own unsubscribe. */
+  onGate(listener: (event: GateEvent) => void): () => void {
+    this.gateListeners.add(listener);
+    return () => this.gateListeners.delete(listener);
+  }
+
+  private emitGate(event: GateEvent): void {
+    for (const listener of this.gateListeners) {
+      // A subscriber that throws must not take down the gate that was being
+      // announced — nor the sibling subscribers after it in the set. This
+      // process is the lifetime of every live PTY (DRY-45).
+      try {
+        listener(event);
+      } catch (err) {
+        log.warn("gate listener threw", { type: event.type, err: String(err) });
+      }
+    }
+  }
+
   create(opts: SpawnOptions): PtySession {
-    const session = new PtySession(opts);
+    const session = new PtySession(opts, (event) => this.emitGate(event));
     this.sessions.set(session.id, session);
     return session;
   }

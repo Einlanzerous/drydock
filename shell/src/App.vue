@@ -8,6 +8,8 @@ import TrackerSidebar from "./components/TrackerSidebar.vue";
 import TicketDetail from "./components/TicketDetail.vue";
 import QuickLaunch from "./components/QuickLaunch.vue";
 import Dock from "./components/Dock.vue";
+import GateTray from "./components/GateTray.vue";
+import { openGates, startGateStream, stopGateStream } from "./composables/gateStore.js";
 import { useWindowManager, type LayoutMode, type Win } from "./composables/useWindowManager.js";
 import { DAEMON_HTTP, createSession, killSession, listSessions } from "./lib/daemon.js";
 import { getTrackerInfo, listTickets, type Ticket } from "./lib/tracker.js";
@@ -187,7 +189,13 @@ async function refresh() {
 function winStatus(id: string) {
   const l = live[id];
   const s = sessionsById[id];
-  const attention = l?.attention ?? (s ? s.pendingPermissions > 0 : false);
+  // `live` is fed by a mounted pane's WebSocket, so a MINIMIZED window has no
+  // source for it and used to fall back to the 3s poll — the dock dot went
+  // amber up to 3s after the tray already showed the gate, and stayed amber
+  // just as long after it was answered. The gate stream is instant and covers
+  // exactly the windows that have no pane, so consult it first (DRY-50).
+  const gated = openGates.value.some((g) => g.sessionId === id);
+  const attention = gated || (l?.attention ?? (s ? s.pendingPermissions > 0 : false));
   const idle = l?.idle ?? s?.idle ?? false;
   const status = l?.status ?? s?.status ?? "running";
   // Permission gate wins (it's blocking a tool); then process-dead; then the
@@ -359,6 +367,20 @@ async function closeWindow(id: string) {
 // --- visible windows + computed rects ---
 const rects = computed(() => wm.computeRects());
 const visible = computed(() => wm.windows.filter((w) => !w.minimized));
+const sessionList = computed(() => Object.values(sessionsById));
+
+// NB which sessions have a pane is NOT computed here. TerminalPane claims and
+// releases its own session id (gateStore), so the tray observes the fact rather
+// than re-deriving it from window state — every v-if a pane hides behind would
+// otherwise have to be restated here, and be wrong until it was (DRY-50).
+
+// The tray knows session ids; wm.restore() matches window ids. Those differ for
+// a workspace's shell PTY, which has no window of its own — restore(shellId)
+// would find nothing and the button would silently do nothing.
+function openSessionWindow(sessionId: string): void {
+  const w = wm.windows.find((x) => x.id === sessionId || x.shellId === sessionId);
+  if (w) wm.restore(w.id);
+}
 
 const dockItems = computed(() =>
   wm.windows
@@ -465,6 +487,16 @@ function onKey(e: KeyboardEvent) {
 
 onMounted(async () => {
   loadScope();
+  // Opened before anything else awaits: a gate raised while the tracker call is
+  // still in flight has to land somewhere, and the daemon replays whatever is
+  // already pending on connect anyway (DRY-50). Guarded because everything
+  // below — hydrate, the session poll, the keybindings — is downstream of it,
+  // and a constructor throw here would take the whole desk with it.
+  try {
+    startGateStream();
+  } catch (e) {
+    error.value = `Gate stream unavailable: ${String(e)}`;
+  }
   try {
     const info = await getTrackerInfo();
     providerName.value = info.name;
@@ -510,6 +542,7 @@ onMounted(async () => {
 onBeforeUnmount(() => {
   if (poll) clearInterval(poll);
   if (ticketPoll) clearInterval(ticketPoll);
+  stopGateStream();
   deskObs?.disconnect();
   window.removeEventListener("keydown", onKey, true);
 });
@@ -655,6 +688,9 @@ onBeforeUnmount(() => {
         </WindowFrame>
 
         <Dock :items="dockItems" @restore="wm.restore" />
+
+        <!-- Gates for sessions with no pane to show them in (DRY-50). -->
+        <GateTray :sessions="sessionList" @open="openSessionWindow" />
       </div>
     </div>
 
