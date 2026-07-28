@@ -50,10 +50,17 @@ interface JiraIssue {
     project?: { key?: string; name?: string };
     components?: { name?: string }[];
     assignee?: { accountId?: string; name?: string; displayName?: string } | null;
+    // `parent` covers BOTH rungs of Jira's hierarchy on Cloud and on DC 9+:
+    // subtask→task and task→epic. It is not the legacy "Epic Link" custom
+    // field (customfield_100xx), which older DC instances use instead and
+    // which we deliberately don't chase — the field id varies per instance, so
+    // it'd be one more host config knob. On such an instance epics simply
+    // render flat, which is exactly today's behavior (DRY-13).
+    parent?: { key?: string; fields?: { summary?: string; issuetype?: { name?: string } } } | null;
   };
 }
 
-const FIELDS = "summary,status,issuetype,labels,assignee,project,components";
+const FIELDS = "summary,status,issuetype,labels,assignee,project,components,parent";
 
 // Same backstop as the Switchyard provider: the sidebar's unbounded list never
 // pulls more than this many issues out of a huge corporate Jira.
@@ -158,6 +165,13 @@ export class JiraProvider implements TrackerProvider {
       // any other repo name. See repoOf (DRY-31).
       repo: this.repoOf(i),
       type: f.issuetype?.name,
+      parent: f.parent?.key
+        ? {
+            key: f.parent.key,
+            title: f.parent.fields?.summary,
+            type: f.parent.fields?.issuetype?.name,
+          }
+        : undefined,
       tag: f.labels?.[0],
       assignee: f.assignee
         ? {

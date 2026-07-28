@@ -28,6 +28,11 @@ interface SwitchyardTicket {
   project?: { key?: string; name?: string; repo_url?: string | null };
   labels?: { name: string }[];
   assignee?: { id?: string; name?: string } | null;
+  // Both the list and single-ticket endpoints inline the parent as
+  // {id, key, title} alongside the raw `parent_id` — so the epic rollup needs
+  // no second fetch. No `type` here, which is why the sidebar falls back to
+  // the CHILD's type to decide whether an unloaded parent is an epic (DRY-13).
+  parent?: { key?: string; title?: string } | null;
 }
 
 // The list endpoint has no `open` flag; "open" = every non-closed category.
@@ -84,6 +89,7 @@ function toTicket(t: SwitchyardTicket): Ticket {
     status: { category, label: t.status?.display_name ?? CATEGORY_LABEL[category] },
     repo: repoOf(t),
     type: t.type,
+    parent: t.parent?.key ? { key: t.parent.key, title: t.parent.title } : undefined,
     tag: t.labels?.[0]?.name,
     assignee: t.assignee?.name ? { id: t.assignee.id, name: t.assignee.name } : undefined,
   };

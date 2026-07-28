@@ -145,6 +145,14 @@ no per-repo setup.
   groups. Picking one opens the ticket detail as a floating, raiseable window
   (DRY-20) — read the (markdown-rendered) description, adjust
   cwd/worktree/prompt, then **Spawn Agent**.
+- **Epics roll up their children (DRY-13).** Inside a repo group, tickets nest
+  under their epic behind a second chevron, and the epic row carries a badge, a
+  status breakdown of its loaded children, and a count — so a collapsed epic
+  still says something. An epic filter sits beside the others, and searching an
+  epic's key finds its children. Because the default pull excludes the backlog
+  bucket and epics live there more often than their children do, an epic that
+  was never pulled still heads its group off the child's parent link; that row
+  is marked *not pulled* and expands rather than opening a ticket.
 - **`Ctrl K` quick-launch.** Fuzzy-search tickets by key/title/repo; `↵` opens
   the selection's ticket panel (or a blank `claude` session when nothing
   matches), `⇧↵` spawns a plain shell — the palette is the one entry point for

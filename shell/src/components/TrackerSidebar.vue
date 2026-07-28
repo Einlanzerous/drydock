@@ -1,6 +1,13 @@
 <script setup lang="ts">
 import { computed, reactive, ref } from "vue";
-import { CATEGORY_COLOR, groupByRepo, tagColor, type Ticket } from "../lib/tracker.js";
+import {
+  CATEGORY_COLOR,
+  groupTickets,
+  rollup,
+  tagColor,
+  type EpicNode,
+  type Ticket,
+} from "../lib/tracker.js";
 
 // Left sidebar: live tickets from the active tracker, grouped by repo. At PoC
 // fixture scale a flat list was fine; against a live tracker it pulls 100+
@@ -14,6 +21,12 @@ import { CATEGORY_COLOR, groupByRepo, tagColor, type Ticket } from "../lib/track
 // Host-default project chips are fixed (env config); user-added ones are
 // removable; "backlog" opts the backlog bucket into the pull (off by default).
 // The parent owns the state, refetches on change, and persists it.
+//
+// Inside a repo group, tickets nest under their epic (DRY-13) — a second level
+// of the same collapse idiom, with a status rollup on the epic row so a
+// collapsed epic still says something. Epics that were never pulled but are
+// named by a child still head a group; see groupTickets for why that's the
+// common case rather than an edge one.
 const props = defineProps<{
   /**
    * Provider label. Typed `string`, defaulted upstream, and still rendered
@@ -56,12 +69,21 @@ const search = ref("");
 const fProject = ref("");
 const fStatus = ref("");
 const fAssignee = ref("");
+const fEpic = ref("");
 // Per-group expand state; absent = collapsed (the default). When a search/filter
 // is active we force-open all groups so matches aren't hidden behind a chevron.
+// Epics get their own map on the same rule, keyed `${repo} ${epicKey}` — the
+// same epic can head a group in two repos when its children span components.
 const expanded = reactive<Record<string, boolean>>({});
+const epicExpanded = reactive<Record<string, boolean>>({});
 
 const filtering = computed(
-  () => !!search.value.trim() || !!fProject.value || !!fStatus.value || !!fAssignee.value,
+  () =>
+    !!search.value.trim() ||
+    !!fProject.value ||
+    !!fStatus.value ||
+    !!fAssignee.value ||
+    !!fEpic.value,
 );
 
 // Filter-option sources, derived from the loaded set so they only offer values
@@ -77,25 +99,72 @@ const assignees = computed(() => [
 ].sort());
 const hasUnassigned = computed(() => props.tickets.some((t) => !t.assignee));
 
+// Epic filter options. Derived by grouping the set against itself, so the list
+// is exactly the epics the sidebar can actually show — including the ones only
+// named by a child — rather than a second, subtly different rule.
+const epicOptions = computed(() => {
+  const seen = new Map<string, string>();
+  for (const g of groupTickets(props.tickets, props.tickets)) {
+    for (const e of g.epics) if (!seen.has(e.key)) seen.set(e.key, e.title);
+  }
+  return [...seen].map(([key, title]) => ({ key, title })).sort((a, b) => a.key.localeCompare(b.key));
+});
+
 const filtered = computed(() => {
   const q = search.value.trim().toLowerCase();
   return props.tickets.filter((t) => {
     if (fProject.value && t.repo !== fProject.value) return false;
     if (fStatus.value && t.status.category !== fStatus.value) return false;
+    // "This epic" means the epic and its children, so the row you filtered by
+    // stays on screen as the header for what it contains.
+    if (fEpic.value && t.key !== fEpic.value && t.parent?.key !== fEpic.value) return false;
     if (fAssignee.value === UNASSIGNED) {
       if (t.assignee) return false;
     } else if (fAssignee.value && t.assignee?.name !== fAssignee.value) {
       return false;
     }
     if (q) {
-      const hay = `${t.key} ${t.title} ${t.repo} ${t.assignee?.name ?? ""}`.toLowerCase();
+      // Searching an epic key finds its children too — the parent link is part
+      // of what a ticket IS here, and typing "DRY-1" to see that epic's work is
+      // the obvious reading.
+      const hay =
+        `${t.key} ${t.title} ${t.repo} ${t.assignee?.name ?? ""} ${t.parent?.key ?? ""}`.toLowerCase();
       if (!hay.includes(q)) return false;
     }
     return true;
   });
 });
 
-const groups = computed(() => groupByRepo(filtered.value));
+const groups = computed(() => groupTickets(filtered.value, props.tickets));
+
+/**
+ * Flatten a group into rows. One v-for over a tagged union beats nesting the
+ * loops in the template: the ticket row markup (status dot, title, tag, spawn
+ * button) then exists once and serves both an epic's children and the tickets
+ * that hang off nothing.
+ */
+type Row =
+  | { kind: "epic"; id: string; node: EpicNode; roll: ReturnType<typeof rollup>; hint: string }
+  | { kind: "ticket"; id: string; t: Ticket; child: boolean };
+
+function rowsOf(g: { repo: string; epics: EpicNode[]; loose: Ticket[] }): Row[] {
+  const out: Row[] = [];
+  for (const node of g.epics) {
+    const roll = rollup(node.children);
+    out.push({
+      kind: "epic",
+      id: `${g.repo} ${node.key}`,
+      node,
+      roll,
+      hint: roll.map((s) => `${s.n} ${s.label}`).join(" · ") + " — of tickets currently loaded",
+    });
+    if (isEpicOpen(g.repo, node.key)) {
+      for (const t of node.shown) out.push({ kind: "ticket", id: t.key, t, child: true });
+    }
+  }
+  for (const t of g.loose) out.push({ kind: "ticket", id: t.key, t, child: false });
+  return out;
+}
 
 function isOpen(repo: string): boolean {
   return filtering.value || !!expanded[repo];
@@ -103,11 +172,32 @@ function isOpen(repo: string): boolean {
 function toggle(repo: string): void {
   expanded[repo] = !expanded[repo];
 }
+function isEpicOpen(repo: string, key: string): boolean {
+  return filtering.value || !!epicExpanded[`${repo} ${key}`];
+}
+function toggleEpic(repo: string, key: string): void {
+  const id = `${repo} ${key}`;
+  epicExpanded[id] = !isEpicOpen(repo, key);
+}
+/**
+ * Clicking the epic row opens its ticket and expands it, the way clicking any
+ * other row opens a ticket. An epic that was never pulled has no ticket to
+ * open — only a key and a title — so there it just expands.
+ */
+function onEpicRow(repo: string, node: EpicNode): void {
+  if (node.ticket) {
+    epicExpanded[`${repo} ${node.key}`] = true;
+    emit("launch", node.ticket);
+  } else {
+    toggleEpic(repo, node.key);
+  }
+}
 function clearFilters(): void {
   search.value = "";
   fProject.value = "";
   fStatus.value = "";
   fAssignee.value = "";
+  fEpic.value = "";
 }
 </script>
 
@@ -160,6 +250,15 @@ function clearFilters(): void {
           <option v-if="hasUnassigned" :value="UNASSIGNED">Unassigned</option>
         </select>
       </div>
+      <!-- Epic filter (DRY-13) gets its own full-width row: epic titles are
+           sentences, and squeezed into the quarter-width the row above would
+           leave, every option truncates to the same few characters. -->
+      <div v-if="epicOptions.length" class="filters">
+        <select v-model="fEpic" :class="{ on: !!fEpic }" title="Epic">
+          <option value="">Epic</option>
+          <option v-for="e in epicOptions" :key="e.key" :value="e.key">{{ e.key }} — {{ e.title }}</option>
+        </select>
+      </div>
       <!-- pull scope (DRY-30): which projects the daemon fetches, not a view filter -->
       <div class="scope">
         <span
@@ -205,40 +304,98 @@ function clearFilters(): void {
         <button class="grp" :class="{ open: isOpen(grp.repo) }" @click="toggle(grp.repo)">
           <span class="chev">▸</span>
           <span class="grp-name">{{ grp.repo }}</span>
-          <span class="grp-count">{{ grp.tickets.length }}</span>
+          <span class="grp-count">{{ grp.count }}</span>
         </button>
         <template v-if="isOpen(grp.repo)">
-          <div
-            v-for="t in grp.tickets"
-            :key="t.key"
-            class="row"
-            @click="emit('launch', t)"
-          >
-            <span
-              class="status"
-              :style="{
-                background: CATEGORY_COLOR[t.status.category].c,
-                boxShadow: `0 0 6px ${CATEGORY_COLOR[t.status.category].g}`,
-              }"
-            ></span>
-            <div class="meta">
-              <div class="line1">
-                <span class="key">{{ t.key }}</span>
-                <span class="slabel">{{ t.status.label }}</span>
-              </div>
-              <div class="ttitle">{{ t.title }}</div>
-              <div class="tagrow">
-                <template v-if="t.tag">
-                  <span class="tag-dot" :style="{ background: tagColor(t.tag) }"></span>
-                  <span class="tag">{{ t.tag }}</span>
-                </template>
-                <span v-if="t.assignee" class="assignee" :title="`Assigned to ${t.assignee.name}`">@{{ t.assignee.name }}</span>
+          <template v-for="row in rowsOf(grp)" :key="row.id">
+            <!-- epic row: header for its children, and a ticket in its own
+                 right unless it was never pulled -->
+            <div
+              v-if="row.kind === 'epic'"
+              class="row epic"
+              :class="{ ghost: !row.node.ticket }"
+              @click="onEpicRow(grp.repo, row.node)"
+            >
+              <button
+                v-if="row.node.children.length"
+                class="epic-chev"
+                :class="{ open: isEpicOpen(grp.repo, row.node.key) }"
+                :title="isEpicOpen(grp.repo, row.node.key) ? 'Collapse epic' : 'Expand epic'"
+                @click.stop="toggleEpic(grp.repo, row.node.key)"
+              >▸</button>
+              <span v-else class="epic-chev empty"></span>
+              <div class="meta">
+                <div class="line1">
+                  <span class="epic-badge">EPIC</span>
+                  <span class="key">{{ row.node.key }}</span>
+                  <span v-if="row.node.ticket" class="slabel">{{ row.node.ticket.status.label }}</span>
+                  <span
+                    v-else
+                    class="slabel unpulled"
+                    title="This epic isn't in the current pull — it's named by its children. Enable the backlog toggle or add its project to see the epic itself."
+                  >not pulled</span>
+                </div>
+                <div class="ttitle">{{ row.node.title }}</div>
+                <div v-if="row.node.children.length" class="rollup" :title="row.hint">
+                  <span class="bar">
+                    <span
+                      v-for="s in row.roll"
+                      :key="s.category"
+                      class="seg"
+                      :style="{
+                        width: `${(s.n / row.node.children.length) * 100}%`,
+                        background: CATEGORY_COLOR[s.category].c,
+                      }"
+                    ></span>
+                  </span>
+                  <span class="rollup-n">
+                    <template v-if="row.node.shown.length !== row.node.children.length">{{ row.node.shown.length }}/</template>{{ row.node.children.length }}
+                  </span>
+                </div>
               </div>
             </div>
-            <div class="play" title="Spawn agent">
-              <svg width="11" height="11" viewBox="0 0 12 12" fill="#9cc6ec"><path d="M3 2l6 4-6 4z" /></svg>
+
+            <!-- ticket row: an epic's child, or a ticket that hangs off none -->
+            <div
+              v-else
+              class="row"
+              :class="{ child: row.child }"
+              @click="emit('launch', row.t)"
+            >
+              <span
+                class="status"
+                :style="{
+                  background: CATEGORY_COLOR[row.t.status.category].c,
+                  boxShadow: `0 0 6px ${CATEGORY_COLOR[row.t.status.category].g}`,
+                }"
+              ></span>
+              <div class="meta">
+                <div class="line1">
+                  <span class="key">{{ row.t.key }}</span>
+                  <span class="slabel">{{ row.t.status.label }}</span>
+                </div>
+                <div class="ttitle">{{ row.t.title }}</div>
+                <div class="tagrow">
+                  <template v-if="row.t.tag">
+                    <span class="tag-dot" :style="{ background: tagColor(row.t.tag) }"></span>
+                    <span class="tag">{{ row.t.tag }}</span>
+                  </template>
+                  <!-- Parent named inline only when the row ISN'T already sitting
+                       under its epic — i.e. the cross-repo case, where the link
+                       would otherwise be invisible. -->
+                  <span
+                    v-if="!row.child && row.t.parent"
+                    class="parent-chip"
+                    :title="`Child of ${row.t.parent.key}${row.t.parent.title ? ` — ${row.t.parent.title}` : ''}`"
+                  >↳ {{ row.t.parent.key }}</span>
+                  <span v-if="row.t.assignee" class="assignee" :title="`Assigned to ${row.t.assignee.name}`">@{{ row.t.assignee.name }}</span>
+                </div>
+              </div>
+              <div class="play" title="Spawn agent">
+                <svg width="11" height="11" viewBox="0 0 12 12" fill="#9cc6ec"><path d="M3 2l6 4-6 4z" /></svg>
+              </div>
             </div>
-          </div>
+          </template>
         </template>
       </template>
     </div>
@@ -598,5 +755,108 @@ function clearFilters(): void {
   background: #16314a;
   border: 1px solid #2a557d;
   flex: 0 0 auto;
+}
+
+/* epics (DRY-13) */
+.row.epic {
+  align-items: flex-start;
+  gap: 5px;
+  padding-left: 4px;
+  /* Reads as a header for what follows rather than a peer of it — the same
+     inset-bar trick the selected row uses, in the epic tag color. */
+  box-shadow: inset 2px 0 0 #8b7fd659;
+}
+.epic-chev {
+  flex: 0 0 auto;
+  width: 16px;
+  margin-top: 2px;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 4px;
+  color: #5a636f;
+  font-size: 9px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: transform 0.12s ease;
+}
+.epic-chev:hover {
+  color: #b8aae8;
+}
+.epic-chev.open {
+  transform: rotate(90deg);
+}
+.epic-chev.empty {
+  cursor: default;
+}
+.epic-badge {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 8.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  color: #8b7fd6;
+  border: 1px solid #8b7fd64d;
+  border-radius: 3px;
+  padding: 0 4px;
+  line-height: 1.7;
+  flex: 0 0 auto;
+}
+/* An epic named only by its children: no status of its own to show, so the row
+   stays visibly lighter than a real ticket instead of implying one. */
+.row.epic.ghost {
+  box-shadow: inset 2px 0 0 #8b7fd62e;
+}
+.row.epic.ghost .key {
+  color: #6f8fae;
+}
+.slabel.unpulled {
+  color: #55606b;
+  font-style: italic;
+  cursor: help;
+}
+.rollup {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 6px;
+  cursor: help;
+}
+.bar {
+  /* Fixed and short on purpose: stretched across the row it reads as a rule
+     under the title rather than a statistic. */
+  flex: 0 0 92px;
+  display: flex;
+  height: 3px;
+  border-radius: 2px;
+  background: #141a21;
+  overflow: hidden;
+}
+.seg {
+  flex: 0 0 auto;
+  height: 100%;
+}
+.rollup-n {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 9.5px;
+  color: #4f5965;
+  flex: 0 0 auto;
+}
+/* Children hang off a rail under their epic. Zero bottom margin so consecutive
+   children draw one continuous line rather than a dashed one. */
+.row.child {
+  margin-left: 13px;
+  margin-bottom: 0;
+  padding-left: 11px;
+  border-left: 1px solid #1e262e;
+  border-radius: 0 8px 8px 0;
+}
+.parent-chip {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 9.5px;
+  color: #6b7682;
+  border: 1px solid #20272f;
+  border-radius: 8px;
+  padding: 0 5px;
+  line-height: 1.6;
 }
 </style>

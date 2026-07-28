@@ -31,6 +31,19 @@ export interface Ticket {
   repo: string;
   /** Ticket type, when the provider exposes it (epic / task / bug / …). */
   type?: string;
+  /**
+   * Parent ticket, when this one hangs off something (DRY-13). Carries the
+   * title, not just the key, on purpose: the sidebar's default pull excludes
+   * the backlog bucket, and epics sit in the backlog far more often than their
+   * children do — so the common case is a child whose epic was never pulled.
+   * With the title in hand the sidebar can still head the group with a real
+   * name instead of a bare key.
+   *
+   * `type` is the parent's own type where the provider exposes it (Jira does;
+   * Switchyard's inline parent doesn't). The sidebar uses it to tell an
+   * epic parent from a task parent when the parent itself isn't loaded.
+   */
+  parent?: { key: string; title?: string; type?: string };
   /** Primary label/tag, surfaced as a chip in the sidebar. */
   tag?: string;
   /** Assignee, when the provider exposes one. Absent = unassigned. */
