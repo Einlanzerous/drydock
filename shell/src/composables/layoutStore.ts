@@ -242,20 +242,20 @@ async function recover(): Promise<void> {
         // this desk straight back out in 400ms — one redundant round trip per
         // heal. Left alone deliberately: it also re-persists whatever DRY-42's
         // duplicate-id healing fixed up on the way in.
-      } else if (unflushed && !(await drain())) {
-        return scheduleRetry();
       }
-      // No probe needed on this path — the read above IS the evidence.
-    } else if (unflushed) {
-      if (!(await drain())) return scheduleRetry();
-    } else {
+      // No probe below on this path — the read above IS the evidence.
+    } else if (!unflushed) {
       // Nothing queued is NOT evidence the store is back, and `noteRecovered()`
-      // is two lines away. `clearLayout` raises a notice on a failed DELETE and
-      // queues nothing at all, so this used to fall through to "layout
+      // is a few lines away. `clearLayout` raises a notice on a failed DELETE
+      // and queues nothing at all, so this used to fall through to "layout
       // persistence restored" without touching the network — announcing the
       // opposite of what was true. A read is the cheapest thing that can fail.
       await fetchWorkspace();
     }
+    // Anything queued NOW goes before this counts as recovered — including a
+    // desk `saveLayout` parked while the await above was outstanding, which is
+    // why this sits after every branch rather than inside one.
+    if (!(await drain())) return scheduleRetry();
     noteRecovered();
   } catch (err) {
     noteDegraded(err);
@@ -402,6 +402,20 @@ export function saveLayout(host: string, layout: LayoutMode, windows: Win[]): vo
   if (!mayPush) {
     // Never overwrite a copy we failed to read — but keep it, because the
     // re-read that opens the latch is going to need something to send.
+    unflushed = data;
+    return;
+  }
+  if (recovering) {
+    // Hand it to the attempt already in flight rather than starting a second
+    // writer. Two pushes racing to the same row is a last-write-wins the
+    // client doesn't control: if the store heals mid-window, this desk can
+    // succeed and mark everything recovered while the older one lands after it
+    // at the daemon — which then keeps the older desk with nothing armed.
+    // Narrow, but free to remove, and `drain` picks this up before the attempt
+    // is allowed to call itself finished.
+    //
+    // Costs nothing on the healthy path: `recovering` can only be true while
+    // `degraded` is, since that's the only way `recover` runs at all.
     unflushed = data;
     return;
   }
