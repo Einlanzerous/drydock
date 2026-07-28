@@ -89,5 +89,30 @@ CHK=$(psql "select coalesce(checksum,'NULL') from drydock_schema_migrations wher
 stop 4375
 
 echo
+echo "4. a migration slower than the ordinary query ceiling still applies"
+# The pool caps a normal query at 10s so a sick database can't hold a request
+# open. Applied to schema changes that is a trap with a long fuse: the first
+# migration that builds an index over a table with real history would be
+# cancelled, roll back, and retry forever with nothing but a 57014 to explain
+# it. migrate() exempts the DDL (MIGRATION_TIMEOUT_MS) — this proves it, because
+# nothing else here would notice it being taken away.
+SLOW=$(dirname "$MIG")/002_slow_probe.sql
+cat > "$SLOW" <<'SQL'
+do $$ begin perform pg_sleep(13); end $$;
+create table if not exists dry58_slow_probe (x int);
+SQL
+trap 'cp /tmp/dry58-mig.orig "$MIG"; rm -f "$SLOW"' EXIT
+start 4376 /tmp/dry58-slow.log
+CODE=$(curl -s -m 60 -o /dev/null -w '%{http_code}' localhost:4376/api/workspace)
+[ "$CODE" = "200" ] && ok "a 13s migration applies under a 10s query ceiling" \
+  || no "slow migration applies" "got $CODE — $(grep -o 'statement timeout' /tmp/dry58-slow.log | head -1)"
+HAS=$(psql "select count(*) from information_schema.tables where table_name='dry58_slow_probe'")
+[ "$HAS" = "1" ] && ok "and its DDL really landed" || no "DDL landed" "count=$HAS"
+stop 4376
+psql "drop table if exists dry58_slow_probe" > /dev/null
+psql "delete from drydock_schema_migrations where name = '002_slow_probe.sql'" > /dev/null
+rm -f "$SLOW"
+
+echo
 echo "$([ $FAIL -eq 0 ] && echo ALL PASS || echo "$FAIL FAILURE(S)")  ($PASS passed)"
 exit $([ $FAIL -eq 0 ] && echo 0 || echo 1)

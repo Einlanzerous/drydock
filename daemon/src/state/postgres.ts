@@ -30,6 +30,13 @@ const MIGRATIONS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "
 const MIGRATION_LOCK = 0x11ff_28;
 
 /**
+ * Ceiling for a migration's own DDL, which is exempt from the pool's ordinary
+ * 10s deadline (see migrate()). Long enough that no honest schema change meets
+ * it, short enough that a wedged one eventually hands the advisory lock back.
+ */
+const MIGRATION_TIMEOUT_MS = 600_000;
+
+/**
  * Don't hammer an unreachable database on every keystroke-debounced save.
  *
  * Doubling, not the flat 10s DRY-28 shipped (DRY-58). The flat window bounded a
@@ -85,13 +92,20 @@ export class PostgresStore implements StateStore {
       // Only findable with a real partition: `docker stop` sends a RST, the
       // query fails instantly, and this looks perfectly bounded.
       //
-      // 10s rather than matching the 5s connect timeout, because this also
-      // covers `select pg_advisory_lock(...)` in migrate(), which legitimately
-      // waits on another daemon migrating the same database (CLAUDE.md's
-      // dev/prod/throwaway-all-pointed-at-one-database setup). The shell's
-      // write budget is chosen against THIS number (lib/daemon.ts) — a client
-      // that gives up first turns a 503 the daemon was about to send into an
+      // 10s rather than matching the 5s connect timeout, so an ordinary
+      // request has room to be slow without being wrong. The shell's write
+      // budget is chosen against THIS number (lib/daemon.ts) — a client that
+      // gives up first turns a 503 the daemon was about to send into an
       // anonymous timeout.
+      //
+      // It bounds `select pg_advisory_lock(...)` in migrate() too, which does
+      // mean a daemon can be cut off while legitimately waiting for another one
+      // to finish migrating (CLAUDE.md's dev/prod/throwaway-all-pointed-at-one
+      // -database setup). That's the right trade rather than an oversight:
+      // failing fast puts the wait in the cooldown, where a retry picks it up,
+      // instead of holding a request open for however long the other daemon
+      // takes. The migration DDL itself is exempted — that one really can be
+      // slow, see MIGRATION_TIMEOUT_MS.
       query_timeout: 10_000,
       // The same deadline again, server-side, and the two are not redundant.
       // `query_timeout` is a bare client timer (pg 8.22 `lib/client.js`): it
@@ -228,7 +242,34 @@ export class PostgresStore implements StateStore {
           // through leaves nothing half-created for the next attempt to trip on.
           await client.query("begin");
           try {
-            await client.query(sql);
+            // Lift the pool's 10s ceiling for the DDL itself, and ONLY for it.
+            // That ceiling exists to bound an ordinary request against a sick
+            // database; applied to schema changes it is a trap with a long
+            // fuse. Migrations are trivial today, so nothing would have failed
+            // now — but the first one that builds an index over a table with
+            // real history (which is what DRY-56's session log will be) would
+            // be cancelled at ten seconds, roll back, and retry forever, with
+            // the only clue a 57014 in a 503 body. `set local` is scoped to
+            // this transaction, so the ceiling is back for the next statement
+            // either way.
+            //
+            // Bounded, not disabled: unlimited would let one wedged migration
+            // hold the advisory lock indefinitely and block every other daemon.
+            // Ten minutes is far past any legitimate migration here and far
+            // short of forever.
+            await client.query(`set local statement_timeout = ${MIGRATION_TIMEOUT_MS}`);
+            // The client-side timer needs raising too, and can't be turned off:
+            // pg reads `config.query_timeout || connectionParameters.query_timeout`,
+            // so a per-query 0 is falsy and falls straight back to the pool's.
+            //
+            // The cast is because @types/pg's QueryConfig doesn't declare
+            // `query_timeout`, though the runtime reads it per query. Verified
+            // rather than assumed: with a 2s pool ceiling and this set to 8s, a
+            // 5s statement completes — and the very next statement outside the
+            // transaction is cancelled at 2s again, so neither escape leaks.
+            await client.query({ text: sql, query_timeout: MIGRATION_TIMEOUT_MS } as pg.QueryConfig & {
+              query_timeout: number;
+            });
             await client.query(
               "insert into drydock_schema_migrations (name, checksum) values ($1, $2)",
               [file, checksum],
