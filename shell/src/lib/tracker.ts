@@ -2,7 +2,7 @@
 // /api/tracker/* — never to Switchyard/Jira directly, so credentials stay
 // host-side. The types here mirror the browser-facing subset of
 // daemon/src/tracker/types.ts — keep them in sync (same as protocol.ts).
-import { DAEMON_HTTP } from "./daemon.js";
+import { DAEMON_HTTP, expectList, getJson } from "./daemon.js";
 
 export type TicketCategory =
   | "backlog"
@@ -61,8 +61,11 @@ export function tagColor(tag?: string): string {
 }
 
 export async function getTrackerInfo(): Promise<TrackerInfo> {
-  const res = await fetch(`${DAEMON_HTTP}/api/tracker/info`);
-  return res.json();
+  const info = await getJson<TrackerInfo>(`${DAEMON_HTTP}/api/tracker/info`);
+  // `name` renders as `name.toUpperCase()`, so a body without one is a crash in
+  // the sidebar's template rather than an error the caller can absorb (DRY-51).
+  if (typeof info.name !== "string") throw new Error("daemon returned no tracker name");
+  return info;
 }
 
 export interface TicketScope {
@@ -80,21 +83,27 @@ export async function listTickets(open = true, scope: TicketScope = {}): Promise
   const params = new URLSearchParams({ open: String(open) });
   if (scope.projects?.length) params.set("projects", scope.projects.join(","));
   if (scope.backlog) params.set("backlog", "true");
-  const res = await fetch(`${DAEMON_HTTP}/api/tracker/tickets?${params}`);
-  return (await res.json()).tickets;
+  // 502 here is the everyday case, not just version skew: the daemon answers
+  // an unreachable tracker with `{error}`, which used to parse as a ticket list
+  // and blank `tickets` into undefined — a crash in the sidebar's map (DRY-51).
+  const body = await getJson<{ tickets?: Ticket[] }>(
+    `${DAEMON_HTTP}/api/tracker/tickets?${params}`,
+  );
+  return expectList(body.tickets, "tickets");
 }
 
 export async function searchTickets(q: string, projects?: string[]): Promise<Ticket[]> {
   const params = new URLSearchParams({ q });
   if (projects?.length) params.set("projects", projects.join(","));
-  const res = await fetch(`${DAEMON_HTTP}/api/tracker/search?${params}`);
-  return (await res.json()).tickets;
+  const body = await getJson<{ tickets?: Ticket[] }>(`${DAEMON_HTTP}/api/tracker/search?${params}`);
+  return expectList(body.tickets, "tickets");
 }
 
 export async function getTicket(key: string): Promise<TicketDetail> {
-  const res = await fetch(`${DAEMON_HTTP}/api/tracker/ticket/${encodeURIComponent(key)}`);
-  const body = await res.json();
-  if (!res.ok) throw new Error(body.error ?? "ticket not found");
+  const body = await getJson<{ ticket?: TicketDetail }>(
+    `${DAEMON_HTTP}/api/tracker/ticket/${encodeURIComponent(key)}`,
+  );
+  if (!body.ticket) throw new Error("ticket not found");
   return body.ticket;
 }
 

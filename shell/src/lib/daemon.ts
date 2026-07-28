@@ -29,10 +29,46 @@ export const DAEMON_WS = override
   ? override.replace(/^http/, "ws")
   : `${wsProto}://${host}:${DAEMON_PORT}`;
 
+/**
+ * Every read goes through here, because the failure this guards is not a
+ * request that fails — it's a request that SUCCEEDS with a failure (DRY-51). A
+ * 404's `{"error":"not found"}` parses as JSON perfectly well, so a bare
+ * `res.json()` hands the caller an error object typed as data. The caller's
+ * `catch` never runs, the missing field travels three layers, and it finally
+ * throws inside a render — where it takes Vue's patcher down with it and the
+ * whole desk stops updating, not just the feature that asked.
+ *
+ * A shell newer than its daemon is the routine case here, not a hypothetical:
+ * the shell ships as its own GHCR image against a pinned daemon checkout
+ * (docs/deploy.md), so anything added since that ref 404s for the length of a
+ * partial deploy. The tracker being unreachable does it too — that route
+ * answers 502 with an error body.
+ */
+export async function getJson<T>(url: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(url, init);
+  // Parsed BEFORE the status check so a daemon that explains itself in `error`
+  // gets to. A body that isn't JSON at all (nginx's HTML 502, a wrong port
+  // serving an SPA's index.html with a cheerful 200) leaves it undefined.
+  const body = await res.json().catch(() => undefined);
+  if (!res.ok) throw new Error(body?.error ?? `daemon returned ${res.status}`);
+  if (body === undefined) throw new Error("daemon returned a non-JSON body");
+  return body as T;
+}
+
+/**
+ * Unwrap a list out of its envelope. A 200 carrying the wrong shape is the same
+ * bug with a longer fuse: `undefined` assigned to a `Ticket[]` doesn't throw
+ * here, it throws in the render that maps it — the desk-down failure again. So
+ * the envelope is checked at the point it's opened.
+ */
+export function expectList<T>(value: unknown, what: string): T[] {
+  if (!Array.isArray(value)) throw new Error(`daemon returned no ${what}`);
+  return value as T[];
+}
+
 export async function listSessions(): Promise<SessionInfo[]> {
-  const res = await fetch(`${DAEMON_HTTP}/api/sessions`);
-  const body = await res.json();
-  return body.sessions;
+  const body = await getJson<{ sessions?: SessionInfo[] }>(`${DAEMON_HTTP}/api/sessions`);
+  return expectList(body.sessions, "sessions");
 }
 
 export async function createSession(opts: {
@@ -79,8 +115,17 @@ export async function createSession(opts: {
   return body.session;
 }
 
+/**
+ * Stop a session. The status is checked (DRY-51) because the alternative is a
+ * Stop button that reports success for a kill that never happened — every
+ * caller here already surfaces the throw, and a run that keeps going after you
+ * stopped it is precisely the state an unattended run must never be left in.
+ */
 export async function killSession(id: string): Promise<void> {
-  await fetch(`${DAEMON_HTTP}/api/sessions/${id}/kill`, { method: "POST" });
+  const res = await fetch(`${DAEMON_HTTP}/api/sessions/${encodeURIComponent(id)}/kill`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`daemon returned ${res.status}`);
 }
 
 export function attachUrl(id: string): string {
@@ -194,11 +239,10 @@ export interface WorkspaceEnvelope {
  * mirror gets its turn. Bail early and let the mirror answer.
  */
 export async function fetchWorkspace(): Promise<WorkspaceEnvelope | null> {
-  const res = await fetch(`${DAEMON_HTTP}/api/workspace`, {
-    signal: AbortSignal.timeout(3000),
-  });
-  if (!res.ok) throw new Error(`daemon returned ${res.status}`);
-  const body = await res.json();
+  const body = await getJson<{ workspace?: WorkspaceEnvelope | null }>(
+    `${DAEMON_HTTP}/api/workspace`,
+    { signal: AbortSignal.timeout(3000) },
+  );
   return body.workspace ?? null;
 }
 
@@ -236,8 +280,12 @@ export interface RepoResolution {
 export async function resolveRepoCwd(repo: string, ticket?: string): Promise<RepoResolution> {
   const q = new URLSearchParams({ repo });
   if (ticket) q.set("ticket", ticket);
-  const res = await fetch(`${DAEMON_HTTP}/api/repos/resolve?${q.toString()}`);
-  return res.json();
+  const body = await getJson<RepoResolution>(`${DAEMON_HTTP}/api/repos/resolve?${q.toString()}`);
+  // Without this the panel would preview an undefined cwd as a blank line, and
+  // the caller's catch — whose comment promises to keep the last-good preview —
+  // would never fire (DRY-51).
+  if (typeof body.cwd !== "string") throw new Error("daemon returned no cwd");
+  return body;
 }
 
 /** Prune a ticket's worktree on demand (DRY-15). Kept on close, removed here. */
@@ -263,10 +311,9 @@ export async function sessionFile(
   id: string,
   path: string,
 ): Promise<{ path: string; content: string }> {
-  const res = await fetch(
+  const body = await getJson<{ path: string; content: string }>(
     `${DAEMON_HTTP}/api/sessions/${encodeURIComponent(id)}/file?path=${encodeURIComponent(path)}`,
   );
-  const body = await res.json();
-  if (!res.ok) throw new Error(body.error ?? "file not readable");
+  if (typeof body.content !== "string") throw new Error("file not readable");
   return body;
 }

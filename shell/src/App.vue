@@ -201,7 +201,10 @@ async function refresh() {
     reconcile(await listSessions());
     error.value = null;
   } catch (e) {
-    error.value = `Daemon unreachable — is it running on :4317? (${String(e)})`;
+    // Names the daemon it actually tried, not the dev default: this banner is
+    // what you read during a version skew, and a prod shell pointed at :4318
+    // telling you to check :4317 sends you to the wrong machine (DRY-51).
+    error.value = `Daemon unreachable at ${DAEMON_HTTP} (${String(e)})`;
   }
 }
 
@@ -686,7 +689,10 @@ onMounted(async () => {
     providerName.value = info.name;
     scopeProjects.value = info.projects ?? [];
   } catch {
-    /* provider name stays default if the tracker info call is unreachable */
+    // The name stays at its default when the call doesn't produce one. That
+    // only became true in DRY-51: a daemon answering 404/502 with an error body
+    // resolved this promise instead of rejecting it, so the catch never ran and
+    // `undefined` reached a template that uppercases it.
   }
   // Best-effort and never awaited-on for anything that blocks the desk: an
   // older daemon 404s here and the launch panel just names `manual`.

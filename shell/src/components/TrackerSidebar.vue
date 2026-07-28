@@ -15,6 +15,13 @@ import { CATEGORY_COLOR, groupByRepo, tagColor, type Ticket } from "../lib/track
 // removable; "backlog" opts the backlog bucket into the pull (off by default).
 // The parent owns the state, refetches on change, and persists it.
 const props = defineProps<{
+  /**
+   * Provider label. Typed `string`, defaulted upstream, and still rendered
+   * through a fallback: this is the header that took the whole desk down in
+   * DRY-51 — a throw here happens mid-patch, so Vue stops re-rendering
+   * everything, not just the sidebar. The client that fed it `undefined` is
+   * fixed; the belt stays because of what a repeat costs.
+   */
   name: string;
   tickets: Ticket[];
   refreshing?: boolean;
@@ -111,7 +118,7 @@ function clearFilters(): void {
         <rect x="2" y="2" width="12" height="12" rx="3" fill="#1e2b3a" stroke="#3d6fa6" stroke-width="1.2" />
         <path d="M5 8l2 2 4-4.5" stroke="#5b9bd5" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round" />
       </svg>
-      <span class="label">{{ name.toUpperCase() }}</span>
+      <span class="label">{{ (name || "Tracker").toUpperCase() }}</span>
       <span class="count">{{ filtered.length }}<template v-if="filtered.length !== tickets.length">/{{ tickets.length }}</template></span>
       <button
         class="refresh"
