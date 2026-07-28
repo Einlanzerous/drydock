@@ -66,7 +66,54 @@ function writeLocal(host: string, data: PersistedLayout): void {
 // ---- daemon ----
 
 /**
- * Latched once a daemon write fails, so the console gets one line per
+ * What the store needs back from the window manager to recover in place
+ * (DRY-58). Passed to `loadLayout`, because that is the moment recovery might
+ * first be needed and there is no second entry point to forget.
+ */
+export interface RecoveryHooks {
+  /**
+   * Put a desk the daemon turned out to be holding onto the screen, live —
+   * the same path a page load takes, so the two can't drift.
+   */
+  apply(layout: PersistedLayout): void;
+  /**
+   * Whether this client has ARRANGED the desk since it loaded: dragged,
+   * resized, minimized, restored, changed layout mode, or moved a workspace
+   * pane's own furniture. A window merely APPEARING because the session poll
+   * found a new PTY is explicitly not arranging — see the conflict rule in
+   * `recover()`, which turns on exactly this distinction.
+   */
+  arranged(): boolean;
+}
+
+/**
+ * Recovery state. The store degrades in two distinguishable ways and both end
+ * here: the load-time read failed (`mayPush` never latched, see below), or a
+ * push failed after a good read (`unflushed` holds the desk that didn't land).
+ */
+let hooks: RecoveryHooks | null = null;
+let recoveryHost: string | null = null;
+/** The most recent desk that a degraded store never took. */
+let unflushed: PersistedLayout | null = null;
+let timer: ReturnType<typeof setTimeout> | null = null;
+let attempt = 0;
+/**
+ * An attempt is in flight. Two triggers can land on top of each other — a
+ * wake-up firing while the backoff's own attempt is still awaiting a fetch —
+ * and two concurrent recoveries would race to PUT the same desk twice.
+ */
+let recovering = false;
+
+/**
+ * 5s, then doubling to a 30s ceiling. The floor is short because the shell's
+ * retry is cheap — a daemon whose Postgres is down fast-fails from its own
+ * cooldown without dialling anything — and the ceiling is there because an
+ * outage that lasts an hour shouldn't be probed 720 times to find out.
+ */
+const BACKOFF_MS = [5_000, 10_000, 20_000, 30_000];
+
+/**
+ * Latched once a daemon read or write fails, so the console gets one line per
  * transition rather than one per drag. Worth saying out loud at all: silently
  * writing to a mirror nobody reads is how you discover at the worst possible
  * moment that your layout stopped roaming.
@@ -74,15 +121,122 @@ function writeLocal(host: string, data: PersistedLayout): void {
 let degraded = false;
 
 function noteDegraded(err: unknown): void {
-  if (degraded) return;
-  degraded = true;
-  console.warn("[drydock] layout is not reaching the daemon — using this browser's copy", err);
+  if (!degraded) {
+    degraded = true;
+    console.warn("[drydock] layout is not reaching the daemon — using this browser's copy", err);
+  }
+  // Outside the `if` on purpose: the transition is what's worth SAYING once,
+  // but every failure has to leave a retry armed. Arming it only on the
+  // transition would mean a failure that arrives while already degraded — the
+  // common case, a save failing during an outage the load already reported —
+  // silently dropping the recovery this whole section exists for.
+  scheduleRetry();
 }
 
 function noteRecovered(): void {
+  if (timer) {
+    clearTimeout(timer);
+    timer = null;
+  }
+  attempt = 0;
   if (!degraded) return;
   degraded = false;
   console.info("[drydock] layout persistence restored");
+}
+
+function scheduleRetry(): void {
+  if (timer || !degraded || !hooks || !recoveryHost) return;
+  const delay = BACKOFF_MS[Math.min(attempt, BACKOFF_MS.length - 1)];
+  attempt += 1;
+  timer = setTimeout(() => {
+    timer = null;
+    void recover();
+  }, delay);
+}
+
+/**
+ * Retry now rather than waiting out the backoff, because the two events this
+ * hangs off both mean "the answer probably just changed": a laptop coming back
+ * from sleep is on a different network than the one that failed, and a tab
+ * being looked at again is the moment a stale desk starts to matter.
+ *
+ * `attempt` deliberately isn't reset. A tab flipped back and forth would
+ * otherwise poll on every flip, and the point of the ceiling is that a long
+ * outage stays quiet.
+ */
+function wake(): void {
+  // `recovering` guards the timer, not just the work: cancelling a scheduled
+  // retry and then bailing out of the attempt would leave nothing armed.
+  if (!degraded || recovering) return;
+  if (timer) {
+    clearTimeout(timer);
+    timer = null;
+  }
+  void recover();
+}
+
+let listening = false;
+function listen(): void {
+  if (listening || typeof window === "undefined") return;
+  listening = true;
+  window.addEventListener("online", wake);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") wake();
+  });
+}
+
+/**
+ * One attempt at ending the outage. Which half runs depends on how we got here.
+ *
+ * The interesting case is the first: we never read the daemon's copy, so we
+ * don't know whether the desk on screen is a restore or something this browser
+ * built from scratch at cascade positions — which is the whole reason `mayPush`
+ * exists. Re-reading answers it, and then:
+ *
+ * - the daemon has nothing → there is nothing to lose, our desk goes up.
+ * - the daemon has a desk and this client hasn't arranged anything → the
+ *   daemon's copy is the newest thing a HUMAN arranged, so it wins and lands on
+ *   screen. That is precisely what a reload used to do; the only change is that
+ *   nobody has to know to perform it.
+ * - the daemon has a desk and this client HAS arranged one → ours wins. Had the
+ *   store been up the whole time, every one of those drags would already have
+ *   overwritten the remote copy; losing them because the store blinked would be
+ *   the outage costing work, which is the thing this ticket is about.
+ */
+async function recover(): Promise<void> {
+  if (!degraded || !hooks || !recoveryHost || recovering) return;
+  // A tab nobody is looking at has no desk to keep in sync. Reschedule rather
+  // than relying on `visibilitychange` alone — recovery that hangs off a single
+  // event is recovery that doesn't happen when the event doesn't fire.
+  if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+    return scheduleRetry();
+  }
+  recovering = true;
+  try {
+    if (!mayPush) {
+      const remote = validate(await fetchWorkspace());
+      // The read landed, so the latch opens whichever desk wins below.
+      mayPush = true;
+      if (remote && !hooks.arranged()) {
+        writeLocal(recoveryHost, remote);
+        hooks.apply(remote);
+        unflushed = null;
+      } else if (unflushed) {
+        await putWorkspace(unflushed);
+        unflushed = null;
+      }
+    } else if (unflushed) {
+      // Cleared only after the await resolves: a push that fails again must
+      // leave the desk queued, not swallow it.
+      await putWorkspace(unflushed);
+      unflushed = null;
+    }
+    noteRecovered();
+  } catch (err) {
+    noteDegraded(err);
+  } finally {
+    recovering = false;
+  }
 }
 
 /**
@@ -97,9 +251,14 @@ function noteRecovered(): void {
  * and the moment the store comes back that from-scratch layout is written
  * straight over the desk you arranged on the other machine.
  *
- * So: no read, no write. Nothing is lost — the mirror keeps working and a
- * reload re-reads — and the daemon's copy is only ever replaced by a client
- * that knows what it's replacing.
+ * So: no read, no write. Nothing is lost — the mirror keeps working — and the
+ * daemon's copy is only ever replaced by a client that knows what it's
+ * replacing.
+ *
+ * DRY-58: it used to take a page reload to get that read in, which meant an
+ * outage at page load cost roaming for the rest of the session and said so only
+ * to the console. `recover()` below re-reads on a backoff instead, so the latch
+ * opens on its own.
  */
 let mayPush = false;
 
@@ -113,7 +272,16 @@ let mayPush = false;
  * to remove. The cost is losing at most one debounce window (400ms) of dragging
  * if the tab is closed mid-write, which is not worth a clock war.
  */
-export async function loadLayout(host: string): Promise<PersistedLayout | null> {
+export async function loadLayout(
+  host: string,
+  recovery: RecoveryHooks,
+): Promise<PersistedLayout | null> {
+  // Armed before the first read, not after a failed one: this IS the call that
+  // can fail, and a recovery path installed in the success branch would be
+  // installed exactly when it isn't needed.
+  hooks = recovery;
+  recoveryHost = host;
+  listen();
   try {
     const workspace = await fetchWorkspace();
     // The read succeeded, so we now know what the daemon holds — including
@@ -130,14 +298,20 @@ export async function loadLayout(host: string): Promise<PersistedLayout | null> 
     // upgrading to DRY-28 is a one-time migration instead of a silent reset.
     const local = readLocal(host);
     if (local) {
-      void putWorkspace(local).catch(noteDegraded);
+      void putWorkspace(local).catch((err) => {
+        // Queue it: a one-time migration that lands in a blip and is never
+        // retried is the DRY-14 desk quietly staying behind forever.
+        unflushed = local;
+        noteDegraded(err);
+      });
       return local;
     }
     return null;
   } catch (err) {
     // Daemon unreachable, its store degraded (503), or the read timed out:
     // fall back to the mirror and, crucially, DON'T push (see `mayPush`). The
-    // desktop still works; it just stops roaming until a reload gets a read in.
+    // desktop still works, and `noteDegraded` arms the re-read that gets it
+    // roaming again once the store comes back.
     noteDegraded(err);
     return readLocal(host);
   }
@@ -148,12 +322,25 @@ export async function loadLayout(host: string): Promise<PersistedLayout | null> 
  * watcher on a drag, and saving a layout must never be something the UI waits
  * on. The local mirror is written synchronously first, so an unreachable daemon
  * (or a tab closed mid-request) can't lose the arrangement outright.
+ *
+ * A push that doesn't land is REMEMBERED, not queued (DRY-58). One slot, always
+ * the newest desk: replaying every drag of an outage would just walk the
+ * windows through positions nobody is waiting to see, and the last one is the
+ * only one that was ever true.
  */
 export function saveLayout(host: string, layout: LayoutMode, windows: Win[]): void {
   const data: PersistedLayout = { version: LAYOUT_VERSION, layout, windows };
   writeLocal(host, data);
-  if (!mayPush) return; // never overwrite a copy we failed to read
-  putWorkspace(data).then(noteRecovered, noteDegraded);
+  if (!mayPush) {
+    // Never overwrite a copy we failed to read — but keep it, because the
+    // re-read that opens the latch is going to need something to send.
+    unflushed = data;
+    return;
+  }
+  putWorkspace(data).then(noteRecovered, (err) => {
+    unflushed = data;
+    noteDegraded(err);
+  });
 }
 
 /** Reset the saved arrangement in both places. */
@@ -165,6 +352,11 @@ export async function clearLayout(host: string): Promise<void> {
       /* ignore */
     }
   }
+  // Drop anything the recovery loop was holding. A reset that raced an outage
+  // would otherwise heal by pushing the desk you just asked to delete back up.
+  // The DELETE itself isn't retried on purpose: the local copy is already gone,
+  // so a retry can only resurrect state, never restore it.
+  unflushed = null;
   try {
     await deleteWorkspace();
   } catch (err) {
