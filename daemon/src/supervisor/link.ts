@@ -15,7 +15,7 @@ import * as fs from "node:fs";
 import * as net from "node:net";
 import { fileURLToPath } from "node:url";
 import { log } from "../log.js";
-import { probeSocket, sessionPaths, writeMeta } from "../sessions-dir.js";
+import { forget, probeSocket, sessionPaths, writeMeta } from "../sessions-dir.js";
 import {
   FrameReader,
   Frame,
@@ -64,6 +64,15 @@ export class SupervisorLink {
 
   private ready!: { resolve: () => void; reject: (err: Error) => void };
   private settled = false;
+  private handshakeTimer?: ReturnType<typeof setTimeout>;
+  /**
+   * Reconnect attempts, on the LINK rather than inside recover()'s loop.
+   *
+   * A local counter resets every time a socket connects, so a supervisor that
+   * accepts and immediately closes yields an endless connect/drop cycle instead
+   * of the intended five tries. Only a completed handshake clears this.
+   */
+  private recoverAttempts = 0;
   /** Set once an Exit frame arrives, so a close afterwards is expected. */
   private ended = false;
   private disposed = false;
@@ -132,11 +141,38 @@ export class SupervisorLink {
       log.warn("supervisor socket error", { id: this.id, err: String(err) });
       this.fail(err instanceof Error ? err : new Error(String(err)));
     });
+    // Armed for EVERY connection, not just the first. `open()` used to own this
+    // timer, which left the reconnect path with none: a supervisor that accepts
+    // and then says nothing parked the link in handshake phase indefinitely,
+    // replay chunks accumulating, with nothing to time it out.
+    this.armHandshake(socket);
     socket.on("close", () => {
+      // Only meaningful while a handshake is outstanding; a no-op afterwards.
       this.fail(new Error("supervisor closed the connection during handshake"));
       if (this.ended || this.disposed) return;
+      // A link whose FIRST handshake never completed has no session behind it
+      // yet — open()'s caller is already rejecting and will dispose. Recovering
+      // here would also dereference a hello we never received.
+      if (!this.helloValue) return;
       void this.recover();
     });
+  }
+
+  /** Drop a connection that connects and then says nothing. */
+  private armHandshake(socket: net.Socket): void {
+    clearTimeout(this.handshakeTimer);
+    this.handshakeTimer = setTimeout(() => {
+      if (this.phase === "live" || this.disposed) return;
+      log.warn("supervisor handshake stalled — dropping the connection", {
+        id: this.id,
+        ms: HANDSHAKE_MS,
+      });
+      // Rejects an outstanding open(); on a reconnect `fail` is a no-op and the
+      // destroy is what matters — it turns a stall into a counted attempt.
+      this.fail(new Error(`supervisor handshake timed out after ${HANDSHAKE_MS}ms`));
+      socket.destroy();
+    }, HANDSHAKE_MS);
+    this.handshakeTimer.unref?.();
   }
 
   private onFrame(type: number, payload: Buffer): void {
@@ -164,6 +200,8 @@ export class SupervisorLink {
       case Frame.Ready: {
         if (!this.helloValue) return this.fail(new Error("supervisor sent Ready before Hello"));
         this.phase = "live";
+        clearTimeout(this.handshakeTimer);
+        this.recoverAttempts = 0; // a completed handshake, and only that, is progress
         if (this.settled) {
           // A reconnect, not the first handshake: hand the session a fresh
           // authoritative buffer to replace what it had.
@@ -209,14 +247,25 @@ export class SupervisorLink {
    * try to get back in before concluding anything.
    */
   private async recover(): Promise<void> {
-    for (let attempt = 1; attempt <= RECONNECT_ATTEMPTS; attempt++) {
+    while (this.recoverAttempts < RECONNECT_ATTEMPTS) {
       if (this.disposed || this.ended) return;
-      if (!alive(this.hello.pid)) break;
+      // Optional-chained: a link can reach here before Hello ever arrived, and
+      // the `hello` getter THROWS in that state — into a floating promise, so
+      // the failure surfaced as an UNHANDLED REJECTION instead of the "the
+      // supervisor is gone" path below. Reachable: the supervisor holds its
+      // listener open for 250ms after the child exits, and boot reconciliation
+      // dials straight into that window.
+      const pid = this.helloValue?.pid;
+      if (pid === undefined || !alive(pid)) break;
+      const attempt = ++this.recoverAttempts;
       await delay(RECONNECT_DELAY_MS * attempt);
       try {
         const socket = await dial(sessionPaths(this.id).sock);
         this.attach(socket);
-        log.info("supervisor connection recovered", { id: this.id, attempt });
+        log.info("supervisor connection re-dialled", { id: this.id, attempt });
+        // NOT recovered yet — `attach` starts a handshake that may still stall
+        // or close. Ready is what clears recoverAttempts; until then a fresh
+        // recover() picks up the count where this one left off.
         return;
       } catch (err) {
         log.warn("supervisor reconnect failed", { id: this.id, attempt, err: String(err) });
@@ -254,6 +303,7 @@ export class SupervisorLink {
    */
   dispose(): void {
     this.disposed = true;
+    clearTimeout(this.handshakeTimer);
     this.socket?.destroy();
   }
 
@@ -264,20 +314,15 @@ export class SupervisorLink {
     const ready = new Promise<void>((resolve, reject) => {
       link.ready = { resolve, reject };
     });
-    const timer = setTimeout(
-      () => link.fail(new Error(`supervisor handshake timed out after ${HANDSHAKE_MS}ms`)),
-      HANDSHAKE_MS,
-    );
-    timer.unref?.();
     try {
+      // The handshake deadline is armed by attach(), which is also what covers
+      // the reconnect path — see armHandshake.
       link.attach(await dial(sock));
       await ready;
       return link;
     } catch (err) {
       link.dispose();
       throw err;
-    } finally {
-      clearTimeout(timer);
     }
   }
 
@@ -311,6 +356,20 @@ export class SupervisorLink {
    * reason — spawn the server, then poll the socket to a deadline.)
    */
   static async start(meta: SessionMeta): Promise<SupervisorLink> {
+    try {
+      return await SupervisorLink.spawn(meta);
+    } catch (err) {
+      // The index entry is written before the process exists, so every failure
+      // past that point (exec failed, never bound, handshake died) would leave
+      // a `<id>.json` for a session that never ran — which the next boot then
+      // reports as "supervisor vanished without an exit record" before cleaning
+      // it up, i.e. a scary line about a session nobody ever had.
+      forget(meta.id);
+      throw err;
+    }
+  }
+
+  private static async spawn(meta: SessionMeta): Promise<SupervisorLink> {
     const paths = sessionPaths(meta.id);
     writeMeta(meta);
 

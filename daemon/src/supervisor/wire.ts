@@ -74,7 +74,14 @@ export const Frame = {
   Input: 6,
   /** daemon → supervisor, JSON `{cols, rows}`. */
   Resize: 7,
-  /** daemon → supervisor, JSON `{signal?}`. Kill the child. */
+  /**
+   * daemon → supervisor, no payload. Kill the child.
+   *
+   * Deliberately carries nothing: which signal ends a session is the
+   * supervisor's business (node-pty's default), and a client-chosen signal
+   * would be a way to ask this process to do something other than the one
+   * thing it is for.
+   */
   Kill: 8,
   /**
    * daemon → supervisor, empty. "I am a real client — start talking."
@@ -90,10 +97,23 @@ export const Frame = {
 
 export type FrameType = (typeof Frame)[keyof typeof Frame];
 
-/** Human-readable frame names, for log lines about a wire that went wrong. */
-export const FRAME_NAMES: Record<number, string> = Object.fromEntries(
-  Object.entries(Frame).map(([name, type]) => [type, name]),
-);
+/**
+ * The index's filename suffixes, spelled ONCE.
+ *
+ * The daemon writes these files and the supervisor writes two of them, from
+ * different modules, and nothing type-checks a string built by concatenation:
+ * renaming `.exit.json` on one side only would leave boot reconciliation
+ * quietly unable to tell "ended while nobody was home" from "vanished", i.e.
+ * handoff documents that silently stop being written. Same failure class
+ * CLAUDE.md already calls out for protocol.ts's two copies.
+ */
+export const SUFFIX = {
+  meta: ".json",
+  sock: ".sock",
+  exit: ".exit.json",
+  scrollback: ".scrollback",
+  log: ".log",
+} as const;
 
 /** The supervisor's opening statement. Everything the daemon can't re-derive. */
 export interface SupervisorHello {
@@ -167,6 +187,18 @@ export interface SessionMeta {
    * artefacts. Without it, every restart would re-post to the tracker.
    */
   handoff?: string;
+  /**
+   * Somebody ended this session on purpose, and the daemon may not have seen it
+   * through (DRY-57 review).
+   *
+   * `/kill` removes the session from the registry immediately and depends on
+   * the child actually dying for the index files to be cleaned up in `onExit`.
+   * If the child ignores the signal, or the daemon restarts inside that window,
+   * the next boot finds a live supervisor and would happily adopt a session the
+   * user explicitly killed back onto the desk. Set BEFORE the kill is sent, so
+   * reconciliation can finish the job instead of undoing it.
+   */
+  killedAt?: number;
 }
 
 /** The supervisor's parting note, written next to the metadata as `<id>.exit.json`. */
@@ -189,7 +221,7 @@ export interface ExitRecord {
  * path from the same id without another field to keep in step.
  */
 export function socketName(id: string): string {
-  return `${id.slice(0, 12)}.sock`;
+  return `${id.slice(0, 12)}${SUFFIX.sock}`;
 }
 
 /** Encode one frame. `payload` is already-serialized bytes. */

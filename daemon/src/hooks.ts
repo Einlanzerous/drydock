@@ -58,8 +58,17 @@ const REPORTED_TOOLS = "Read|Glob|Grep|Task|WebSearch";
  * call — a duplicate on the rail that nobody can meaningfully answer.
  */
 const RETRY_CODES = "7|52|55|56";
-const RETRY_ATTEMPTS = 15;
 const RETRY_DELAY_S = 2;
+/** Gate: ~30s of absence, comfortably inside the hook's own 600s timeout. */
+const RETRY_ATTEMPTS = 15;
+/**
+ * Stop: fewer, because its budget is much tighter. Claude Code kills the hook
+ * at `timeout`, and the worst case per attempt is the full `-m` plus the delay
+ * (a daemon that ACCEPTS and then hangs, rather than refusing). 4 × (8+2) = 40s
+ * fits under 45; the 15 above would be killed mid-retry, which is the one
+ * outcome worse than giving up — the agent waits and the hook still loses.
+ */
+const RETRY_ATTEMPTS_QUIET = 4;
 
 /**
  * Wrap a hook's curl so it rides out a daemon restart (DRY-57).
@@ -78,8 +87,19 @@ const RETRY_DELAY_S = 2;
  * because the daemon reconciles its sessions BEFORE it binds the port: anything
  * that gets a connection at all finds this session already adopted, rather than
  * a 404 that would end the run.
+ *
+ * NOTE ON EXIT STATUS: every path here ends 0, where the bare curl propagated
+ * its own failure. That is deliberate — the CLI reads this hook's STDOUT, and
+ * an empty body already means "no decision, use your own prompt", so a non-zero
+ * status only adds noise to the agent's transcript. The cost is that a
+ * genuinely broken hook is indistinguishable from a declined one; the daemon
+ * log is where that distinction lives.
  */
-function withRetry(curl: string, opts: { body?: boolean; quiet?: boolean } = {}): string {
+function withRetry(
+  curl: string,
+  opts: { body?: boolean; quiet?: boolean } = {},
+): string {
+  const attempts = opts.quiet ? RETRY_ATTEMPTS_QUIET : RETRY_ATTEMPTS;
   // The replay of the body has to be INSIDE the command substitution:
   // `printf … | out=$(curl …)` pipes into the assignment, not into curl, and
   // leaves curl reading the hook's already-consumed stdin instead.
@@ -91,7 +111,7 @@ function withRetry(curl: string, opts: { body?: boolean; quiet?: boolean } = {})
     "i=0; while :; do " +
     `${attempt}; rc=$?; ` +
     `[ $rc -eq 0 ] && { ${success}; }; ` +
-    `i=$((i+1)); [ $i -ge ${RETRY_ATTEMPTS} ] && break; ` +
+    `i=$((i+1)); [ $i -ge ${attempts} ] && break; ` +
     `case $rc in ${RETRY_CODES}) sleep ${RETRY_DELAY_S};; *) break;; esac; ` +
     "done"
   );

@@ -83,6 +83,12 @@ for p in $(pgrep -f "supervisor/main"); do
 done
 ```
 
+**In that order — supervisors first, then the directory.** `rm -rf` on a
+sessions dir with live supervisors in it doesn't stop them; it deletes the
+socket and metadata that were the only handle on them, leaving processes that
+no daemon can ever find. (Done it. The symptom is a supervisor whose `/proc/<pid>/fd`
+shows its log as `(deleted)`.)
+
 Smoke-test against it (`curl` from another terminal):
 
 ```sh
@@ -271,6 +277,27 @@ The traps, all found the hard way:
    for an autonomous run that is the difference between silence and a handoff.
 8. **`pkill -f supervisor/main` kills your own shell**, because the command
    string contains the pattern. Filter on `/proc/<pid>/exe`.
+9. **A killed session whose child ignores the signal is the resurrection case.**
+   `/kill` drops it from the registry immediately and depends on the child
+   dying for the index to be cleaned; a child that traps SIGHUP breaks that
+   chain, and the next boot would adopt it back. `meta.killedAt` is written
+   BEFORE the signal so reconciliation finishes the job, and the supervisor
+   escalates to SIGKILL after a grace period so "kill" can't leave an
+   unreachable orphan. Reproduce with
+   `{"command":"/bin/sh","args":["-c","trap \"\" HUP TERM INT; while :; do sleep 1; done"]}`.
+10. **A close with no preceding `error` is a different path from a reset.** A
+   `destroy()`ed peer EPIPEs the outgoing write first, and that error disposes
+   the link before `close` fires — so a test built on `destroy()` passes even
+   against a link that mishandles `close`. Use a clean `end()` to exercise it.
+
+## Resource cost, so nobody discovers it from `top`
+
+One Node process per session (with the tsx loader) replaces N PTYs in a single
+process — tens of MB RSS each — and scrollback is now double-buffered, once in
+the supervisor's ring and once in the daemon's, each capped by
+`DRYDOCK_SCROLLBACK_BYTES` (~1 MiB default). Both are the right trade for
+sessions that survive a restart, but a host running twenty agents is running
+twenty extra Node processes.
 
 The reconciliation branch that is easy to forget: a run that ENDS while the
 daemon is down. Kill the daemon, then `kill -9` the agent, then restart — the

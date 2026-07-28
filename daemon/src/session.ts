@@ -272,6 +272,8 @@ export class PtySession {
   private endsAnnounced = new Set<RunEndReason>();
   /** This process was signalled on purpose, so its exit code isn't a verdict. */
   private stoppedByRequest = false;
+  /** When somebody asked for it to stop. Persisted — see SessionMeta.killedAt. */
+  private killedAt?: number;
 
   private constructor(
     meta: SessionMeta,
@@ -318,6 +320,7 @@ export class PtySession {
       permissionMode: this.permissionMode,
       env: this.env,
       handoff: this.handoff,
+      killedAt: this.killedAt,
     };
   }
 
@@ -843,6 +846,15 @@ export class PtySession {
     // unanswered-gate path, which kills too — it records its failure first, so
     // the check below leaves that verdict alone.
     if (!this.failure) this.stoppedByRequest = true;
+    // Recorded BEFORE the kill is sent, and that ordering is the point (DRY-57
+    // review). Everything that cleans up after a kill depends on the child
+    // actually dying and the Exit frame coming back; if it ignores the signal,
+    // or the daemon goes down inside that window, the index entry outlives the
+    // decision and the next boot would adopt a session somebody deliberately
+    // ended straight back onto the desk. This is what reconciliation reads to
+    // finish the job instead of undoing it.
+    this.killedAt = Date.now();
+    this.persist();
     this.link?.kill();
   }
 

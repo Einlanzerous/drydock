@@ -21,6 +21,20 @@ WorkingDirectory=__APP_DIR__/daemon
 ExecStart=__NODE__ --import tsx src/index.ts
 Restart=always
 RestartSec=2
+# NO start rate limit, and this is load-bearing since DRY-57.
+#
+# The daemon now takes Node's default exit on an uncaught exception, because
+# sessions outlive it and a fresh daemon reattaches to them. systemd's default
+# is 5 starts per 10s, and with RestartSec=2 a deterministic crash-at-boot burns
+# that in about eight seconds — after which the unit sits in `failed` until
+# somebody runs `systemctl --user reset-failed`. That is a WORSE state than the
+# one this replaced: the agents are alive in their supervisors, and the only
+# thing that can reach them is the process systemd has given up restarting.
+#
+# So: keep trying. A restart loop is noisy in the journal and costs nothing
+# else, and every attempt is another chance to come back and re-adopt the
+# sessions that are still sitting there waiting to be reached.
+StartLimitIntervalSec=0
 # Spawned agents and shells inherit this environment; keep the installing
 # user's real PATH so `claude`, git, bun, etc. resolve as in a login shell.
 Environment=PATH=__PATH__

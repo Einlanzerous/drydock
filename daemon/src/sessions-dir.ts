@@ -30,6 +30,7 @@ import { log } from "./log.js";
 import { expandHome } from "./repos.js";
 import {
   PROTOCOL_VERSION,
+  SUFFIX,
   socketName,
   type ExitRecord,
   type SessionMeta,
@@ -70,11 +71,11 @@ export function sessionsDir(): string {
 export function sessionPaths(id: string): SessionPaths {
   const dir = sessionsDir();
   return {
-    meta: path.join(dir, `${id}.json`),
+    meta: path.join(dir, `${id}${SUFFIX.meta}`),
     sock: path.join(dir, socketName(id)),
-    exit: path.join(dir, `${id}.exit.json`),
-    scrollback: path.join(dir, `${id}.scrollback`),
-    log: path.join(dir, `${id}.log`),
+    exit: path.join(dir, `${id}${SUFFIX.exit}`),
+    scrollback: path.join(dir, `${id}${SUFFIX.scrollback}`),
+    log: path.join(dir, `${id}${SUFFIX.log}`),
   };
 }
 
@@ -108,10 +109,6 @@ export function writeMeta(meta: SessionMeta): void {
   fs.renameSync(tmp, file);
 }
 
-export function readMeta(id: string): SessionMeta | undefined {
-  return parseMeta(sessionPaths(id).meta);
-}
-
 function parseMeta(file: string): SessionMeta | undefined {
   let raw: string;
   try {
@@ -129,8 +126,16 @@ function parseMeta(file: string): SessionMeta | undefined {
   // A metadata file from another build is skipped, not coerced. Guessing at a
   // field that changed meaning is how a session gets adopted with the wrong
   // permission mode — i.e. an agent that gates less than the host asked for.
+  //
+  // This — not the ProtocolMismatch check on the wire — is where a version skew
+  // actually lands, because the supervisor refuses to start on foreign metadata
+  // in the first place, so the two always agree. Hence the volume: an operator
+  // upgrading mid-session needs to know they now have a live agent nothing can
+  // reach, and the files are LEFT IN PLACE deliberately. Deleting them would
+  // remove the only handle anything has on that process; a human can still find
+  // it by pid and the supervisor keeps its PTY alive in the meantime.
   if (meta?.protocol !== PROTOCOL_VERSION || typeof meta.id !== "string") {
-    log.warn("session metadata from a different protocol — skipping", {
+    log.error("session from a different Drydock build — cannot adopt, leaving it running", {
       file,
       found: meta?.protocol,
       expected: PROTOCOL_VERSION,
@@ -151,19 +156,14 @@ export function listMeta(): SessionMeta[] {
   }
   const metas: SessionMeta[] = [];
   for (const entry of entries) {
-    // `.exit.json` also ends in `.json`; match the id form instead of the suffix.
-    if (!entry.endsWith(".json") || entry.endsWith(".exit.json") || entry.endsWith(".tmp")) {
+    // `.exit.json` also ends in `.json`; exclude it explicitly.
+    if (!entry.endsWith(SUFFIX.meta) || entry.endsWith(SUFFIX.exit) || entry.endsWith(".tmp")) {
       continue;
     }
     const meta = parseMeta(path.join(sessionsDir(), entry));
     if (meta) metas.push(meta);
   }
   return metas.sort((a, b) => a.createdAt - b.createdAt);
-}
-
-export function writeExitRecord(id: string, exitCode: number): void {
-  const record: ExitRecord = { protocol: PROTOCOL_VERSION, exitCode, endedAt: Date.now() };
-  fs.writeFileSync(sessionPaths(id).exit, JSON.stringify(record), { mode: OWNER_ONLY });
 }
 
 export function readExitRecord(id: string): ExitRecord | undefined {

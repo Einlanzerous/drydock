@@ -37,6 +37,7 @@ import {
   encodeFrame,
   encodeJsonFrame,
   socketName,
+  SUFFIX,
   type ExitRecord,
   type SessionMeta,
   type SupervisorHello,
@@ -72,8 +73,8 @@ if (meta.protocol !== PROTOCOL_VERSION) {
 
 const dir = path.dirname(metaPath);
 const sockPath = path.join(dir, socketName(meta.id));
-const exitPath = path.join(dir, `${meta.id}.exit.json`);
-const scrollbackPath = path.join(dir, `${meta.id}.scrollback`);
+const exitPath = path.join(dir, `${meta.id}${SUFFIX.exit}`);
+const scrollbackPath = path.join(dir, `${meta.id}${SUFFIX.scrollback}`);
 
 // --- the PTY ---------------------------------------------------------------
 
@@ -125,12 +126,38 @@ function remember(chunk: Buffer): void {
 
 const clients = new Set<net.Socket>();
 
+/**
+ * How much unread output a client may accumulate before it is dropped.
+ *
+ * `socket.write` buffers in this process when the peer stops reading, and this
+ * is the process that must not die — an OOM here is the one failure with no
+ * recovery underneath it, because it takes the PTY with it. A daemon with a
+ * stalled event loop and a chatty `claude` redrawing its TUI is not a
+ * hypothetical way to get there.
+ *
+ * Dropping the slow client is the same rule the error handler already follows —
+ * a client that can't keep up costs that client only — and it is cheap here
+ * specifically: the daemon notices the closed socket, reconnects, and is handed
+ * the whole ring buffer again, so it loses nothing but a moment.
+ */
+const CLIENT_BACKLOG_LIMIT = 8 * 1024 * 1024;
+
 function broadcast(frame: Buffer): void {
   for (const socket of clients) {
     // A client that has gone away must cost that client only. Writes to a
     // half-closed socket surface as an asynchronous 'error' (handled per
     // socket below), so this can't throw into the PTY data path.
-    if (socket.writable) socket.write(frame);
+    if (!socket.writable) continue;
+    if (socket.writableLength > CLIENT_BACKLOG_LIMIT) {
+      emit("WARN", "client is not reading — dropping it rather than buffering", {
+        buffered: socket.writableLength,
+        limit: CLIENT_BACKLOG_LIMIT,
+      });
+      clients.delete(socket);
+      socket.destroy();
+      continue;
+    }
+    socket.write(frame);
   }
 }
 
@@ -186,6 +213,10 @@ net
     process.exit(1);
   });
 
+/** How long a killed child gets to exit on its own before SIGKILL. */
+const KILL_GRACE_MS = 5_000;
+let escalation: ReturnType<typeof setTimeout> | undefined;
+
 /** Promote a connection to a client: identify ourselves, hand over the buffer. */
 function greet(socket: net.Socket): void {
   clients.add(socket);
@@ -231,6 +262,28 @@ function onClientFrame(type: number, payload: Buffer): void {
     case Frame.Kill:
       emit("INFO", "kill requested", { id: meta.id });
       child.kill();
+      // Escalate if it doesn't go. node-pty's default is SIGHUP, and a child
+      // that traps it (`trap "" HUP` in a wrapper script, some TUIs) would
+      // otherwise leave this process holding a PTY for a session the user has
+      // already dismissed — invisible in /api/sessions, since the daemon drops
+      // it from the registry the moment the kill is sent, and immortal, since
+      // nothing ever asks again. An orphan is a worse outcome than a hard kill
+      // on something that was explicitly told to stop.
+      if (!escalation) {
+        escalation = setTimeout(() => {
+          emit("WARN", "child ignored the kill — escalating to SIGKILL", {
+            id: meta.id,
+            childPid: child.pid,
+            graceMs: KILL_GRACE_MS,
+          });
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            /* already gone in the meantime */
+          }
+        }, KILL_GRACE_MS);
+        escalation.unref?.();
+      }
       break;
     default:
       emit("WARN", "unknown frame type from client", { type });
@@ -240,6 +293,7 @@ function onClientFrame(type: number, payload: Buffer): void {
 // --- the ending ------------------------------------------------------------
 
 child.onExit(({ exitCode, signal }) => {
+  clearTimeout(escalation);
   // A signalled child reports exitCode 0 with the signal alongside, so passing
   // the raw code on would tell the daemon a killed run "exited cleanly" — and
   // for an autonomous run that is the difference between `finished` and
