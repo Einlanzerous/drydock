@@ -28,8 +28,18 @@ const MIGRATIONS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "
  */
 const MIGRATION_LOCK = 0x11ff_28;
 
-/** Don't hammer an unreachable database on every keystroke-debounced save. */
-const RETRY_COOLDOWN_MS = 10_000;
+/**
+ * Don't hammer an unreachable database on every keystroke-debounced save.
+ *
+ * Doubling, not the flat 10s DRY-28 shipped (DRY-58). The flat window bounded a
+ * partition to one 5s connect timeout per 10s, which is the right shape for a
+ * blip and the wrong one for an outage measured in hours — 360 pointless dials
+ * an hour, each holding a pool slot for five seconds. The floor stays at 10s so
+ * this is never MORE eager than what it replaces, and the ceiling stays low
+ * enough that a database coming back is noticed within half a minute: the
+ * shell's own recovery loop is waiting on exactly this to reopen.
+ */
+const RETRY_COOLDOWN_MS = [10_000, 20_000, 30_000];
 
 export class PostgresStore implements StateStore {
   readonly kind = "postgres" as const;
@@ -49,6 +59,10 @@ export class PostgresStore implements StateStore {
    * why `docker stop` looks fine and a network partition does not.
    */
   private downSince = 0;
+  /** Consecutive failures, indexing RETRY_COOLDOWN_MS. Reset by any success. */
+  private failures = 0;
+  /** Why we last failed, so `health()` can answer without dialling. */
+  private lastError = "";
 
   constructor(connectionString: string) {
     this.pool = new pg.Pool({
@@ -86,22 +100,37 @@ export class PostgresStore implements StateStore {
   }
 
   /**
+   * How long the current cooldown still has to run, 0 when a probe is due (or
+   * the store isn't known to be down). Read by `guard` to fast-fail and by
+   * `health` to report without dialling — one source, so the two can't disagree
+   * about whether the database is being given a rest.
+   */
+  private cooldownRemaining(): number {
+    if (!this.downSince) return 0;
+    const window = RETRY_COOLDOWN_MS[Math.min(this.failures - 1, RETRY_COOLDOWN_MS.length - 1)];
+    return Math.max(0, this.downSince + window - Date.now());
+  }
+
+  /**
    * Run a store operation, fast-failing while the database is known to be
    * down. The cooldown doesn't make an outage cheap, it makes it BOUNDED: one
-   * request per 10s window pays the connect timeout and the rest return
+   * request per window pays the connect timeout and the rest return
    * immediately, instead of every request paying it.
    */
   private async guard<T>(fn: () => Promise<T>): Promise<T> {
-    if (this.downSince && Date.now() - this.downSince < RETRY_COOLDOWN_MS) {
+    if (this.cooldownRemaining() > 0) {
       throw new Error("postgres unavailable (retrying shortly)");
     }
     try {
       await this.ensureReady();
       const result = await fn();
       this.downSince = 0;
+      this.failures = 0;
       return result;
     } catch (err) {
       this.downSince = Date.now();
+      this.failures += 1;
+      this.lastError = (err as Error).message;
       throw err;
     }
   }
@@ -218,7 +247,24 @@ export class PostgresStore implements StateStore {
     });
   }
 
+  /**
+   * Cheap liveness probe, and cheap is the operative word (DRY-58).
+   *
+   * It used to go through `guard()` like any other operation, which made it
+   * honest about availability and dishonest as a health signal: inside the
+   * cooldown `guard` throws without dialling, so `/healthz` reported `ok:false`
+   * on the strength of something that happened up to a window ago. A monitor
+   * couldn't tell a dead database from one nobody had asked about recently.
+   *
+   * Now the cooldown is reported as itself. Outside it, this probes for real —
+   * and pays the connect timeout for real, which is why the answer is worth
+   * something. Still never rejects: a store failure is not a daemon failure.
+   */
   async health(): Promise<StoreHealth> {
+    const retryInMs = this.cooldownRemaining();
+    if (retryInMs > 0) {
+      return { kind: this.kind, ok: false, error: this.lastError, cooling: true, retryInMs };
+    }
     try {
       await this.guard(() => this.pool.query("select 1"));
       return { kind: this.kind, ok: true };
