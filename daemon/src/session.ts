@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import * as pty from "node-pty";
 import type { WebSocket } from "ws";
 import { CONFIG } from "./config.js";
-import { CLAUDE_SETTINGS_PATH } from "./hooks.js";
+import { CLAUDE_SETTINGS_PATH, CLAUDE_SETTINGS_PATH_AUTONOMOUS } from "./hooks.js";
 import { log } from "./log.js";
 import type {
   EventMessage,
@@ -83,12 +83,19 @@ function stripAnsi(text: string): string {
  * session (SessionInfo.command) so the shell still classifies panes by "claude"
  * vs other — only the spawn target changes.
  */
-function resolveSpawn(command: string, args: string[]): { file: string; args: string[] } {
+function resolveSpawn(
+  command: string,
+  args: string[],
+  autonomous: boolean,
+): { file: string; args: string[] } {
   if (command === "shell") {
     return { file: CONFIG.defaultShell, args: ["-l", ...args] };
   }
   if (command === "claude") {
-    return { file: "claude", args: ["--settings", CLAUDE_SETTINGS_PATH, ...args] };
+    // Autonomous runs get the settings file that also reports activity, so the
+    // rail's action line has a source; supervised sessions don't pay for it.
+    const settings = autonomous ? CLAUDE_SETTINGS_PATH_AUTONOMOUS : CLAUDE_SETTINGS_PATH;
+    return { file: "claude", args: ["--settings", settings, ...args] };
   }
   return { file: command, args };
 }
@@ -245,7 +252,7 @@ export class PtySession {
     this.cols = opts.cols ?? 80;
     this.rows = opts.rows ?? 24;
 
-    const spawn = resolveSpawn(this.command, this.args);
+    const spawn = resolveSpawn(this.command, this.args, this.autonomous);
     this.pty = pty.spawn(spawn.file, spawn.args, {
       name: "xterm-256color",
       cols: this.cols,

@@ -161,6 +161,17 @@ export function runEndHandler(tracker: TrackerProvider) {
    */
   const commented = new Set<string>();
 
+  /**
+   * Bound it. This daemon is meant to run for weeks (restarting it destroys
+   * every live PTY), so a set that only ever grows is a leak with a very long
+   * fuse. Dropping the oldest keys is safe: they belong to runs that ended long
+   * ago, and the thing they guard against is a *second* comment moments later.
+   */
+  const remember = (key: string): void => {
+    commented.add(key);
+    while (commented.size > 500) commented.delete(commented.values().next().value!);
+  };
+
   return (session: PtySession, reason: RunEndReason): void => {
     const at = Date.now();
     const info = session.info();
@@ -194,7 +205,7 @@ export function runEndHandler(tracker: TrackerProvider) {
     if (!tracker.capabilities.comment || !tracker.comment) return;
     const key = `${info.id}:${reason === "failed" ? "failed" : "ended"}`;
     if (commented.has(key)) return;
-    commented.add(key);
+    remember(key);
 
     // Fire-and-forget: the run is already over and its durable record is on
     // disk. A tracker that is down must not throw into a PTY exit handler.

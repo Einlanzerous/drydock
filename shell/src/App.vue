@@ -375,7 +375,6 @@ async function spawnAutonomous(opts: {
   branch?: string;
 }) {
   try {
-    await askToNotify();
     await createSession({
       command: "claude",
       title: opts.ticket.key,
@@ -389,6 +388,12 @@ async function spawnAutonomous(opts: {
       input: opts.prompt,
     });
     await refresh();
+    // AFTER the spawn, and not awaited. Notification.requestPermission()
+    // resolves only when the user answers, and Chrome's permission chip can sit
+    // there unanswered indefinitely — awaited before createSession, the
+    // first-ever autonomous launch in a browser profile simply never happened
+    // and the button looked broken.
+    void askToNotify();
   } catch (e) {
     error.value = String(e);
   }
@@ -486,8 +491,11 @@ async function takeOver(sessionId: string): Promise<void> {
     error.value = `Couldn't take over that run: ${String(e)}`;
     return;
   }
+  // restore(), not bringFront(): bringFront only bumps z and focus, so a run
+  // whose window was minimized stayed hidden and both "Take over" and the
+  // panel's "Open the terminal instead" appeared to do nothing at all.
   if (!wm.windows.some((w) => w.id === sessionId)) watchRun(sessionId);
-  else wm.bringFront(sessionId);
+  else wm.restore(sessionId);
 }
 
 /**
@@ -534,7 +542,6 @@ const runCards = computed(() =>
     state: runState(s, openGates.value.some((g) => g.sessionId === s.id)),
   })),
 );
-const gatingRuns = computed(() => runCards.value.filter((r) => r.state === "gating"));
 const failedRuns = computed(() => runCards.value.filter((r) => r.state === "failed"));
 
 useAttention({
@@ -855,6 +862,7 @@ onBeforeUnmount(() => {
              tray and the dock). -->
         <RunRail
           :runs="autonomousRuns"
+          :sessions="sessionList"
           :docked="dockItems"
           :watched-ids="watchedIds"
           @watch="watchRun"

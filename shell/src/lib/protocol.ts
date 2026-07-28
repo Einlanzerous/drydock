@@ -1,5 +1,5 @@
-// Wire protocol shared between daemon and shell.
-// (Duplicated verbatim in shell/src/lib/protocol.ts — keep them in sync.)
+// Wire protocol shared with the daemon.
+// (Duplicated verbatim from daemon/src/protocol.ts — keep them in sync.)
 
 export type PermissionDecision = "allow" | "deny";
 

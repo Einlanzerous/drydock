@@ -160,6 +160,9 @@ function deny() {
   max-width: calc(100vw - 40px);
   padding: 12px 14px 13px;
   border-radius: 12px;
+  /* The rail is pointer-events:none so it doesn't swallow clicks in the bottom
+     of the desk; anything that must be clickable takes them back. */
+  pointer-events: auto;
   background: #141b22f8;
   border: 1px solid #33506e;
   box-shadow: 0 16px 40px #000000aa;

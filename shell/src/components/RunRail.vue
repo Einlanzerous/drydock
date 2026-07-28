@@ -35,6 +35,16 @@ import { RAIL_HEIGHT, type Win } from "../composables/useWindowManager.js";
 const props = defineProps<{
   /** Autonomous sessions — the UNDERWAY lane, derived from /api/sessions. */
   runs: SessionInfo[];
+  /**
+   * EVERY session, for naming a gate.
+   *
+   * Not the same list as `runs`, and conflating them was DRY-50's own case
+   * regressing: the rail also answers gates from *minimized ordinary windows*,
+   * whose sessions are not autonomous. Looked up in `runs`, those rendered a
+   * panel with no ticket and a blank working directory — on the only surface
+   * able to answer them.
+   */
+  sessions: SessionInfo[];
   /** Minimized ordinary windows — the DOCKED lane. */
   docked: {
     win: Win;
@@ -62,7 +72,11 @@ const emit = defineEmits<{
 const now = ref(Date.now());
 let clock: ReturnType<typeof setInterval> | null = null;
 watch(
-  () => props.runs.length > 0,
+  // Orphan gates count too, and not just for tidiness: this clock feeds the
+  // panel's held-time. Keyed on `runs` alone, a gate from a minimized ordinary
+  // window — no autonomous run in sight — read "held 0:00" forever, which is
+  // precisely the number a wedge is supposed to be legible as.
+  () => props.runs.length > 0 || orphanGates.value.length > 0,
   (showing) => {
     if (showing && !clock) {
       now.value = Date.now();
@@ -102,6 +116,25 @@ watch(panelGates, (list) => {
 });
 
 const answerError = ref<string | null>(null);
+
+// A failure belongs to the gate it happened on. Without this, a failed answer's
+// red banner followed the queue onto the NEXT gate that advanced into the panel
+// — telling you something was still waiting about a decision you hadn't made.
+watch(
+  () => activeGate.value?.requestId,
+  () => (answerError.value = null),
+);
+
+/** The session behind a gate, whether or not it is an autonomous run. */
+function gateSession(gate: OpenGate | null): SessionInfo | undefined {
+  return gate ? props.sessions.find((s) => s.id === gate.sessionId) : undefined;
+}
+
+/** Same fallback chain the tray had: ticket, then title, then a short id. */
+function gateLabel(gate: OpenGate | null): string {
+  const s = gateSession(gate);
+  return s?.ticket || s?.title || gate?.sessionId.slice(0, 8) || "";
+}
 
 async function onResolve(decision: "allow" | "deny", reason?: string, always?: boolean) {
   const gate = activeGate.value;
@@ -168,6 +201,23 @@ const cards = computed<Card[]>(() =>
   }),
 );
 
+/**
+ * Hover text. Carries the HANDOFF PATH, which is otherwise unreachable: the
+ * daemon ships it on SessionInfo, and for a run launched without a ticket
+ * there is no comment either — so without this the durable artefact the whole
+ * feature is built around could only be found by reading a daemon log line.
+ * (A click-through would need a new endpoint; /api/sessions/:id/file is
+ * confined to the session's own working tree and the document lives outside it.)
+ */
+function cardTitle(card: Card): string {
+  const started = new Date(card.session.createdAt).toLocaleTimeString();
+  const lines = [`${card.label} · ${card.state} · started ${started}`];
+  if (card.session.worktree) lines.push(`worktree ${card.session.worktree}`);
+  if (card.session.failure?.reason) lines.push(`failed: ${card.session.failure.reason}`);
+  if (card.session.handoff) lines.push(`handoff ${card.session.handoff}`);
+  return lines.join("\n");
+}
+
 /** The card's one line of prose. Truncates in CSS; never wraps. */
 function detailFor(s: SessionInfo, state: RunState, gate?: OpenGate): string {
   switch (state) {
@@ -176,7 +226,13 @@ function detailFor(s: SessionInfo, state: RunState, gate?: OpenGate): string {
     case "failed":
       return s.failure?.lastLine || s.failure?.reason || "";
     case "finished":
-      return s.ticket ? `logged to ${s.ticket}` : "";
+      // NOT "logged to <TICKET>". The tracker comment is capability-gated and
+      // best-effort — the fixture provider can't comment at all and any provider
+      // can be unreachable — so a card that asserted it had been logged was
+      // claiming something that frequently never happened. The handoff is the
+      // artefact we actually know exists, because the daemon only reports it
+      // after writing it.
+      return s.handoff ? "handoff saved" : "";
     case "ended-turn":
       return "may want a reply";
     case "starting":
@@ -257,8 +313,8 @@ function onCardClick(card: Card): void {
       :index="panelIndex"
       :total="panelGates.length"
       :busy="isAnswering(activeGate.requestId)"
-      :label="runs.find((r) => r.id === activeGate!.sessionId)?.ticket ?? ''"
-      :cwd="runs.find((r) => r.id === activeGate!.sessionId)?.cwd ?? ''"
+      :label="gateLabel(activeGate)"
+      :cwd="gateSession(activeGate)?.cwd ?? ''"
       :held="clockMs(heldMs(activeGate, now))"
       :error="answerError"
       @resolve="onResolve"
@@ -290,13 +346,15 @@ function onCardClick(card: Card): void {
       Disconnected from the daemon — reconnecting. The rail may be out of date.
     </p>
 
-    <div class="lanes">
+    <!-- Lanes render only when they hold something. The rail's RESERVE is
+         constant either way (computeRects, RAIL_HEIGHT) — that promise is about
+         layout, not about painting furniture over an empty desk. -->
+    <div v-if="cards.length || docked.length" class="lanes">
       <!-- UNDERWAY: raised out of the rail. -->
-      <div class="lane underway" :class="{ empty: !cards.length }">
+      <div v-if="cards.length" class="lane underway">
         <span class="caption">UNDERWAY</span>
-        <span v-if="cards.length" class="count">{{ cards.length }} run{{ cards.length === 1 ? "" : "s" }}</span>
-        <div v-if="!cards.length" class="lane-empty">nothing running unattended</div>
-        <div v-else class="segments">
+        <span class="count">{{ cards.length }} run{{ cards.length === 1 ? "" : "s" }}</span>
+        <div class="segments">
           <div v-for="seg in segments" :key="seg.repo" class="segment">
             <span class="seg-label">{{ seg.repo }}</span>
             <div class="cards">
@@ -305,7 +363,7 @@ function onCardClick(card: Card): void {
                 :key="card.session.id"
                 class="card"
                 :class="[card.state, densityFor(card), { watched: card.watched }]"
-                :title="`${card.label} · ${card.state} · started ${new Date(card.session.createdAt).toLocaleTimeString()}`"
+                :title="cardTitle(card)"
                 @click="onCardClick(card)"
               >
                 <span class="glyph">{{ card.glyph }}</span>
@@ -337,13 +395,12 @@ function onCardClick(card: Card): void {
         </div>
       </div>
 
-      <div class="divider"></div>
+      <div v-if="cards.length && docked.length" class="divider"></div>
 
       <!-- DOCKED: lowered into the rail. -->
-      <div class="lane docked" :class="{ empty: !docked.length }">
+      <div v-if="docked.length" class="lane docked">
         <span class="caption">DOCKED</span>
-        <div v-if="!docked.length" class="lane-empty">nothing minimized</div>
-        <div v-else class="dock-items">
+        <div class="dock-items">
           <div
             v-for="it in docked"
             :key="it.win.id"
@@ -374,6 +431,11 @@ function onCardClick(card: Card): void {
   left: 0;
   right: 0;
   bottom: 0;
+  /* The rail spans the full width at z 9000 and is ALWAYS mounted, so without
+     this it swallowed every click in the bottom 98px of the desk — including
+     into a floating window, since float deliberately doesn't clamp rects out of
+     the reserve. Its children take pointer events back individually. */
+  pointer-events: none;
   /* Above the windows' band. Window z is not a fixed ceiling to clear —
      computeRects gives the focused window 50 in tile/focus, and in float w.z
      climbs on every spawn and survives reloads — so this sits deliberately far
@@ -413,6 +475,11 @@ function onCardClick(card: Card): void {
   min-width: 0;
   padding: 8px 10px;
   border-radius: 12px;
+  pointer-events: auto; /* the rail itself is click-through; see .rail */
+}
+.offline,
+.chooser {
+  pointer-events: auto;
 }
 /* Raised OUT of the rail. */
 .underway {
@@ -567,6 +634,13 @@ function onCardClick(card: Card): void {
 .card.compact .meta {
   display: none;
 }
+/* Keep the clock clear of the ✕, which is absolutely positioned in the same
+   top-right corner and only exists on these two states. Overlapping, a click
+   aimed at a failed card's elapsed time landed on "clear this run" instead. */
+.card.finished .meta,
+.card.failed .meta {
+  margin-right: 17px;
+}
 .line {
   grid-column: 1 / 6;
   display: flex;
@@ -663,8 +737,12 @@ function onCardClick(card: Card): void {
 
 .chooser {
   position: absolute;
-  left: 12px;
-  /* Anchored to the rail, above it — see the template comment. */
+  /* RIGHT-anchored, while the gate panel is left-anchored. They share the strip
+     directly above the rail, and both can legitimately be open at once — a gate
+     pending on one run while you decide how to open another. Anchored to the
+     same edge, the chooser (which stacks above) simply covered the panel's left
+     half, including its command blob. */
+  right: 12px;
   bottom: calc(100% + 8px);
   z-index: 1;
   width: 320px;

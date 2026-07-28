@@ -189,6 +189,10 @@ export function notifyGate(requestId: string, title: string, body: string): void
   if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
   if (notified.has(requestId)) return;
   notified.add(requestId);
+  // Bounded: a tab left open for days would otherwise accumulate one id per
+  // gate forever. The oldest are gates answered long ago, and all this set
+  // prevents is re-announcing one that is still open.
+  while (notified.size > 500) notified.delete(notified.values().next().value!);
   try {
     // `tag` so a reconnect that re-announces an open gate replaces its own
     // notification instead of stacking a second copy of the same question.

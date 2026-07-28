@@ -51,7 +51,12 @@ export const RUN_STATE_META: Record<
   // A pause bar, never a checkmark. The Stop hook means the turn ended, which
   // is "done OR waiting for a reply" — the UI must never spend the word "done"
   // on a guess (DRY-18).
-  "ended-turn": { glyph: "‖", word: "ENDED TURN", loud: false, terminal: true },
+  //
+  // NOT terminal, and that distinction is destructive to get wrong: the process
+  // is still alive and mid-conversation. `terminal` is what puts the "clear this
+  // run" ✕ on a card, and that ✕ kills the session — so marking this true hung
+  // a one-click kill on a live agent that had merely paused to ask something.
+  "ended-turn": { glyph: "‖", word: "ENDED TURN", loud: false, terminal: false },
   finished: { glyph: "✓", word: "FINISHED", loud: false, terminal: true },
   failed: { glyph: "✕", word: "FAILED", loud: true, terminal: true },
 };

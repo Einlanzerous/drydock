@@ -131,6 +131,15 @@ curl -s -X POST localhost:4399/api/sessions -H 'Content-Type: application/json' 
 Then watch `/api/sessions`: `activity` fills in, `pendingPermissions` goes to 1,
 and 25s later `failure` appears and `handoff` names a file.
 
+**Then do it again with a prompt that WRITES a file, not one that runs Bash.**
+A Bash-only probe cannot catch the worst failure this feature has: any tool the
+`PreToolUse` matcher misses gets Claude Code's own TUI prompt drawn inside a PTY
+with no window — no gate, no `pendingPermissions`, no timeout, no handoff, and a
+card that reads "writing foo.ts" with the hairline marching forever. `hooks.ts`
+gates every tool that prompts in `default` mode (`GATED_TOOLS`); if that list
+ever drifts from Claude Code's, this is how it will present. It shipped that way
+once and a Bash-only test passed cleanly over it.
+
 The traps, all of them found the hard way:
 
 1. **The prompt's RETURN must be a separate write.** Appending `\r` to the text
