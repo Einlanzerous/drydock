@@ -31,6 +31,36 @@ export interface Ticket {
   repo: string;
   /** Ticket type, when the provider exposes it (epic / task / bug / …). */
   type?: string;
+  /**
+   * Parent ticket, when this one hangs off something (DRY-13). Carries the
+   * title, not just the key, on purpose: a child can still arrive without its
+   * epic — the parent may sit outside the configured project scope, or the
+   * provider may not be able to express "epics too" (older Jira DC, where the
+   * link is a per-instance custom field). Providers exempt epics from the
+   * backlog exclusion so this is the exception rather than the rule, but when
+   * it happens the title lets the sidebar head the group with a real name
+   * instead of a bare key.
+   *
+   * `type` is the parent's own type where the provider exposes it (Jira does;
+   * Switchyard's inline parent doesn't). The sidebar uses it to tell an
+   * epic parent from a task parent when the parent itself isn't loaded.
+   */
+  parent?: { key: string; title?: string; type?: string };
+  /**
+   * For an epic: how its children break down by status, across ALL of them
+   * rather than the ones this pull happened to return (DRY-13).
+   *
+   * Counting the loaded children instead would be free, and useless in the
+   * case that matters: the sidebar excludes the backlog, so an epic whose work
+   * hasn't started yet loads zero children and its row says nothing at all.
+   * Getting the real numbers costs one extra request on Jira (`parent in (…)`
+   * for every epic at once) and one per epic on Switchyard, whose list filter
+   * has no OR — small either way, since it's scoped to epics.
+   *
+   * Optional because a provider that can't answer should degrade to the
+   * loaded-children rollup, not break.
+   */
+  childStats?: { total: number; byCategory: Partial<Record<TicketCategory, number>> };
   /** Primary label/tag, surfaced as a chip in the sidebar. */
   tag?: string;
   /** Assignee, when the provider exposes one. Absent = unassigned. */

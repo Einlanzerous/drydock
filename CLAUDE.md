@@ -227,7 +227,38 @@ boolean params are literal `true`, not `1`.
    component — `repo` must be the component slug (lowercase, spaces→dashes,
    DRY-31), not the project key; a component-less ticket falls back to the
    lowercased project key.
-8. End-to-end: point a browser at the dev shell, switch it to the throwaway
+8. Epics (DRY-13), on the query from step 2 — the one WITHOUT `backlog=true`:
+   every `type: epic` in scope must still come back, and each must carry
+   `childStats` counting **all** its children by category. Both are easy to
+   regress into something that looks fine:
+   - Epics are exempted from the backlog exclusion, so a provider that folds
+     the exemption into the wrong clause silently drops exactly the epics whose
+     work hasn't started — the ones a child is left orphaned under. Assert an
+     epic you know is in the backlog appears with `backlog=false`.
+   - `childStats` must NOT come from the loaded tickets. Counting those is free
+     and always wrong: the pull excludes done, so every epic reads 0-done. The
+     numbers must move when the tracker moves and not when the toggle does.
+   - Non-epics must have no `childStats`, and the palette (`/search`) must issue
+     no child query at all — it has no `open` flag, so the pass must not fire.
+   - Jira answers every epic in one `parent in (…)` search; Switchyard has no OR
+     in its list filter, so it's one request per epic, through a small pool
+     (`CHILD_STATS_POOL`). Bounding the epic *count* does not bound concurrency:
+     each one is a cursor chain, so an unpooled fan-out opens dozens of them per
+     sidebar refresh, per browser.
+   - **A capped count must be abandoned, not truncated.** The child query spans
+     every status, so `MAX_TICKETS` is reachable on an ordinary corporate Jira
+     (20 epics × 100 children). Truncating leaves `childStats` present and
+     wrong, and the shell renders it as authoritative — "13/40 done" when the
+     truth is 13/78. Both providers bail instead. Drive it with a stub that
+     always returns another page and assert `childStats` comes back UNSET.
+   - Two queries here are allowed to fail and must stay harmless: `parent` isn't
+     queryable on older Jira DC (child stats 400 — swallowed), and
+     `issuetype = "Epic"` doesn't validate on an instance with no type named
+     that, localized or renamed. The second is the dangerous one because it sits
+     in the sidebar's *critical path*: unhandled it means an empty sidebar where
+     one previously worked. It downgrades to the plain clause on a first-page
+     400 and latches (`epicClauseUsable`), so the probe is paid once.
+9. End-to-end: point a browser at the dev shell, switch it to the throwaway
    daemon port, open a ticket, **Send to agent** — verifies repo→cwd resolution
    (`DRYDOCK_REPOS_ROOT` / `DRYDOCK_REPO_PATHS`, keyed by component slug for
    Jira) and the SessionStart context injection.

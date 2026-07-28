@@ -145,6 +145,21 @@ no per-repo setup.
   groups. Picking one opens the ticket detail as a floating, raiseable window
   (DRY-20) — read the (markdown-rendered) description, adjust
   cwd/worktree/prompt, then **Spawn Agent**.
+- **Epics roll up their children (DRY-13).** Inside a repo group, tickets nest
+  under their epic behind a second chevron, and the epic row carries a badge and
+  a real progress rollup — `13/18 done`, with a bar split by status — so a
+  collapsed epic still says something. Those counts come from the tracker and
+  cover *every* child, not the ones this pull happened to fetch: one extra
+  request on Jira (`parent in (…)` answers all epics at once), one per epic on
+  Switchyard. A provider that can't answer degrades to counting loaded children
+  and drops the completion ratio rather than reporting a false one. An epic
+  filter sits beside the others, and searching an epic's key finds its children.
+  **Epics ignore the backlog toggle** — that
+  exclusion exists because a real backlog is enormous and the epics inside it
+  are not, and an epic left out is exactly the header its in-flight children
+  needed. A child can still name an epic outside the configured project scope;
+  that row heads its group anyway, marked *not pulled*, and expands rather than
+  opening a ticket.
 - **`Ctrl K` quick-launch.** Fuzzy-search tickets by key/title/repo; `↵` opens
   the selection's ticket panel (or a blank `claude` session when nothing
   matches), `⇧↵` spawns a plain shell — the palette is the one entry point for

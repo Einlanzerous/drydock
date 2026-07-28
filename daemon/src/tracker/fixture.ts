@@ -21,18 +21,30 @@ interface Fixture {
   category: TicketCategory;
   type?: string;
   assignee?: string;
+  parent?: { key: string; title?: string };
 }
 
 // Ported verbatim from Drydock.dc.html's fixture, normalized onto our shape.
+//
+// The parent links (DRY-13) cover all three shapes the sidebar has to render,
+// so the zero-config default exercises the rollup rather than just the flat
+// case: ARGY-64 is an epic that IS in the set, DRY-1 is an epic that is NOT
+// (no fixture row — the sidebar heads that group off the child's `parent`
+// alone, the way a real backlog-bucket epic behaves under the default pull),
+// and the SWY tickets hang off nothing at all.
 const FIXTURES: Fixture[] = [
-  { key: "ARGY-89", repo: "argosy", title: "Series auto-advance: auto-play the next episode", tag: "frontend", category: "in_progress", assignee: "Ashley" },
-  { key: "ARGY-90", repo: "argosy", title: "Skip Intro / Skip Credits buttons (web player)", tag: "frontend", category: "backlog", assignee: "Ashley" },
-  { key: "ARGY-91", repo: "argosy", title: "Global auto-play preference (opt-in, default off)", tag: "backend", category: "backlog" },
-  { key: "ARGY-64", repo: "argosy", title: "Phase 8 — Extra Credit (Stretch & Scale)", tag: "epic", category: "in_progress", type: "epic", assignee: "Jordan" },
+  { key: "ARGY-89", repo: "argosy", title: "Series auto-advance: auto-play the next episode", tag: "frontend", category: "in_progress", assignee: "Ashley", parent: { key: "ARGY-64", title: "Phase 8 — Extra Credit (Stretch & Scale)" } },
+  { key: "ARGY-90", repo: "argosy", title: "Skip Intro / Skip Credits buttons (web player)", tag: "frontend", category: "backlog", assignee: "Ashley", parent: { key: "ARGY-64", title: "Phase 8 — Extra Credit (Stretch & Scale)" } },
+  { key: "ARGY-91", repo: "argosy", title: "Global auto-play preference (opt-in, default off)", tag: "backend", category: "backlog", parent: { key: "ARGY-64", title: "Phase 8 — Extra Credit (Stretch & Scale)" } },
+  // Parented to an initiative that isn't in the set: Jira's third rung
+  // (initiative → epic → task). Nesting deliberately stops at one level, so
+  // this stays a top-level epic and merely wears a chip naming its parent —
+  // the case that would otherwise drop the link with nothing to show for it.
+  { key: "ARGY-64", repo: "argosy", title: "Phase 8 — Extra Credit (Stretch & Scale)", tag: "epic", category: "in_progress", type: "epic", assignee: "Jordan", parent: { key: "ARGY-1", title: "Argosy 2026 roadmap" } },
   { key: "SWY-12", repo: "switchyard", title: "Saved filters in the board view", tag: "frontend", category: "review", assignee: "Jordan" },
   { key: "SWY-7", repo: "switchyard", title: "Webhook retries with exponential backoff", tag: "backend", category: "backlog" },
-  { key: "DRY-3", repo: "drydock", title: "Tile layout snapping + window persistence", tag: "frontend", category: "in_progress", assignee: "Ashley" },
-  { key: "DRY-5", repo: "drydock", title: "Session persistence across server reconnect", tag: "infra", category: "backlog" },
+  { key: "DRY-3", repo: "drydock", title: "Tile layout snapping + window persistence", tag: "frontend", category: "in_progress", assignee: "Ashley", parent: { key: "DRY-1", title: "AI Agent Orchestrator — web terminal multiplexer for AI CLIs" } },
+  { key: "DRY-5", repo: "drydock", title: "Session persistence across server reconnect", tag: "infra", category: "backlog", parent: { key: "DRY-1", title: "AI Agent Orchestrator — web terminal multiplexer for AI CLIs" } },
 ];
 
 const CATEGORY_LABEL: Record<TicketCategory, string> = {
@@ -51,6 +63,7 @@ function toTicket(f: Fixture): Ticket {
     status: { category: f.category, label: CATEGORY_LABEL[f.category] },
     repo: f.repo,
     type: f.type ?? "task",
+    parent: f.parent,
     tag: f.tag,
     assignee: f.assignee ? { name: f.assignee } : undefined,
   };
@@ -73,8 +86,13 @@ export class FixtureProvider implements TrackerProvider {
   }
 
   async listTickets(q: TicketQuery): Promise<Ticket[]> {
+    // Epics are exempt from the backlog exclusion (DRY-13) — see the same rule
+    // in the Switchyard and Jira providers.
     let out = FIXTURES.filter((f) =>
-      q.open ? f.category !== "done" && (q.includeBacklog || f.category !== "backlog") : true,
+      q.open
+        ? f.category !== "done" &&
+          (q.includeBacklog || f.category !== "backlog" || f.type === "epic")
+        : true,
     );
     if (q.project) out = out.filter((f) => this.inProject(f, q.project!));
     if (q.projects?.length) out = out.filter((f) => q.projects!.some((p) => this.inProject(f, p)));
@@ -82,7 +100,20 @@ export class FixtureProvider implements TrackerProvider {
       const t = q.text.toLowerCase();
       out = out.filter((f) => f.key.toLowerCase().includes(t) || f.title.toLowerCase().includes(t));
     }
-    return out.map(toTicket);
+    // Child breakdown per epic (DRY-13), counted over the whole fixture set —
+    // the in-memory stand-in for the extra tracker query the live providers make.
+    return out.map((f) => {
+      const t = toTicket(f);
+      if (f.type !== "epic") return t;
+      const byCategory: Partial<Record<TicketCategory, number>> = {};
+      let total = 0;
+      for (const k of FIXTURES) {
+        if (k.parent?.key !== f.key) continue;
+        byCategory[k.category] = (byCategory[k.category] ?? 0) + 1;
+        total++;
+      }
+      return { ...t, childStats: { total, byCategory } };
+    });
   }
 
   async searchTickets(text: string, projects?: string[]): Promise<Ticket[]> {
