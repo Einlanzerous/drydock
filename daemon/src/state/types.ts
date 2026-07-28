@@ -41,6 +41,18 @@ export interface StoreHealth {
   /** False means reads/writes are currently failing — see `error`. */
   ok: boolean;
   error?: string;
+  /**
+   * The verdict above is CACHED, not measured: the store is inside its retry
+   * cooldown and deliberately didn't dial (DRY-58). Worth distinguishing
+   * because `ok:false` otherwise reads as "just probed, still dead" — a monitor
+   * can't tell a database that's down from one nobody has asked about for eight
+   * seconds, and the difference is the whole reason the cooldown exists.
+   *
+   * Absent on a store that has no such notion (the file store never has one).
+   */
+  cooling?: boolean;
+  /** How long until the next probe is allowed, ms. Set with `cooling`. */
+  retryInMs?: number;
 }
 
 /**

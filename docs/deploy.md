@@ -36,12 +36,26 @@ First run seeds `~/.drydock/prod/.env` from `.env.example` with
 the host — never in an image or the repo.
 
 Workspace state (DRY-28) defaults to `~/.drydock/state-4318.json`, which needs
-no extra infrastructure and is a perfectly good answer for a single host. Point
-`DRYDOCK_DATABASE_URL` at a Postgres in that same `.env` to keep it in a
-database instead — the daemon migrates its own schema on first use, and treats
-an unreachable database as degraded rather than fatal, so adding one can't turn
-a database outage into a daemon that won't start. Note prod and dev must not
-share a state file: the default carries the port for exactly that reason.
+no extra infrastructure and runs a complete Drydock. For a host you actually
+depend on, point `DRYDOCK_DATABASE_URL` at a Postgres in that same `.env` — the
+README's two tiers, and this is the tier that side is written for. The daemon
+migrates its own schema on first use and treats an unreachable database as
+degraded rather than fatal, so adding one cannot turn a database outage into a
+daemon that won't start; it recovers on its own, without needing you to bounce a
+host full of running agents. Note prod and dev must not share a state file: the
+default carries the port for exactly that reason.
+
+Two operational notes if you do point it at a database:
+
+- **`/healthz` now tells a down store from one waiting to retry** —
+  `store.cooling` with `retryInMs`, answered immediately instead of holding your
+  monitor for the connect timeout. `ok` is still an answer about the daemon,
+  which serves sessions perfectly well with a dead store.
+- **Migrations are checksummed.** Editing an already-applied migration file is
+  an error rather than a silent divergence, which matters here specifically:
+  prod, dev and any throwaway instance can all be pointed at one database. Add a
+  new numbered file instead; the store 503s until the edited one is restored,
+  and live sessions are unaffected while it does.
 
 One-time, so the unit survives logout/reboot:
 

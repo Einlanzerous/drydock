@@ -6,7 +6,7 @@
 // and reserves space for the dock; focus puts one window large with a
 // right-hand thumbnail strip of the rest.
 import { onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
-import { loadLayout, saveLayout } from "./layoutStore.js";
+import { loadLayout, type PersistedLayout, saveLayout } from "./layoutStore.js";
 
 export type LayoutMode = "float" | "tile" | "focus";
 export type WinType = "agent" | "bash";
@@ -85,8 +85,18 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
   // rebuilding one from scratch at cascade positions.
   async function hydrate(): Promise<void> {
     if (!opts.persistKey) return;
-    const saved = await loadLayout(opts.persistKey);
-    if (!saved) return;
+    const saved = await loadLayout(opts.persistKey, { apply, arranged: () => arranged });
+    if (saved) apply(saved);
+  }
+
+  /**
+   * Put a saved arrangement on screen. Extracted from `hydrate` because DRY-58
+   * has a second caller: when the store comes back after an outage that began
+   * before the first read, the desk it was holding lands here rather than
+   * waiting for a page reload. One function so the restore a reload does and
+   * the restore a heal does cannot drift apart.
+   */
+  function apply(saved: PersistedLayout): void {
     // DRY-42: heal layouts persisted while a duplicate-id window existed (the
     // spawn-vs-poll race wrote both copies, and the deep watcher made the
     // corruption survive reloads). Prefer the workspace-kind entry — it
@@ -97,6 +107,8 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
       byId.set(w.id, prev && prev.kind === "workspace" && w.kind !== "workspace" ? prev : w);
     }
     windows.splice(0, windows.length, ...byId.values());
+    // Assigned, not `setLayout`d: applying someone else's desk is not this
+    // client arranging one (see `arranged`).
     layout.value = saved.layout;
     // Keep the z counter above every restored window so new spawns land on top.
     z = windows.reduce((m, w) => Math.max(m, w.z), z);
@@ -105,6 +117,23 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
       .reduce<Win | null>((best, w) => (!best || w.z > best.z ? w : best), null);
     focusedId.value = top?.id ?? null;
   }
+
+  /**
+   * Has a HUMAN shaped this desk since it loaded? (DRY-58)
+   *
+   * It decides one thing: when the store heals after an outage that started
+   * before we ever read it, whose desk wins — this browser's or the one the
+   * daemon turns out to be holding. So the line has to sit exactly where
+   * `mayPush`'s data-loss path does. A window appearing because the session
+   * poll found a new PTY is NOT arranging: that is the from-scratch cascade
+   * desk `mayPush` exists to stop overwriting a real one. Dragging, resizing,
+   * minimizing, restoring, switching layout mode and moving a workspace pane's
+   * own furniture all are — each one is a position someone chose.
+   *
+   * Deliberately not `bringFront`: clicking a terminal to type in it is not a
+   * desk you arranged, even though it does change the z-order that gets saved.
+   */
+  let arranged = false;
 
   // Debounced so a drag/resize (many mutations/sec) coalesces into one write.
   let saveTimer: ReturnType<typeof setTimeout> | null = null;
@@ -166,7 +195,9 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
    *  drawer-open / shell-collapsed / split-ratio state via the deep watcher). */
   function updateWin(id: string, patch: Partial<Win>): void {
     const w = windows.find((x) => x.id === id);
-    if (w) Object.assign(w, patch);
+    if (!w) return;
+    Object.assign(w, patch);
+    arranged = true;
   }
 
   function remove(id: string) {
@@ -195,7 +226,9 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
 
   function minimize(id: string) {
     const w = windows.find((x) => x.id === id);
-    if (w) w.minimized = true;
+    if (!w) return;
+    w.minimized = true;
+    arranged = true;
   }
 
   function restore(id: string) {
@@ -204,10 +237,16 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
     w.minimized = false;
     w.z = ++z;
     focusedId.value = id;
+    arranged = true;
   }
 
   function setLayout(m: LayoutMode) {
+    // Only a real change counts. Every spawn path calls this with "float" to
+    // make sure the new window is visible, and a spawn is a session appearing,
+    // not a desk being arranged.
+    if (layout.value === m) return;
     layout.value = m;
+    arranged = true;
   }
 
   function setDesk(w: number, h: number) {
@@ -249,6 +288,7 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
       if (!w) return;
       const dx = e.clientX - drag.sx;
       const dy = e.clientY - drag.sy;
+      arranged = true;
       if (drag.mode === "move") {
         w.x = Math.max(0, drag.ox + dx);
         w.y = Math.max(0, drag.oy + dy);

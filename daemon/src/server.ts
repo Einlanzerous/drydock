@@ -113,9 +113,12 @@ const server = http.createServer(async (req, res) => {
         // real opinion about internal state.)
         //
         // NB this probe can block for up to the pool's connect timeout when a
-        // configured Postgres is down. Nothing on the deploy path waits on it —
-        // install-prod.sh polls /api/sessions — but a monitor pointed here
-        // wants a timeout above 5s.
+        // configured Postgres is down and its retry window is open. Nothing on
+        // the deploy path waits on it — install-prod.sh polls /api/sessions —
+        // but a monitor pointed here wants a timeout above 5s. Inside the
+        // cooldown it answers immediately with `store.cooling` + `retryInMs`,
+        // which is the difference between "the database is down" and "we're
+        // waiting to find out" (DRY-58).
         ok: true,
         sessions: manager.list().length,
         store: await store.health(),

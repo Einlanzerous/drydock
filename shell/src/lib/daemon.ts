@@ -266,17 +266,45 @@ export async function fetchWorkspace(): Promise<WorkspaceEnvelope | null> {
   return body.workspace ?? null;
 }
 
+/**
+ * Budget for a write. Longer than the read's 3s because there is no first paint
+ * waiting on it, and it has to clear the daemon's own worst honest latency —
+ * aborting a request that was about to explain itself trades a good error for
+ * a vague one.
+ *
+ * That worst case is the daemon's `query_timeout` (10s, see state/postgres.ts),
+ * not its 5s connect timeout: a write landing on a warm-but-partitioned pooled
+ * client waits out the query, and a warm pool is the normal case since clients
+ * stay idle for 30s. The two numbers have to be picked together — at 8s this
+ * aborted two seconds before the daemon would have answered 503, which is
+ * precisely the trade this comment claims to avoid.
+ *
+ * It exists at all because of DRY-58. While a failed push was fire-and-forget,
+ * a request that hung forever cost nothing: the mirror had the desk and nobody
+ * was waiting. Now a push failing is what ARMS the retry, and the retry loop
+ * awaits this call — so a daemon that accepts the connection and then goes
+ * silent (a real partition, as opposed to a refused connect) would leave the
+ * recovery permanently in flight, having neither succeeded nor reported. No
+ * notice, no retry, no roaming, and nothing in the console to say so. The one
+ * failure mode this whole ticket is about, reintroduced by its own fix.
+ */
+const WRITE_TIMEOUT_MS = 12_000;
+
 export async function putWorkspace(data: WorkspaceEnvelope): Promise<void> {
   const res = await fetch(`${DAEMON_HTTP}/api/workspace`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
+    signal: AbortSignal.timeout(WRITE_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`daemon returned ${res.status}`);
 }
 
 export async function deleteWorkspace(): Promise<void> {
-  const res = await fetch(`${DAEMON_HTTP}/api/workspace`, { method: "DELETE" });
+  const res = await fetch(`${DAEMON_HTTP}/api/workspace`, {
+    method: "DELETE",
+    signal: AbortSignal.timeout(WRITE_TIMEOUT_MS),
+  });
   if (!res.ok) throw new Error(`daemon returned ${res.status}`);
 }
 

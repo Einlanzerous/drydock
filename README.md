@@ -207,30 +207,74 @@ no per-repo setup.
   Arrange the desk on the desktop, open the shell on a laptop, get the same desk
   (`composables/layoutStore.ts` → `/api/workspace` → `daemon/src/state/`).
 
-## Workspace state (DRY-28)
+## Two tiers: with a database, and without
 
-The daemon owns your arrangement, and where it puts it is one env var:
+One env var, `DRYDOCK_DATABASE_URL`, decides which one you're running. Both are
+real; they're aimed at different things.
 
-| `DRYDOCK_DATABASE_URL` | store | for |
-|---|---|---|
-| unset (default) | JSON file, `~/.drydock/state-<port>.json` | a fresh clone, a single laptop — nothing to install |
-| `postgres://…` | Postgres, schema migrated on first use | a central database, or a container on this host |
+**No database — try it.** `bun install && bun run up` and nothing else. State
+goes to a JSON file (`~/.drydock/state-<port>.json`). This is the default and a
+complete Drydock: sessions survive disconnects, scrollback replays, autonomous
+runs work. It's how you find out what this is.
 
-There is no third mode: "central Postgres" and "Postgres in Docker" are the same
+**With a database — the recommended path for a stable platform.** Point
+`DRYDOCK_DATABASE_URL` at a Postgres and the daemon migrates its own schema on
+first use. Worth it if you're doing multi-machine agentic work, or solo work you
+expect to keep across weeks. What it buys today is one queryable place for state
+that isn't a file on one host's disk — which is what makes a desk arranged on
+the desktop the same desk on the laptop, and what durable per-session history
+(DRY-56) is being built on.
+
+Two things that are easy to assume and wrong:
+
+- **The tier is not the deployment shape.** The single-host profile (DRY-25) is
+  one pull-and-run command with isolation, and a database container coming up
+  beside it is entirely normal. The no-database tier is about zero setup, not
+  about being containerless.
+- **Process durability isn't what the database buys.** How long a session lives
+  is a property of how this host runs its PTYs (DRY-57's detached supervisors),
+  and it is identical in both tiers — whatever survives, survives without a
+  database, and adding one buys none of it.
+
+What the file tier can't do: it's local to one host and it holds exactly one
+desk per workspace name — there's nothing to query, nothing retained about
+sessions that have ended, and no second daemon can share it.
+
+There is no third mode. "Central Postgres" and "Postgres in Docker" are the same
 code path reached by a different URL, because a mode exercised in only one
 deployment is a mode that breaks in the other. `DRYDOCK_DB_LOCAL=1` in `.env`
 makes `bun run up` start that container (`deploy/compose.db.yml`, loopback-bound
 on `5433`) and point the daemon at it.
 
-A database that's unreachable **degrades, never escalates**: the daemon still
-boots, still spawns agents, still replays scrollback; `/api/workspace` answers
-503 and the shell keeps using its localStorage mirror until the store comes back
-(no daemon restart needed — which matters, since a restart is what kills every
-live PTY). Window positions must never be able to cost you a running agent.
+### When the store is unreachable (DRY-28, DRY-58)
+
+An unreachable store **degrades, never escalates**: the daemon still boots,
+still spawns agents, still replays scrollback; `/api/workspace` answers 503 and
+the shell keeps its localStorage mirror. Window positions must never be able to
+cost you a running agent.
+
+It also recovers on its own. The shell retries in the background (5s out to 30s)
+and flushes whatever you arranged during the outage the moment the store is back
+— no page reload, and no daemon restart, which is the point: a restart is the
+most disruptive thing you can do to a host full of running agents, and needing
+one to recover a window position would be absurd. While it lasts, the desk says
+so once, quietly, and the line clears itself when it stops being true.
+
+If two clients disagree — the outage started before this browser ever read the
+daemon's copy, and both have a desk — whoever actually *arranged* one wins. A
+window appearing because a new session was found doesn't count as arranging, so
+a browser that has never seen your desk can't overwrite it with a from-scratch
+one.
+
+`/healthz` reports the store alongside the daemon, and distinguishes a store
+that's down from one inside its retry window (`store.cooling` + `retryInMs`) —
+`ok` there is still an answer about the daemon, which is up either way.
 
 State is keyed by an `owner` that is the constant `local` until accounts land
 (DRY-27). It is a namespace, **not** a security boundary — the daemon has no
-auth.
+auth. `DRYDOCK_WORKSPACE` defaults to `<hostname>-<port>`, so "the desk follows
+you" means one daemon and any number of clients; two daemons share a desk only
+if you deliberately give them the same workspace name.
 
 ## Layout
 
