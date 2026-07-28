@@ -103,6 +103,21 @@ export type SessionStatus = "running" | "exited";
 export type RunOrigin = "you" | "agent";
 
 /**
+ * How much a session may do without asking (DRY-49). `manual` gates every
+ * gated tool through Drydock; `acceptEdits` lets file edits pass but still
+ * stops for Bash and WebFetch; the rest are hands-off and never gate at all.
+ *
+ * On the wire because the rail must not imply a run will ask you something
+ * when its mode means it never will.
+ */
+export type PermissionMode =
+  | "manual"
+  | "acceptEdits"
+  | "auto"
+  | "bypassPermissions"
+  | "dontAsk";
+
+/**
  * Why an autonomous run ended badly, carried on the card so a failure can be
  * triaged without opening anything (DRY-49).
  */
@@ -152,6 +167,8 @@ export interface SessionInfo {
    */
   autonomous: boolean;
   origin: RunOrigin;
+  /** What this session is allowed to do without asking. */
+  permissionMode: PermissionMode;
   /**
    * What the agent is doing right now, in one clause ("editing src/foo.ts").
    * Fed by the reporting PreToolUse hook; absent until the first tool call,

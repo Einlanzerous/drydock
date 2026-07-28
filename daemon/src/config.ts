@@ -31,6 +31,34 @@ function num(raw: string | undefined, fallback: number): number {
   return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
+/**
+ * Permission modes a spawn may ask for (DRY-49).
+ *
+ * `manual` is the CLI's own no-flag default — verified: a `claude` spawned with
+ * no `--permission-mode` reports "manual mode on". It is represented here so a
+ * host and a launch panel can *name* the safe posture, but it is passed by
+ * OMITTING the flag rather than sending it, which keeps the common path
+ * byte-identical to what shipped and can't break if the CLI renames it.
+ *
+ * The rest are passed through to `--permission-mode` verbatim. The list is a
+ * whitelist, not documentation: an unrecognised value from a request must not
+ * reach a spawn argument.
+ */
+export type PermissionMode =
+  | "manual"
+  | "acceptEdits"
+  | "auto"
+  | "bypassPermissions"
+  | "dontAsk";
+
+export const PERMISSION_MODES = new Set<string>([
+  "manual",
+  "acceptEdits",
+  "auto",
+  "bypassPermissions",
+  "dontAsk",
+]);
+
 /** Read once: the default log path is per-port so concurrent daemons don't share a file. */
 const PORT = Number(process.env.DRYDOCK_PORT ?? 4317);
 
@@ -183,6 +211,28 @@ export const CONFIG = {
    * Autonomous runs (DRY-49) — a session nobody is looking at.
    */
   autonomous: {
+    /**
+     * How much an unattended run is allowed to do without asking (DRY-49).
+     *
+     *   manual      every gated tool raises a Drydock gate. Safest, and the
+     *               most interruptive: a run touching twelve files asks twelve
+     *               times unless you use "Always allow <Tool>".
+     *   acceptEdits file edits pass silently; Bash and WebFetch still gate.
+     *               The middle: an isolated worktree makes edits cheap to
+     *               review after the fact, while the tools that reach OUT of it
+     *               still stop and ask.
+     *   auto        nothing gates at all (likewise bypassPermissions/dontAsk).
+     *               The rail becomes a progress display: it can still tell you
+     *               a run failed, but it will never ask you anything.
+     *
+     * Ships as `manual` because that's the posture the rail was built for, and
+     * a looser default should be a decision somebody made rather than one they
+     * inherited. Flip it here once you trust your runs; the launch panel can
+     * also override it per run.
+     */
+    permissionMode: PERMISSION_MODES.has(process.env.DRYDOCK_AUTONOMOUS_PERMISSION_MODE ?? "")
+      ? (process.env.DRYDOCK_AUTONOMOUS_PERMISSION_MODE as PermissionMode)
+      : ("manual" as PermissionMode),
     /**
      * How long an AUTONOMOUS run holds a gate. An hour, not the supervised
      * 300s, because the premise is that you walked away: five minutes is the

@@ -212,6 +212,16 @@ const cards = computed<Card[]>(() =>
 function cardTitle(card: Card): string {
   const started = new Date(card.session.createdAt).toLocaleTimeString();
   const lines = [`${card.label} · ${card.state} · started ${started}`];
+  // Worth saying plainly: in a hands-off mode this run will never ask you
+  // anything, so a rail that only ever shows it working is the whole truth
+  // rather than a gate you haven't noticed.
+  lines.push(
+    card.session.permissionMode === "manual"
+      ? "asks about everything"
+      : card.session.permissionMode === "acceptEdits"
+        ? "edits freely, asks before running commands"
+        : `never asks (${card.session.permissionMode})`,
+  );
   if (card.session.worktree) lines.push(`worktree ${card.session.worktree}`);
   if (card.session.failure?.reason) lines.push(`failed: ${card.session.failure.reason}`);
   if (card.session.handoff) lines.push(`handoff ${card.session.handoff}`);

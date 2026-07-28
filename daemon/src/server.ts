@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as http from "node:http";
 import * as path from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
-import { CONFIG } from "./config.js";
+import { CONFIG, PERMISSION_MODES, type PermissionMode } from "./config.js";
 import { describe, log, type LogFields } from "./log.js";
 import { SessionManager } from "./manager.js";
 import { expandHome, resolveRepoCwd } from "./repos.js";
@@ -30,9 +30,20 @@ manager.onRunEnd(runEndHandler(tracker));
 
 // Permission modes where Claude Code runs tools without asking. In these the
 // PreToolUse hook still fires, but our approve/deny is moot — so we auto-allow
-// rather than show a gate that wouldn't actually hold the tool back. "default"
-// and "acceptEdits" (which still prompts for Bash) keep gating.
+// rather than show a gate that wouldn't actually hold the tool back.
 const HANDS_OFF_MODES = new Set(["bypassPermissions", "auto", "dontAsk"]);
+
+/**
+ * Tools `acceptEdits` waves through (DRY-49).
+ *
+ * Without this, offering acceptEdits would be a lie: the mode's whole meaning
+ * is "don't ask me about file edits", but PreToolUse fires in every mode, so
+ * Drydock would have raised its own gate for exactly the edits the user just
+ * said to stop asking about — moving the interruption rather than removing it.
+ * Bash and WebFetch still gate, which is the point of picking this over `auto`:
+ * the tools that reach OUT of the worktree still stop.
+ */
+const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
 
 function send(res: http.ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
@@ -179,6 +190,20 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
+    // Host policy the shell needs in order to describe itself honestly (DRY-49):
+    // the launch panel says which posture a run will start in, and "the host
+    // default" is only useful if it can name the value. Read-only, and
+    // deliberately carries no credentials — everything here is already implied
+    // by behaviour a client can observe.
+    if (pathname === "/api/config" && req.method === "GET") {
+      return send(res, 200, {
+        autonomous: {
+          permissionMode: CONFIG.autonomous.permissionMode,
+          permissionTimeoutMs: CONFIG.autonomous.permissionTimeoutMs,
+        },
+      });
+    }
+
     // --- Session control API ---
     if (pathname === "/api/sessions" && req.method === "GET") {
       return send(res, 200, { sessions: manager.list().map((s) => s.info()) });
@@ -320,6 +345,17 @@ const server = http.createServer(async (req, res) => {
         autonomous: body.autonomous === true,
         origin: body.origin === "agent" ? "agent" : "you",
         input: typeof body.input === "string" && body.input.trim() ? body.input : undefined,
+        // A whitelist, because this value becomes a spawn argument. An
+        // autonomous run with nothing specified falls back to the HOST's
+        // policy; a supervised one to `manual`, which is what it has always
+        // been. An unrecognised value is ignored rather than rejected: it can
+        // only ever loosen or tighten a run, and failing the spawn over it
+        // would turn a typo into a session that never started.
+        permissionMode: PERMISSION_MODES.has(body.permissionMode)
+          ? (body.permissionMode as PermissionMode)
+          : body.autonomous === true
+            ? CONFIG.autonomous.permissionMode
+            : "manual",
       });
       return send(res, 201, { session: session.info() });
     }
@@ -579,6 +615,12 @@ const server = http.createServer(async (req, res) => {
       // tool regardless of what we return — so popping a gate would be a
       // misleading no-op. Honor the mode and auto-allow without prompting.
       const mode = typeof body.permission_mode === "string" ? body.permission_mode : "default";
+      const tool = body.tool_name ?? "unknown";
+      // Recorded BEFORE any early return. The rail's action line is fed from
+      // here for every gated tool, and a hands-off run — which returns
+      // immediately below — is precisely the one whose card would otherwise
+      // have nothing to say for its entire life.
+      session.noteActivity(tool, body.tool_input ?? {});
       if (HANDS_OFF_MODES.has(mode)) {
         return send(res, 200, {
           hookSpecificOutput: {
@@ -588,7 +630,15 @@ const server = http.createServer(async (req, res) => {
           },
         });
       }
-      const tool = body.tool_name ?? "unknown";
+      if (mode === "acceptEdits" && EDIT_TOOLS.has(tool)) {
+        return send(res, 200, {
+          hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "allow",
+            permissionDecisionReason: "Auto-approved (acceptEdits)",
+          },
+        });
+      }
       const outcome = await session.requestPermission(tool, body.tool_input ?? {});
       if (outcome.decision === "timeout") {
         return send(res, 200, {}); // defer to the CLI's own prompt

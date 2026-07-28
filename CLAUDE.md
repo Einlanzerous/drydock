@@ -131,6 +131,21 @@ curl -s -X POST localhost:4399/api/sessions -H 'Content-Type: application/json' 
 Then watch `/api/sessions`: `activity` fills in, `pendingPermissions` goes to 1,
 and 25s later `failure` appears and `handoff` names a file.
 
+**Verify all three permission postures**, because each one changes which tools
+reach the gate at all (`DRYDOCK_AUTONOMOUS_PERMISSION_MODE`, or the launch
+panel's picker):
+
+| mode | Bash / WebFetch | Edit / Write |
+|---|---|---|
+| `manual` (default) | Drydock gate | Drydock gate |
+| `acceptEdits` | Drydock gate | passes silently |
+| `auto` / `bypassPermissions` / `dontAsk` | passes | passes |
+
+`acceptEdits` needs the daemon's own check (`EDIT_TOOLS` in server.ts), not just
+the flag: `PreToolUse` fires in *every* mode, so without it Drydock would raise
+its own gate for exactly the edits the mode says to stop asking about — moving
+the interruption rather than removing it.
+
 **Then do it again with a prompt that WRITES a file, not one that runs Bash.**
 A Bash-only probe cannot catch the worst failure this feature has: any tool the
 `PreToolUse` matcher misses gets Claude Code's own TUI prompt drawn inside a PTY

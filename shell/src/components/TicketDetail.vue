@@ -8,6 +8,7 @@ import {
   type TicketDetail,
 } from "../lib/tracker.js";
 import { removeWorktree, resolveRepoCwd } from "../lib/daemon.js";
+import type { PermissionMode } from "../lib/protocol.js";
 import { renderMarkdown } from "../lib/markdown.js";
 
 // Ticket detail panel (DRY-9 ticket-spawn). Opened when a ticket is picked from
@@ -22,7 +23,12 @@ import { renderMarkdown } from "../lib/markdown.js";
 // DRY-20: this is a floating, draggable window rather than a modal — it stacks
 // against the terminals via `z` (owned by the parent's window manager) and no
 // longer dismisses on outside click, so you can work other windows with it open.
-const props = defineProps<{ ticket: Ticket; z: number }>();
+const props = defineProps<{
+  ticket: Ticket;
+  z: number;
+  /** The host's autonomous policy, so the picker can name what "default" means. */
+  hostMode?: PermissionMode;
+}>();
 // DRY-15: a ticket spawn can isolate into a git worktree. `worktree` is the path
 // to use, or `false` to run directly in `cwd`; `branch` overrides the branch name.
 type SpawnPayload = {
@@ -38,6 +44,8 @@ type SpawnPayload = {
    * daemon submits the prompt, and gates surface there instead of in a pane.
    */
   autonomous?: boolean;
+  /** DRY-49: how much an autonomous run may do without asking. */
+  permissionMode?: PermissionMode;
 };
 const emit = defineEmits<{
   (e: "send", payload: SpawnPayload): void; // App opens a workspace (DRY-36)
@@ -87,6 +95,26 @@ const cwdMatched = ref(true);
 // the daemon's PreToolUse hook treats as hands-off. On by default; toggle off
 // for a ticket you want to babysit.
 const auto = ref(true);
+
+// DRY-49: how much an UNATTENDED run may do without asking. "" means "whatever
+// the host is configured for" — the common case, and the one that lets a policy
+// change in one env var take effect without anybody re-picking it here.
+const runMode = ref<PermissionMode | "">("");
+
+const MODE_LABELS: Record<PermissionMode, string> = {
+  manual: "ask about everything",
+  acceptEdits: "edit freely, ask before running commands",
+  auto: "never ask",
+  bypassPermissions: "never ask",
+  dontAsk: "never ask",
+};
+
+/** What the run will actually do, spelled out — including via the host default. */
+const modeSummary = computed(() => {
+  const effective = runMode.value || props.hostMode || "manual";
+  const suffix = runMode.value ? "" : ` (host default: ${effective})`;
+  return `${MODE_LABELS[effective]}${suffix}`;
+});
 
 // DRY-15 worktree isolation. `isGit` gates the whole feature (repo-less tickets
 // can't isolate); `isolate` is the user's on/off toggle (default on for a git
@@ -180,12 +208,10 @@ function send(): void {
  *
  * Two overrides, both deliberate:
  *
- * `auto: false` — the Auto toggle defaults ON, and an autonomous run in auto
- * mode is exactly what this ticket calls "explicitly not this": the daemon
- * auto-allows every gate in the hands-off modes, so the run would be
- * uninterrupted with no safety and the rail would never ask you anything. The
- * value of autonomous mode is the middle — gates still fire, and there is now
- * somewhere for them to go.
+ * The supervised `auto` toggle does NOT carry over. An unattended run's posture
+ * is its own decision, made in the picker beside this button and defaulting to
+ * the host's policy — the two are different questions and sharing a checkbox
+ * between them made the safer one an accident of whatever was ticked last.
  *
  * Worktree ON regardless of the toggle when the repo is a git work tree —
  * letting something nobody is watching write into the human's own checkout is
@@ -198,6 +224,10 @@ function sendAutonomous(): void {
     ...payload(),
     auto: false,
     autonomous: true,
+    // Omitted rather than resolved client-side when left on "host default", so
+    // changing DRYDOCK_AUTONOMOUS_PERMISSION_MODE takes effect for everyone
+    // without a browser having cached last week's answer.
+    permissionMode: runMode.value || undefined,
     worktree: on ? worktreePath.value.trim() : false,
     branch: on ? branch.value.trim() || undefined : undefined,
   });
@@ -308,9 +338,21 @@ async function resetWorktree(): Promise<void> {
         Auto
       </label>
       <button class="cancel" @click="emit('close')">Cancel</button>
+      <!-- What an unattended run may do without asking (DRY-49). Separate from
+           the supervised Auto toggle above on purpose: different question. -->
+      <select
+        v-model="runMode"
+        class="runmode"
+        :title="`Unattended runs will ${modeSummary}`"
+      >
+        <option value="">Host default</option>
+        <option value="manual">Ask about everything</option>
+        <option value="acceptEdits">Edit freely, ask to run</option>
+        <option value="auto">Never ask</option>
+      </select>
       <button
         class="auto-run"
-        title="Run unattended: no window, a card on the rail, and gates surface there. Always isolated in a worktree, and never in auto mode — the gates are the point."
+        :title="`Run unattended: no window, a card on the rail. Always isolated in a worktree. Will ${modeSummary}.`"
         :disabled="!prompt.trim() || !cwd.trim()"
         @click="sendAutonomous"
       >
@@ -619,6 +661,17 @@ async function resetWorktree(): Promise<void> {
 .send {
   background: #2a6db0;
   color: #eef5fb;
+}
+.runmode {
+  flex: 0 0 auto;
+  height: 32px;
+  padding: 0 6px;
+  border-radius: 7px;
+  border: 1px solid #ffffff14;
+  background: #13171c;
+  color: #9aa6b2;
+  font-size: 11.5px;
+  cursor: pointer;
 }
 /* Outlined, not filled: "Spawn Agent" stays the primary action. Launching
    something you then walk away from should be a deliberate second choice. */

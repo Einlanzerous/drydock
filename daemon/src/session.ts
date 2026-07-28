@@ -9,6 +9,7 @@ import type {
   EventMessage,
   PendingGate,
   PermissionDecision,
+  PermissionMode,
   RunFailure,
   RunOrigin,
   ServerMessage,
@@ -34,6 +35,8 @@ export interface SpawnOptions {
   autonomous?: boolean;
   /** Who kicked it off. Defaults to the human at the browser. */
   origin?: RunOrigin;
+  /** How much it may do without asking. Defaults to `manual` (gate everything). */
+  permissionMode?: PermissionMode;
   /**
    * First prompt, typed into the PTY by the DAEMON once the CLI has settled.
    *
@@ -87,6 +90,7 @@ function resolveSpawn(
   command: string,
   args: string[],
   autonomous: boolean,
+  mode: PermissionMode,
 ): { file: string; args: string[] } {
   if (command === "shell") {
     return { file: CONFIG.defaultShell, args: ["-l", ...args] };
@@ -95,7 +99,12 @@ function resolveSpawn(
     // Autonomous runs get the settings file that also reports activity, so the
     // rail's action line has a source; supervised sessions don't pay for it.
     const settings = autonomous ? CLAUDE_SETTINGS_PATH_AUTONOMOUS : CLAUDE_SETTINGS_PATH;
-    return { file: "claude", args: ["--settings", settings, ...args] };
+    // `manual` is passed by OMITTING the flag: it IS the CLI's no-flag default
+    // (a bare `claude` reports "manual mode on"), so the safe posture stays the
+    // exact command line that shipped rather than one that depends on the CLI
+    // keeping that spelling.
+    const modeArgs = mode === "manual" ? [] : ["--permission-mode", mode];
+    return { file: "claude", args: ["--settings", settings, ...modeArgs, ...args] };
   }
   return { file: command, args };
 }
@@ -192,6 +201,7 @@ export class PtySession {
   readonly worktree?: string;
   readonly branch?: string;
   readonly origin: RunOrigin;
+  readonly permissionMode: PermissionMode;
   title: string;
   /**
    * Not readonly: Take-over turns a run into an ordinary supervised session.
@@ -248,11 +258,12 @@ export class PtySession {
     this.branch = opts.branch;
     this.autonomous = opts.autonomous ?? false;
     this.origin = opts.origin ?? "you";
+    this.permissionMode = opts.permissionMode ?? "manual";
     this.title = opts.title ?? opts.command;
     this.cols = opts.cols ?? 80;
     this.rows = opts.rows ?? 24;
 
-    const spawn = resolveSpawn(this.command, this.args, this.autonomous);
+    const spawn = resolveSpawn(this.command, this.args, this.autonomous, this.permissionMode);
     this.pty = pty.spawn(spawn.file, spawn.args, {
       name: "xterm-256color",
       cols: this.cols,
@@ -279,6 +290,9 @@ export class PtySession {
       ticket: this.ticket,
       branch: this.branch,
       autonomous: this.autonomous || undefined,
+      // Logged because it decides whether this run can ask for anything at all;
+      // "why did nothing ever gate?" should be answerable from the log.
+      permissionMode: this.permissionMode,
     });
 
     if (opts.input) this.scheduleInitialInput(opts.input);
@@ -730,6 +744,7 @@ export class PtySession {
       pendingPermissions: this.pending.size,
       autonomous: this.autonomous,
       origin: this.origin,
+      permissionMode: this.permissionMode,
       activity: this.activity,
       failure: this.failure,
       handoff: this.handoff,

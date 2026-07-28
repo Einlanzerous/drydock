@@ -170,8 +170,12 @@ no per-repo setup.
 - **Autonomous runs (DRY-49).** "Run autonomously" on the ticket panel starts a
   run with no window at all: it gets a card on the rail, the daemon types and
   submits the prompt itself, and it always works in a worktree. It is
-  deliberately *not* hands-off mode — gates still fire, and the rail is where
-  they go, answerable in place without opening a terminal. An unanswered gate
+  **How much it may do without asking is host policy**
+  (`DRYDOCK_AUTONOMOUS_PERMISSION_MODE`), overridable per run from the launch
+  panel: `manual` gates every tool through the rail, `acceptEdits` lets file
+  edits pass but still stops for Bash and WebFetch, and `auto` never asks at
+  all. It ships as `manual` — the posture the rail was built for — so loosening
+  it stays a decision somebody made rather than one they inherited. An unanswered gate
   waits an hour (not the supervised 300s) and is then explicitly **denied with a
   reason** and the run ended, because the alternative — the CLI falling back to
   its own prompt inside a PTY nobody can see — is a run that looks busy forever.

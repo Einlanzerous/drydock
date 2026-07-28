@@ -15,10 +15,12 @@ import { useWindowManager, type LayoutMode, type Win } from "./composables/useWi
 import {
   DAEMON_HTTP,
   createSession,
+  fetchConfig,
   killSession,
   listSessions,
   takeOverRun,
 } from "./lib/daemon.js";
+import type { PermissionMode } from "./lib/protocol.js";
 import { getTrackerInfo, listTickets, type Ticket } from "./lib/tracker.js";
 import type { SessionInfo } from "./lib/protocol.js";
 
@@ -28,6 +30,11 @@ const wm = useWindowManager({ persistKey: DAEMON_HTTP });
 
 const tickets = ref<Ticket[]>([]);
 const providerName = ref("Switchyard");
+
+// The host's autonomous-run policy (DRY-49). Only the launch panel uses it, and
+// only to say what "host default" actually means; a daemon that doesn't serve
+// /api/config leaves it undefined and the panel names `manual`.
+const hostRunMode = ref<PermissionMode | undefined>(undefined);
 
 // Tracker pull scope (DRY-30). Host defaults come from /api/tracker/info
 // (DRYDOCK_TRACKER_PROJECTS — fixed chips); user-added keys and the backlog
@@ -289,8 +296,11 @@ async function spawnWorkspace(
       // DRY-15: isolate the agent in its own worktree (or opt out via `false`).
       worktree: opts.worktree,
       branch: opts.branch,
-      // Ticket-driven spawns can opt into hands-off "auto" permission mode.
-      args: opts.auto ? ["--permission-mode", "auto"] : undefined,
+      // Ticket-driven spawns can opt into hands-off "auto" permission mode
+      // (DRY-22). Sent as `permissionMode` rather than raw args since DRY-49,
+      // so the value is whitelisted daemon-side before it becomes part of a
+      // command line — same behaviour, one validated path.
+      permissionMode: opts.auto ? "auto" : undefined,
     });
     // Co-locate the human's shell in the agent's *resolved* cwd — which is the
     // worktree when isolated — so both panes start in exactly the same directory.
@@ -348,6 +358,7 @@ function onSendTicket(payload: {
   branch?: string;
   auto: boolean;
   autonomous?: boolean;
+  permissionMode?: PermissionMode;
 }) {
   selectedTicket.value = null;
   if (payload.autonomous) void spawnAutonomous(payload);
@@ -373,6 +384,7 @@ async function spawnAutonomous(opts: {
   cwd: string;
   worktree: string | false;
   branch?: string;
+  permissionMode?: PermissionMode;
 }) {
   try {
     await createSession({
@@ -385,6 +397,9 @@ async function spawnAutonomous(opts: {
       branch: opts.branch,
       autonomous: true,
       origin: "you",
+      // Undefined means "let the host decide" — the daemon applies
+      // DRYDOCK_AUTONOMOUS_PERMISSION_MODE rather than the shell guessing.
+      permissionMode: opts.permissionMode,
       input: opts.prompt,
     });
     await refresh();
@@ -673,6 +688,11 @@ onMounted(async () => {
   } catch {
     /* provider name stays default if the tracker info call is unreachable */
   }
+  // Best-effort and never awaited-on for anything that blocks the desk: an
+  // older daemon 404s here and the launch panel just names `manual`.
+  void fetchConfig().then((c) => {
+    if (c) hostRunMode.value = c.autonomous.permissionMode;
+  });
   await loadTickets();
   // Restore the saved arrangement before the first poll. reconcile() then keeps
   // restored windows whose sessions are still alive (at their saved geometry),
@@ -887,6 +907,7 @@ onBeforeUnmount(() => {
       v-if="selectedTicket"
       :ticket="selectedTicket"
       :z="ticketZ"
+      :host-mode="hostRunMode"
       @focus="ticketZ = wm.allocZ()"
       @send="onSendTicket"
       @close="selectedTicket = null"
