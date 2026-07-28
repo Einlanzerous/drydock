@@ -27,6 +27,22 @@ const FILE_VERSION = 1;
 
 export class FileStore implements StateStore {
   readonly kind = "file" as const;
+  /**
+   * No `history` property, and its ABSENCE is the feature (DRY-56).
+   *
+   * Session history is retained, growing, queryable state — the one access
+   * pattern a whole-file read-modify-write genuinely serves badly rather than
+   * merely differently, and the line Drydock's two tiers are drawn on. It could
+   * be bolted on here; it shouldn't be, because a half-working version is worse
+   * than an honest absence. A missing tombstone has to read as "this tier
+   * doesn't record sessions", never as "your session was lost" — which is the
+   * confusion `001_workspace.sql` was already written to pre-empt.
+   *
+   * Leaving the property off rather than stubbing it means callers write
+   * `store.history?.…` and the compiler enforces the check, so no code path can
+   * quietly assume a record that was never kept. `/healthz` reports the
+   * capability and the shell says so where the tombstone would be.
+   */
   private readonly path: string;
   /**
    * Writes are serialized through this chain. Every save is

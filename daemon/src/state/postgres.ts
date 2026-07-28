@@ -16,7 +16,15 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
 import { log } from "../log.js";
-import type { StateStore, StoreHealth, WorkspaceState, WorkspaceWrite } from "./types.js";
+import { CONFIG } from "../config.js";
+import type {
+  SessionHistory,
+  SessionRecord,
+  StateStore,
+  StoreHealth,
+  WorkspaceState,
+  WorkspaceWrite,
+} from "./types.js";
 
 const MIGRATIONS_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "migrations");
 
@@ -430,4 +438,163 @@ export class PostgresStore implements StateStore {
       return { kind: this.kind, ok: false, error: (err as Error).message };
     }
   }
+
+  /**
+   * Retained session history (DRY-56) — the thing a database buys.
+   *
+   * Every method goes through `guard()` like any other operation, which is the
+   * point of putting it here rather than in its own module with its own pool:
+   * an outage costs history one bounded fast-fail per cooldown window, exactly
+   * as it costs the workspace, and a database that comes back heals both at
+   * once. A second consumer with its own retry logic is what DRY-58 said not to
+   * build.
+   */
+  readonly history: SessionHistory = {
+    start: async (owner, session) => {
+      await this.guard(async () => {
+        await this.pool.query(
+          `insert into pty_sessions
+             (id, owner_id, command, args, cwd, repo, ticket, worktree, branch, title, created_at)
+           values ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, $10, to_timestamp($11 / 1000.0))
+           on conflict (id) do nothing`,
+          [
+            session.id,
+            owner,
+            session.command,
+            // Text + cast, not a JS array: node-postgres would serialize that as
+            // a Postgres ARRAY literal, which jsonb rejects (same trap as
+            // `windows` in save()).
+            JSON.stringify(session.args),
+            session.cwd,
+            session.repo ?? null,
+            session.ticket ?? null,
+            session.worktree ?? null,
+            session.branch ?? null,
+            session.title ?? null,
+            session.createdAt,
+          ],
+        );
+      });
+    },
+
+    touch: async (owner, id) => {
+      await this.guard(async () => {
+        await this.pool.query(
+          "update pty_sessions set last_active_at = now() where id = $1 and owner_id = $2",
+          [id, owner],
+        );
+      });
+    },
+
+    end: async (owner, id, ending) => {
+      await this.guard(async () => {
+        // `ended_at is null` makes this idempotent, and that matters more than
+        // it looks: a failed run reaches a terminal state twice (DRY-49 — a
+        // denied gate makes the CLI end its turn, so "ended-turn" lands a beat
+        // after "failed"), and boot reconciliation can re-announce an ending a
+        // previous daemon already recorded. First ending wins, as it does for
+        // the handoff document.
+        await this.pool.query(
+          `update pty_sessions
+              set ended_at = to_timestamp($3 / 1000.0), exit_code = $4, end_reason = $5
+            where id = $1 and owner_id = $2 and ended_at is null`,
+          [id, owner, ending.endedAt, ending.exitCode ?? null, ending.endReason],
+        );
+      });
+    },
+
+    noteAgentSessionId: async (owner, id, agentSessionId) => {
+      await this.guard(async () => {
+        // Only ever set once. The CLI reports the same id on every hook, but a
+        // `claude --resume` of a resumed session would report a different one,
+        // and the id that lets you resume THIS row is the first one it had.
+        await this.pool.query(
+          `update pty_sessions set agent_session_id = $3
+            where id = $1 and owner_id = $2 and agent_session_id is null`,
+          [id, owner, agentSessionId],
+        );
+      });
+    },
+
+    recent: async (owner, limit) => {
+      return this.guard(async () => {
+        const { rows } = await this.pool.query<PtySessionRow>(
+          `select id, command, args, cwd, repo, ticket, worktree, branch, title,
+                  agent_session_id, created_at, last_active_at, ended_at, exit_code, end_reason
+             from pty_sessions
+            where owner_id = $1
+         -- By when it last MATTERED, not when it started. Ordering by
+         -- created_at alone pushed a long-lived session that just ended below
+         -- 50 newer short ones, so the window waiting on its tombstone was
+         -- dropped instead — the silent loss this feature exists to prevent.
+         order by coalesce(ended_at, last_active_at, created_at) desc
+            limit $2`,
+          [owner, limit],
+        );
+        return rows.map(toRecord);
+      });
+    },
+
+    prune: async (owner) => {
+      return this.guard(async () => {
+        // Age AND count, because either alone has a bad case: a quiet month
+        // leaves nothing to resume from, and a busy afternoon of ticket-spawned
+        // agents buries the one you actually want. Running sessions are never
+        // candidates — `ended_at is not null` — so a long-lived agent can't be
+        // pruned out from under its own window.
+        const { rowCount } = await this.pool.query(
+          `delete from pty_sessions
+            where owner_id = $1
+              and ended_at is not null
+              and (ended_at < now() - ($2 || ' days')::interval
+                   or id not in (
+                     select id from pty_sessions
+                      where owner_id = $1
+                   order by created_at desc
+                      limit $3
+                   ))`,
+          [owner, String(CONFIG.state.history.days), CONFIG.state.history.max],
+        );
+        return rowCount ?? 0;
+      });
+    },
+  };
+}
+
+interface PtySessionRow {
+  id: string;
+  command: string;
+  args: unknown;
+  cwd: string;
+  repo: string | null;
+  ticket: string | null;
+  worktree: string | null;
+  branch: string | null;
+  title: string | null;
+  agent_session_id: string | null;
+  created_at: Date;
+  last_active_at: Date | null;
+  ended_at: Date | null;
+  exit_code: number | null;
+  end_reason: string | null;
+}
+
+function toRecord(row: PtySessionRow): SessionRecord {
+  return {
+    id: row.id,
+    command: row.command,
+    args: Array.isArray(row.args) ? (row.args as string[]) : [],
+    cwd: row.cwd,
+    repo: row.repo ?? undefined,
+    ticket: row.ticket ?? undefined,
+    worktree: row.worktree ?? undefined,
+    branch: row.branch ?? undefined,
+    title: row.title ?? undefined,
+    agentSessionId: row.agent_session_id ?? undefined,
+    createdAt: row.created_at.getTime(),
+    lastActiveAt: row.last_active_at?.getTime(),
+    endedAt: row.ended_at?.getTime(),
+    exitCode: row.exit_code ?? undefined,
+    endReason: (row.end_reason as SessionRecord["endReason"]) ?? undefined,
+  };
 }

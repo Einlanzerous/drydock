@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import TerminalPane from "./components/TerminalPane.vue";
+import SessionTombstone from "./components/SessionTombstone.vue";
 import WorkspacePane from "./components/WorkspacePane.vue";
 import MarkdownPane from "./components/MarkdownPane.vue";
 import WindowFrame from "./components/WindowFrame.vue";
@@ -11,15 +12,17 @@ import RunRail from "./components/RunRail.vue";
 import { openGates, startGateStream, stopGateStream } from "./composables/gateStore.js";
 import { askToNotify, notifyGate, useAttention } from "./composables/attention.js";
 import { runState } from "./composables/runState.js";
-import { noticeList } from "./composables/notices.js";
+import { clearNotice, noticeList, setNotice } from "./composables/notices.js";
 import { useWindowManager, type LayoutMode, type Win } from "./composables/useWindowManager.js";
 import {
   DAEMON_HTTP,
   createSession,
   fetchConfig,
+  fetchSessionHistory,
   killSession,
   listSessions,
   takeOverRun,
+  type SessionRecord,
 } from "./lib/daemon.js";
 import type { PermissionMode } from "./lib/protocol.js";
 import { getTrackerInfo, listTickets, type Ticket } from "./lib/tracker.js";
@@ -166,6 +169,10 @@ function dropWindow(id: string) {
   const w = wm.windows.find((x) => x.id === id);
   if (w?.kind === "workspace" && w.shellId) killSession(w.shellId).catch(() => {});
   wm.remove(id);
+  // Nothing renders it any more, and `tombstones` is merged rather than
+  // replaced on each fetch — so this is where entries are reclaimed.
+  delete tombstones[id];
+  awaitingHistory.delete(id);
 }
 
 // --- session discovery / reconciliation ---
@@ -201,12 +208,210 @@ function reconcile(list: SessionInfo[]) {
     // A plain window that landed on a now-claimed shell id (spawn/poll race):
     // drop the duplicate, but leave the PTY alive — its workspace owns it.
     if (w.kind !== "workspace" && claimed.has(w.id)) wm.remove(w.id);
-    else if (!ids.has(w.id)) dropWindow(w.id);
+    else if (!ids.has(w.id)) {
+      // Its PTY is gone. On a tier that records sessions the window STAYS, as a
+      // tombstone you can resume from (DRY-56) — before this it simply vanished
+      // on the next poll, taking with it any record that the session had
+      // existed, what ticket it was on, or where it was running.
+      //
+      // Only when we actually hold a record. No record means either the file
+      // tier (which says so once, via the notice below) or a session older than
+      // whatever history retains, and inventing a tombstone from the window
+      // alone would offer a resume that can't say where to resume.
+      if (tombstones[w.id]) {
+        awaitingHistory.delete(w.id);
+        // A workspace's co-located zsh has no window of its own, and
+        // `claimedShellIds()` keeps reconcile from ever giving it one. Turning
+        // the window into a tombstone skips dropWindow — the only thing that
+        // kills it — so without this the shell PTY (and its supervisor) keeps
+        // running, invisible to the desk and unreachable from it. Release it
+        // and demote the window to a plain terminal, which is what a tombstone
+        // is: there is no live pane left for the workspace split to show.
+        if (w.kind === "workspace" && w.shellId) {
+          killSession(w.shellId).catch(() => {});
+          wm.updateWin(w.id, { kind: "terminal", shellId: undefined });
+        }
+        continue;
+      }
+      // We haven't asked about this one yet. Ask, keep the window for one more
+      // pass, and let the next poll decide — the alternative is dropping it
+      // now and re-adding a tombstone a moment later, which is a window
+      // flickering out of and back into the desk.
+      if (historyKept.value !== false && !awaitingHistory.has(w.id)) {
+        awaitingHistory.add(w.id);
+        void refreshHistory(true);
+        continue;
+      }
+      awaitingHistory.delete(w.id);
+      // This is the moment the missing tier costs something: a window is going
+      // away and nothing will be left to say it existed. DRY-58 built this
+      // surface for exactly this class of quiet condition; it's raised here
+      // rather than at startup so it only ever appears to somebody who just
+      // lost a session they might have wanted back.
+      if (historyKept.value === false) {
+        setNotice(
+          "session-history",
+          "Sessions aren't being recorded — a window that closes can't be resumed.",
+          "Set DRYDOCK_DATABASE_URL to keep session history.",
+        );
+      }
+      dropWindow(w.id);
+    }
+  }
+}
+
+/**
+ * Session history, keyed by the id whose window it belongs to (DRY-56).
+ *
+ * Deliberately NOT persisted into the workspace blob. A tombstone is derived
+ * state — the daemon is the authority on whether a session is alive, and a
+ * cached "this is dead" surviving a reload is how you get a tombstone drawn
+ * over a session that came back (which DRY-57 made the common case). Re-fetched
+ * instead, so the answer is always the daemon's.
+ */
+const tombstones = reactive<Record<string, SessionRecord>>({});
+const resuming = ref<string | null>(null);
+/** Null until asked; false once we know this tier keeps no history. */
+const historyKept = ref<boolean | null>(null);
+/** Windows whose session vanished and whose history answer we're still waiting on. */
+const awaitingHistory = new Set<string>();
+
+/**
+ * Demand-driven, not per-poll.
+ *
+ * The session poll runs every 3s; a `select … limit 50` behind each one is a
+ * database round trip per tab per 3s to answer a question that changes only
+ * when a session ends. So: a floor between refreshes, and `force` for the one
+ * moment the answer actually matters — reconcile noticing a window whose
+ * session has gone.
+ */
+let historyFetchedAt = 0;
+let historyInFlight: Promise<void> | null = null;
+const HISTORY_MIN_INTERVAL_MS = 15_000;
+
+/**
+ * Drop a previous `--resume <id>` pair from recorded args.
+ *
+ * Recorded args are verbatim, so a resumed session's are already
+ * `["--resume", "<old id>"]`. Removing the flag alone leaves the id as a
+ * trailing positional, which Claude Code reads as the initial prompt.
+ */
+function withoutResume(args: string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--resume") {
+      i++; // and its value
+      continue;
+    }
+    out.push(args[i]);
+  }
+  return out;
+}
+
+function refreshHistory(force = false): Promise<void> {
+  // One fetch at a time. A reconcile pass that finds three windows missing
+  // would otherwise fire three identical requests at a store that may be the
+  // slow thing in the first place.
+  if (historyInFlight) return historyInFlight;
+  if (!force && Date.now() - historyFetchedAt < HISTORY_MIN_INTERVAL_MS) return Promise.resolve();
+  historyFetchedAt = Date.now();
+  historyInFlight = doRefreshHistory().finally(() => {
+    historyInFlight = null;
+  });
+  return historyInFlight;
+}
+
+async function doRefreshHistory(): Promise<void> {
+  try {
+    const records = await fetchSessionHistory();
+    // The tier speaking, not a fault. Recorded, but NOT announced here: a
+    // fresh no-database install would then carry a permanent line about a
+    // feature it never asked for, and the "spin it up and look" tier is the one
+    // that must not nag. The notice is raised at the moment it costs somebody
+    // something — see reconcile, where a window is dropped for want of a record.
+    if (records === null) {
+      historyKept.value = false;
+      return;
+    }
+    historyKept.value = true;
+    clearNotice("session-history");
+    // MERGED, not replaced. `recent` is a capped list, so a tombstone we
+    // already hold can fall out of a later page and would otherwise be dropped
+    // silently — taking its window with it, which is the loss this feature
+    // exists to prevent. Entries are cleaned up when their window goes.
+    for (const r of records) if (r.endedAt) tombstones[r.id] = r;
+  } catch (e) {
+    // A store outage degrades the desk rather than blanking it: keep whatever
+    // tombstones we already had and let the next poll try again. Same rule as
+    // the workspace read.
+    console.warn("session history unavailable", e);
+  }
+}
+
+/**
+ * Put a working session back where a dead one was.
+ *
+ * `--resume` only when the CLI's own session id was captured; otherwise this is
+ * an honest fresh start in the same worktree, and the card says so rather than
+ * offering a "Resume" that silently discards the conversation.
+ */
+async function resumeSession(record: SessionRecord) {
+  if (resuming.value) return;
+  resuming.value = record.id;
+  try {
+    const resumeArgs =
+      record.command === "claude" && record.agentSessionId
+        ? ["--resume", record.agentSessionId]
+        : [];
+    const session = await createSession({
+      command: record.command,
+      // Strip any PREVIOUS --resume and the id that follows it. Filtering the
+      // flag alone leaves its value behind, so a second resume spawns
+      // `claude --resume <new> <old>` — and that trailing positional is what
+      // Claude Code takes as the initial prompt, i.e. the agent starts by being
+      // asked to do something about a UUID.
+      args: [...resumeArgs, ...withoutResume(record.args)],
+      // The recorded worktree, not the repo name: re-resolving `repo` would put
+      // the agent in the plain checkout, which is not where its work is.
+      cwd: record.worktree ?? record.cwd,
+      ticket: record.ticket,
+      repo: record.repo,
+      // The recorded worktree PATH, not `false`. Opting out skips the daemon's
+      // worktree branch entirely, which also skips RECORDING one — so each
+      // resume would produce a session with no worktree and no branch, and the
+      // next tombstone would say less than the one before it. Passing the path
+      // hits `ensureWorktree`'s reuse case (`worktreeExists` → same dir, real
+      // branch), so nothing is nested and the record survives the generation.
+      worktree: record.worktree ?? false,
+      branch: record.branch,
+      title: record.title,
+    });
+    // Swap the window onto the new session in place, so the desk doesn't
+    // rearrange under someone who just pressed a button in that window.
+    // Reap the corpse if the daemon still lists it. A session that exited but
+    // stayed in the registry keeps its id in the poll, so once the window has
+    // moved to the new session reconcile would hand the dead one a brand new
+    // window — a second pane for something already resumed.
+    void killSession(record.id).catch(() => {});
+    wm.replaceId(record.id, session.id);
+    if (record.ticket) ticketById[session.id] = record.ticket;
+    delete tombstones[record.id];
+    sessionsById[session.id] = session;
+    wm.bringFront(session.id);
+  } catch (e) {
+    actionError.value = `Could not resume: ${String(e)}`;
+  } finally {
+    resuming.value = null;
   }
 }
 
 async function refresh() {
   try {
+    // NOT awaited, and not called per tick — reconcile forces a fetch at the
+    // one moment the answer matters (a window whose session has gone), and the
+    // two-pass `awaitingHistory` handshake means nothing here needs to block on
+    // it. Awaiting a store that is slow or partitioned would delay every pane
+    // attaching and the poll behind it, which is DRY-58's bug class exactly.
     reconcile(await listSessions());
     error.value = null;
   } catch (e) {
@@ -226,6 +431,19 @@ async function refresh() {
 function winStatus(id: string) {
   const l = live[id];
   const s = sessionsById[id];
+  // A session the daemon no longer lists has no status to fall back on, so the
+  // "running" default at the bottom would paint a tombstone's frame with a live
+  // green dot over a card that says "failed". Answer from the record instead.
+  const tomb = tombstones[id];
+  if (!s && tomb) {
+    const dead = tomb.endReason === "failed";
+    return {
+      c: dead ? "#a06a6a" : "#6a737f",
+      g: dead ? "#a06a6a55" : "#6a737f55",
+      attention: false,
+      tag: "",
+    };
+  }
   // `live` is fed by a mounted pane's WebSocket, so a MINIMIZED window has no
   // source for it and used to fall back to the 3s poll — the dock dot went
   // amber up to 3s after the tray already showed the gate, and stayed amber
@@ -919,6 +1137,20 @@ onBeforeUnmount(() => {
             @idle="onIdle"
             @initial-sent="onInitialSent"
             @open-file="openSessionFile"
+          />
+          <!-- DRY-56: the PTY is gone AND the daemon no longer lists it.
+               Deliberately LAST, so a session the daemon still knows about
+               keeps its pane: an exited-but-listed session is DRY-41's
+               territory, and its scrollback is the whole reason that pane
+               stays on screen. A history row exists the moment a session ends,
+               so ordering this first hid a readable transcript behind a card
+               that can't show one. -->
+          <SessionTombstone
+            v-else-if="tombstones[w.id]"
+            :record="tombstones[w.id]"
+            :busy="resuming === w.id"
+            @resume="resumeSession"
+            @dismiss="dropWindow"
           />
         </WindowFrame>
 

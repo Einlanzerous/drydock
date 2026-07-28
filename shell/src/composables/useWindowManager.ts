@@ -378,6 +378,28 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
     return rects;
   }
 
+  /**
+   * Move a window onto a different session id, in place (DRY-56).
+   *
+   * Resuming a tombstone spawns a NEW session, and the window has to follow it
+   * without being removed and re-added: a remove/add pair loses the geometry,
+   * drops the window to the top of the z stack and — in tile or focus mode —
+   * reflows the whole desk under someone who just pressed a button inside that
+   * window. Same reason `apply` exists rather than rebuilding from scratch.
+   */
+  function replaceId(oldId: string, newId: string): void {
+    const w = windows.find((x) => x.id === oldId);
+    if (!w) return;
+    // A collision would be a duplicate-id desk, which DRY-42 had to go and heal
+    // out of persisted layouts once already.
+    if (windows.some((x) => x.id === newId)) {
+      windows.splice(windows.indexOf(w), 1);
+      return;
+    }
+    w.id = newId;
+    if (focusedId.value === oldId) focusedId.value = newId;
+  }
+
   return {
     layout,
     windows,
@@ -387,6 +409,7 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
     add,
     updateWin,
     remove,
+    replaceId,
     bringFront,
     allocZ,
     minimize,

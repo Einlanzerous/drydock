@@ -177,6 +177,24 @@ export const CONFIG = {
      * magnitude of headroom and still bounded.
      */
     maxBytes: num(process.env.DRYDOCK_STATE_MAX_BYTES, 1_048_576),
+
+    /**
+     * Retention for session history (DRY-56) — the database tier's record of
+     * what ran, which a tombstone is drawn from.
+     *
+     * Both bounds apply, because either alone has a bad case: a quiet month
+     * under an age cap leaves nothing to resume from, and a busy afternoon of
+     * ticket-spawned agents under a count cap buries the one you actually want.
+     * A running session is never a prune candidate whatever these say.
+     *
+     * Nothing to do with DRY-57's `forget()`, which reaps the runtime index the
+     * instant a session exits. That is a pidfile; this is history, and it only
+     * starts mattering where the other stops existing.
+     */
+    history: {
+      days: num(process.env.DRYDOCK_SESSION_HISTORY_DAYS, 30),
+      max: num(process.env.DRYDOCK_SESSION_HISTORY_MAX, 500),
+    },
   },
 
   /**

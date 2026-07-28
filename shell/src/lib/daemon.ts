@@ -46,7 +46,16 @@ export const DAEMON_WS = override
  * answers 502 with an error body.
  */
 export async function getJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(url, init);
+  return unwrap<T>(await fetch(url, init));
+}
+
+/**
+ * The body-parse-and-check half of `getJson`, so a caller that has to inspect
+ * the status FIRST (see fetchSessionHistory's 501) doesn't have to reimplement
+ * it — the copy that did dropped both guards below, which this module documents
+ * as load-bearing.
+ */
+async function unwrap<T>(res: Response): Promise<T> {
   // Parsed BEFORE the status check so a daemon that explains itself in `error`
   // gets to. A body that isn't JSON at all (nginx's HTML 502, a wrong port
   // serving an SPA's index.html with a cheerful 200) leaves it undefined.
@@ -90,6 +99,49 @@ export function expectList<T>(value: unknown, what: string): T[] {
 export async function listSessions(): Promise<SessionInfo[]> {
   const body = await getJson<{ sessions?: SessionInfo[] }>(`${DAEMON_HTTP}/api/sessions`);
   return expectList(body.sessions, "sessions");
+}
+
+/** One session as retained history (DRY-56). Mirrors the daemon's SessionRecord. */
+export interface SessionRecord {
+  id: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  repo?: string;
+  ticket?: string;
+  worktree?: string;
+  branch?: string;
+  title?: string;
+  /** `claude --resume <id>`. Absent when the CLI never reported one. */
+  agentSessionId?: string;
+  createdAt: number;
+  lastActiveAt?: number;
+  endedAt?: number;
+  exitCode?: number;
+  endReason?: "finished" | "failed" | "stopped" | "unknown";
+}
+
+/**
+ * Recent sessions, live or dead — what tombstones are drawn from (DRY-56).
+ *
+ * `null` means this Drydock keeps no history (the file tier answers 501), which
+ * is a DIFFERENT answer from an empty list and the caller has to say so
+ * differently: an absent tombstone must read as "sessions aren't recorded here",
+ * never as "your session was lost". Any other failure throws, so a store outage
+ * degrades the desk rather than silently claiming nothing ever ran.
+ */
+export async function fetchSessionHistory(): Promise<SessionRecord[] | null> {
+  // Budgeted, like fetchWorkspace's. This runs behind the session poll, and a
+  // partitioned Postgres costs the daemon its full query deadline — without a
+  // ceiling here that becomes the shell's deadline too (DRY-58).
+  const res = await fetch(`${DAEMON_HTTP}/api/sessions/history`, {
+    signal: AbortSignal.timeout(5_000),
+  });
+  // 501 is the tier speaking, not a fault — checked before the body is read so
+  // it can't be mistaken for one.
+  if (res.status === 501) return null;
+  const body = await unwrap<{ sessions?: SessionRecord[] }>(res);
+  return expectList<SessionRecord>(body.sessions, "session history");
 }
 
 export async function createSession(opts: {
