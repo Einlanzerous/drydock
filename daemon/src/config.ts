@@ -93,21 +93,34 @@ export const CONFIG = {
     file: process.env.DRYDOCK_LOG_FILE ?? `~/.drydock/daemon-${PORT}.log`,
     maxBytes: num(process.env.DRYDOCK_LOG_MAX_BYTES, 8_388_608),
     /**
-     * An uncaught exception normally kills Node — and here that means killing
-     * every live agent PTY, unrecoverably, because a session's lifetime IS the
-     * process's. Since sessions can't survive a restart at all, staying up in a
-     * questionable state strictly beats exiting cleanly: the other N agents stay
-     * reachable. We log loudly and carry on. Set DRYDOCK_EXIT_ON_UNCAUGHT=1 to
-     * restore Node's default (e.g. under a supervisor, once sessions are durable).
+     * An uncaught exception kills Node by default, and this daemon now lets it
+     * — reversing the posture that stood until DRY-57.
      *
-     * PROD IS THE SAME BY DEFAULT, and that is a decision, not an oversight: the
-     * systemd unit is Restart=always, so exiting there would mean a restarted
-     * daemon with zero sessions, every agent gone. Wedged-but-attached beats
-     * restarted-and-empty while sessions can't outlive the process. Flip it in
-     * prod's .env (the unit deliberately sets no DRYDOCK_* vars) once they can.
+     * The old comment here ended "flip it once they can", and this is that
+     * moment. While a session's lifetime WAS this process's, exiting cleanly
+     * destroyed every live agent unrecoverably, so staying up in a questionable
+     * state strictly beat it: the other N agents stayed reachable. That trade is
+     * gone. Sessions are held by their own detached supervisors, a restart
+     * reattaches to them (see sessions-dir.ts), and so a wedged daemon is now
+     * pure cost — it serves the shell badly while the thing that made staying up
+     * worthwhile is no longer at risk.
+     *
+     * PROD WANTS THIS TOO: the systemd unit is Restart=always, so a crash now
+     * means a fresh daemon that reattaches, rather than one that comes back to
+     * an empty desk. Set DRYDOCK_EXIT_ON_UNCAUGHT=0 to keep the old behaviour.
      */
-    exitOnUncaught: process.env.DRYDOCK_EXIT_ON_UNCAUGHT === "1",
+    exitOnUncaught: process.env.DRYDOCK_EXIT_ON_UNCAUGHT !== "0",
   },
+
+  /**
+   * Where per-session supervisor sockets and the rediscovery index live
+   * (DRY-57). Per-port for exactly the reason the log and state files are:
+   * the documented way to verify a change is a second daemon on a spare port
+   * (CLAUDE.md), and a shared directory would have that throwaway daemon adopt
+   * the dev daemon's live agents. Set this explicitly to move a daemon's
+   * sessions with it when its port changes.
+   */
+  sessionsDir: process.env.DRYDOCK_SESSIONS_DIR ?? `~/.drydock/sessions-${PORT}`,
 
   /**
    * Workspace state (DRY-28). The daemon owns the desktop arrangement so it

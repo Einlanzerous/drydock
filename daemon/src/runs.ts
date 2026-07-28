@@ -173,7 +173,10 @@ export function runEndHandler(tracker: TrackerProvider) {
   };
 
   return (session: PtySession, reason: RunEndReason): void => {
-    const at = Date.now();
+    // Normally now. For a run reconciled after the fact (DRY-57 — it ended
+    // while the daemon was down), the supervisor's exit record knows when it
+    // really stopped, and this document is the only place anyone will read it.
+    const at = session.endedAt ?? Date.now();
     const info = session.info();
 
     let handoff: string;

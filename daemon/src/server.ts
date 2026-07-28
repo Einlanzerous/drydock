@@ -5,7 +5,9 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { CONFIG, PERMISSION_MODES, type PermissionMode } from "./config.js";
 import { describe, log, type LogFields } from "./log.js";
 import { SessionManager } from "./manager.js";
+import type { SpawnOptions } from "./session.js";
 import { expandHome, resolveRepoCwd } from "./repos.js";
+import { sessionsDir } from "./sessions-dir.js";
 import {
   ensureWorktree,
   isGitWorkTree,
@@ -328,7 +330,7 @@ const server = http.createServer(async (req, res) => {
         }
       }
 
-      const session = manager.create({
+      const spawnOpts: SpawnOptions = {
         command: body.command,
         args: Array.isArray(body.args) ? body.args : [],
         cwd,
@@ -356,8 +358,20 @@ const server = http.createServer(async (req, res) => {
           : body.autonomous === true
             ? CONFIG.autonomous.permissionMode
             : "manual",
-      });
-      return send(res, 201, { session: session.info() });
+      };
+
+      // Awaited since DRY-57: the session isn't real until its detached
+      // supervisor has bound its socket, and answering 201 before then makes
+      // the WebSocket the client opens next a race it can lose. A failure here
+      // is a spawn that didn't happen — answered as one, rather than with an id
+      // nothing can ever attach to.
+      try {
+        const session = await manager.create(spawnOpts);
+        return send(res, 201, { session: session.info() });
+      } catch (err) {
+        log.error("spawn failed", { command: body.command, cwd, ticket, err: String(err) });
+        return send(res, 500, { error: `spawn: ${String(err)}` });
+      }
     }
 
     // Resolve a ticket's repo name to the cwd it would spawn in (DRY-12). Lets
@@ -851,11 +865,15 @@ wss.on("wsClientError", (err, socket) => {
   rejectUpgrade(socket, 400, "bad websocket handshake", { err: err.message });
 });
 
-// --- Crash containment (DRY-45) ---
-// Everything below exists because this process IS the lifetime of every agent
-// session it owns: there is no persistence, so any exit destroys live work with
-// no way to get it back. What we can do is (a) never die for a reason that only
-// concerns one client, and (b) leave a trace when we do die.
+// --- Crash containment (DRY-45, revised by DRY-57) ---
+// This process is no longer the lifetime of the sessions it owns. Each PTY is
+// held by its own detached supervisor and found again at boot, so an exit costs
+// a reconnect rather than every agent on the host.
+//
+// Two of the three rules survive that change, and one inverts. Still true: never
+// die for a reason that only concerns one client (a bad WebSocket frame, a
+// vanished SSE reader), and always leave a trace when we do die. No longer true:
+// that staying up in a suspect state beats exiting — see CONFIG.log.exitOnUncaught.
 
 /**
  * One-line census of what's at stake, for the log lines that precede a death.
@@ -882,10 +900,10 @@ process.on("uncaughtException", (err) => {
     ...inventory(),
     action: CONFIG.log.exitOnUncaught ? "exiting" : "staying up",
   });
-  // Node's default here is to die. For a PTY-owning daemon that trade is bad:
-  // exiting cleanly still destroys every agent, while staying up in a suspect
-  // state at least keeps the other N sessions reachable. Opt back into the
-  // default with DRYDOCK_EXIT_ON_UNCAUGHT=1 (see config.ts).
+  // Node's default here is to die, and since DRY-57 we let it: the sessions
+  // outlive us and a fresh daemon reattaches to them, which beats serving the
+  // shell from a process in an unknown state. DRYDOCK_EXIT_ON_UNCAUGHT=0 keeps
+  // the old wedged-but-attached posture (see config.ts).
   if (CONFIG.log.exitOnUncaught) process.exit(1);
 });
 
@@ -893,13 +911,18 @@ process.on("unhandledRejection", (reason) => {
   log.error("UNHANDLED REJECTION", { ...describe(reason), ...inventory() });
 });
 
-// Log what a shutdown is about to destroy before it happens. This is also what
-// makes the dev-watch footgun visible after the fact: `bun run daemon` is
-// `node --watch`, so any save under daemon/src/ SIGTERMs us and takes every
-// live PTY with it — that now leaves a line naming the sessions it killed.
+// A shutdown no longer destroys anything. Let go of each supervisor without
+// signalling it, and say so — this line used to read "destroying live
+// sessions", and the whole of DRY-57 is the difference between the two.
+//
+// It is also what defused the dev-watch footgun: `bun run daemon` is `node
+// --watch`, so any save under daemon/src/ still SIGTERMs us, but the agents on
+// the other end of these sockets carry on and are adopted by the daemon that
+// starts a second later.
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => {
-    log.warn(`${signal} — shutting down, destroying live sessions`, inventory());
+    log.warn(`${signal} — detaching; sessions keep running`, inventory());
+    manager.detachAll();
     process.exit(0);
   });
 }
@@ -916,11 +939,20 @@ server.on("error", (err: Error & { code?: string }) => {
   if (!listening) process.exit(1);
 });
 
+// Find the sessions a previous daemon left running BEFORE binding the port
+// (DRY-57). Top-level await, so the first `GET /api/sessions` a browser makes
+// already includes everything that was adopted — reconciling afterwards would
+// give every reload a window in which the desk correctly reports no sessions
+// and the shell reconciles away the windows for agents that are alive.
+await manager.reconcile();
+
 server.listen(CONFIG.port, CONFIG.host, () => {
   listening = true;
   log.info("daemon listening", {
     url: `http://${CONFIG.host}:${CONFIG.port}`,
     pid: process.pid,
     log: log.file() || "(stdout only)",
+    sessionsDir: sessionsDir(),
+    sessions: manager.list().length,
   });
 });

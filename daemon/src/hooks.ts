@@ -38,14 +38,76 @@ const GATED_TOOLS = "Bash|Edit|MultiEdit|Write|NotebookEdit|WebFetch";
  */
 const REPORTED_TOOLS = "Read|Glob|Grep|Task|WebSearch";
 
+/**
+ * curl exit codes that mean "the daemon went away", and nothing else.
+ *
+ *   7  couldn't connect          — daemon down when the hook fired
+ *   52 empty reply from server   — died mid-request
+ *   55 send failure              — died while we were writing
+ *   56 recv failure (reset)      — died while we waited on the answer
+ *
+ * 28 (operation timed out) is deliberately ABSENT, and that omission is the
+ * whole reason this is a hand-rolled loop instead of curl's own `--retry`.
+ * curl's retry vocabulary is too coarse: `--retry-connrefused` covers only 7,
+ * which is the one case that DOESN'T happen when a daemon is killed mid-gate
+ * (the connection is established, so it resets — 56 — and plain --retry ignores
+ * that), while `--retry-all-errors` sweeps up 28 as well. Retrying a timeout is
+ * actively wrong here: an autonomous gate is SUPPOSED to outlive curl's -m 590
+ * (CONFIG.autonomous.permissionTimeoutMs is an hour), so treating that as a
+ * failure would POST again and raise a second gate on the daemon for one tool
+ * call — a duplicate on the rail that nobody can meaningfully answer.
+ */
+const RETRY_CODES = "7|52|55|56";
+const RETRY_ATTEMPTS = 15;
+const RETRY_DELAY_S = 2;
+
+/**
+ * Wrap a hook's curl so it rides out a daemon restart (DRY-57).
+ *
+ * A session now outlives its daemon; a gate held open across one did not. The
+ * curl is a live connection to the daemon, so a restart killed it, the hook
+ * returned nothing, and Claude Code fell back to its own TUI prompt — drawn
+ * inside a PTY with no window, which for an unattended run is the exact wedge
+ * DRY-49 exists to prevent.
+ *
+ * The body is buffered BEFORE the loop because `--data-binary @-` reads stdin,
+ * and stdin is a pipe that can only be consumed once — a second attempt would
+ * otherwise POST nothing and the daemon would raise a gate for an unknown tool.
+ *
+ * Retrying is only meaningful because a reattached session keeps its id, and
+ * because the daemon reconciles its sessions BEFORE it binds the port: anything
+ * that gets a connection at all finds this session already adopted, rather than
+ * a 404 that would end the run.
+ */
+function withRetry(curl: string, opts: { body?: boolean; quiet?: boolean } = {}): string {
+  // The replay of the body has to be INSIDE the command substitution:
+  // `printf … | out=$(curl …)` pipes into the assignment, not into curl, and
+  // leaves curl reading the hook's already-consumed stdin instead.
+  const piped = opts.body ? `printf %s "$body" | ${curl}` : curl;
+  const attempt = opts.quiet ? `${piped} >/dev/null 2>&1` : `out=$(${piped})`;
+  const success = opts.quiet ? "break" : 'printf %s "$out"; break';
+  return (
+    (opts.body ? "body=$(cat); " : "") +
+    "i=0; while :; do " +
+    `${attempt}; rc=$?; ` +
+    `[ $rc -eq 0 ] && { ${success}; }; ` +
+    `i=$((i+1)); [ $i -ge ${RETRY_ATTEMPTS} ] && break; ` +
+    `case $rc in ${RETRY_CODES}) sleep ${RETRY_DELAY_S};; *) break;; esac; ` +
+    "done"
+  );
+}
+
+const GATE_CURL =
+  'curl -s -m 590 -X POST "$DRYDOCK_DAEMON_URL/hook/pretooluse" ' +
+  '-H "Content-Type: application/json" -H "X-Drydock-Session: $DRYDOCK_SESSION_ID" --data-binary @-';
+
 const gate = {
   matcher: GATED_TOOLS,
   hooks: [
     {
       type: "command",
       timeout: 600,
-      command:
-        'curl -s -m 590 -X POST "$DRYDOCK_DAEMON_URL/hook/pretooluse" -H "Content-Type: application/json" -H "X-Drydock-Session: $DRYDOCK_SESSION_ID" --data-binary @-',
+      command: withRetry(GATE_CURL, { body: true }),
     },
   ],
 };
@@ -78,9 +140,13 @@ const common = {
       hooks: [
         {
           type: "command",
-          timeout: 10,
-          command:
-            'curl -s -m 8 -X POST "$DRYDOCK_DAEMON_URL/hook/stop" -H "X-Drydock-Session: $DRYDOCK_SESSION_ID" >/dev/null 2>&1 || true',
+          // Retries too (DRY-57). For an autonomous run this hook IS the ending
+          // in practice — an interactive `claude` doesn't exit when it's done,
+          // it hands the turn back — so a restart landing on it costs the run
+          // its handoff document. Still fire-and-forget: it never blocks the
+          // agent from stopping, and gives up quietly if the daemon stays away.
+          timeout: 45,
+          command: `${withRetry('curl -s -m 8 -X POST "$DRYDOCK_DAEMON_URL/hook/stop" -H "X-Drydock-Session: $DRYDOCK_SESSION_ID"', { quiet: true })}; true`,
         },
       ],
     },
