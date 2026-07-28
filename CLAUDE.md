@@ -504,7 +504,10 @@ restart it to test things.
   the two `protocol.ts` copies haven't drifted. There are no automated tests, so
   green means "it compiles" — everything above in this file is still verified by
   hand. CI installs with `--ignore-scripts` (no node-pty native build) because
-  nothing there spawns a PTY.
+  nothing there spawns a PTY. Both checks are **required** on `main` (ruleset
+  "main: compile gate"), with admin bypass — so a red PR is merged on purpose,
+  not by inattention. The workflow has no path filters on purpose: a required
+  check that never reports on a docs-only PR would leave it unmergeable.
 - Comment style: explain *why* and the non-obvious constraint (see
   `daemon/src/tracker/jira.ts` for the house style); reference the DRY-NN
   ticket that introduced a behavior.
