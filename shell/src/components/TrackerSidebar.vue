@@ -54,6 +54,12 @@ const props = defineProps<{
    *   null               today's behaviour.
    */
   pullError?: string | null;
+  /**
+   * Has `name` been confirmed by /api/tracker/info, as opposed to being the
+   * optimistic default? (DRY-55) The header can live with a guess; an error
+   * can't — naming the wrong tracker in it is worse than naming none.
+   */
+  nameConfirmed?: boolean;
   /** Host-default project scope from /api/tracker/info (fixed chips). */
   scopeProjects: string[];
   /** Browser-added project keys (removable chips). */
@@ -67,6 +73,33 @@ const emit = defineEmits<{
   (e: "remove-project", key: string): void;
   (e: "toggle-backlog", show: boolean): void;
 }>();
+
+/**
+ * Who to blame in the outage copy. Only ever a real provider name — see the
+ * `nameConfirmed` prop.
+ */
+const outageSubject = computed(() =>
+  props.nameConfirmed && props.name ? props.name : "the tracker",
+);
+
+/**
+ * The pull error, trimmed to something a 266px rail can hold (DRY-55).
+ *
+ * `notices.ts` caps its own detail at 140 for this exact reason, and the input
+ * here is worse than a notice's: both providers build their error as
+ * `${res.status} ${await res.text()}` — the tracker's ENTIRE response body — and
+ * the daemon then wraps that in `tracker: …` before the shell prefixes
+ * `daemon returned 502: `. A Jira behind a proxy that answers 502 with an HTML
+ * error page therefore hands this component several KB of markup to render in a
+ * sidebar, which is not an error message, it's a wall. Longer than the notice's
+ * cap because this one has vertical room and is the primary explanation rather
+ * than a second line; the console and the network tab keep the whole thing.
+ */
+const WHY_MAX = 300;
+const whyShort = computed(() => {
+  const one = (props.pullError ?? "").replace(/\s+/g, " ").trim();
+  return one.length > WHY_MAX ? `${one.slice(0, WHY_MAX - 1)}…` : one;
+});
 
 const newProject = ref("");
 function addProject(): void {
@@ -233,7 +266,7 @@ function clearFilters(): void {
       <span
         v-if="pullError && tickets.length"
         class="stale"
-        :title="`Last pull failed, so these may be out of date — ${pullError}`"
+        :title="`Last pull failed, so these may be out of date — ${whyShort}`"
       >stale</span>
       <button
         class="refresh"
@@ -335,8 +368,8 @@ function clearFilters(): void {
            (DRY-55). Keyed off `tickets`, not `groups`: a filter that hides
            every loaded row is still "No tickets match", outage or not. -->
       <div v-if="pullError && !tickets.length" class="unreachable">
-        <p class="unreachable-head">Can't reach {{ name || "the tracker" }}</p>
-        <p class="unreachable-why">{{ pullError }}</p>
+        <p class="unreachable-head">Can't reach {{ outageSubject }}</p>
+        <p class="unreachable-why">{{ whyShort }}</p>
         <button class="retry" :disabled="refreshing" @click="emit('refresh')">
           {{ refreshing ? "Retrying…" : "Retry" }}
         </button>
@@ -528,6 +561,11 @@ function clearFilters(): void {
 .live {
   width: 6px;
   height: 6px;
+  /* An empty span in a flex row is `0 1 auto`, so it is the FIRST thing the
+     header gives up when it overflows — and the header is now one chip wider
+     than it was. Without this the outage dot silently isn't there in exactly
+     the case it exists for (DRY-55). */
+  flex: 0 0 auto;
   border-radius: 50%;
   background: #5fb98a;
   box-shadow: 0 0 6px #5fb98a99;
@@ -538,6 +576,7 @@ function clearFilters(): void {
 }
 /* Amber, not red: the rows under it are still usable (DRY-55). */
 .stale {
+  flex: 0 0 auto;
   font-size: 9px;
   font-weight: 700;
   letter-spacing: 0.06em;

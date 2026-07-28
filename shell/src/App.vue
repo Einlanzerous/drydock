@@ -25,7 +25,7 @@ import {
   type SessionRecord,
 } from "./lib/daemon.js";
 import type { PermissionMode } from "./lib/protocol.js";
-import { getTrackerInfo, listTickets, type Ticket } from "./lib/tracker.js";
+import { TICKET_POLL_MS, getTrackerInfo, listTickets, type Ticket } from "./lib/tracker.js";
 import type { SessionInfo } from "./lib/protocol.js";
 
 // Persist the workspace arrangement per daemon host (DRY-14) so a reload
@@ -34,6 +34,18 @@ const wm = useWindowManager({ persistKey: DAEMON_HTTP });
 
 const tickets = ref<Ticket[]>([]);
 const providerName = ref("Switchyard");
+/**
+ * Did /api/tracker/info actually answer? (DRY-55)
+ *
+ * `providerName`'s default is optimistic on purpose (DRY-51: the name stays at
+ * its default when the call doesn't produce one), which is harmless for a
+ * header LABEL and not harmless at all in an error, where it becomes a claim
+ * about which system is down. A Jira host whose daemon is unreachable would
+ * otherwise be told "Can't reach Switchyard" — naming a tracker it has never
+ * been configured with, and sending whoever reads it somewhere that doesn't
+ * exist. When we haven't confirmed the name, the outage copy says "the tracker".
+ */
+const providerNamed = ref(false);
 
 // The host's autonomous-run policy (DRY-49). Only the launch panel uses it, and
 // only to say what "host default" actually means; a daemon that doesn't serve
@@ -178,11 +190,13 @@ async function loadTickets() {
     // outage over a list that just arrived.
     if (epoch === loadEpoch) {
       trackerError.value = String(e);
+      // Never the optimistic default — see providerNamed.
+      const who = providerNamed.value ? providerName.value : "the tracker";
       setNotice(
         "tracker",
         tickets.value.length
-          ? `Tickets aren't refreshing from ${providerName.value} — the sidebar is showing the last list it returned`
-          : `Tickets aren't loading from ${providerName.value} — the sidebar is empty because of that, not because nothing matched`,
+          ? `Tickets aren't refreshing from ${who} — the sidebar is showing the last list it returned`
+          : `Tickets aren't loading from ${who} — the sidebar is empty because of that, not because nothing matched`,
         String(e),
       );
     }
@@ -974,6 +988,7 @@ onMounted(async () => {
   try {
     const info = await getTrackerInfo();
     providerName.value = info.name;
+    providerNamed.value = true;
     scopeProjects.value = info.projects ?? [];
   } catch {
     // The name stays at its default when the call doesn't produce one. That
@@ -1005,7 +1020,10 @@ onMounted(async () => {
   // Tickets change far less often than sessions and each fetch hits Switchyard
   // live, so poll them on a slower cadence (DRY-17). The sidebar refresh button
   // forces an immediate re-pull between ticks.
-  ticketPoll = setInterval(loadTickets, 20000);
+  // The interval is imported rather than written here because the pull's own
+  // budget is chosen against it — see LIST_TIMEOUT_MS, where the two being
+  // equal silently disables the reporting this feature is.
+  ticketPoll = setInterval(loadTickets, TICKET_POLL_MS);
 
   if (deskEl.value) {
     const r = deskEl.value.getBoundingClientRect();
@@ -1121,6 +1139,7 @@ onBeforeUnmount(() => {
         :tickets="tickets"
         :refreshing="refreshingTickets"
         :pull-error="trackerError"
+        :name-confirmed="providerNamed"
         :scope-projects="scopeProjects"
         :user-projects="userProjects"
         :show-backlog="showBacklog"

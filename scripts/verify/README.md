@@ -56,7 +56,17 @@ node scripts/verify/sidebar.mjs
 
 | harness | what it holds down |
 |---|---|
-| `sidebar.mjs` | A tracker outage names itself. Before DRY-55 a first load with the tracker down rendered "No tickets match." — true of a healthy tracker with nothing in scope, and with the scope chips (DRY-30) in the same panel it reads as a filter you got wrong rather than an outage. Asserts the empty case and the **stale** case separately, plus that both conditions end without a reload. |
+| `sidebar.mjs` | A tracker outage names itself. Before DRY-55 a first load with the tracker down rendered "No tickets match." — true of a healthy tracker with nothing in scope, and with the scope chips (DRY-30) in the same panel it reads as a filter you got wrong rather than an outage. Asserts the empty case, the **stale** case, the **hang** case and a shell newer than its daemon separately, plus that all of them end without a reload. |
+
+The hang case is the one worth explaining. A tracker that refuses connections
+fails fast; a tracker that accepts and then goes silent doesn't fail at all —
+and neither provider's `req()` carries a deadline, so the daemon's route never
+answers either. Nothing rejects, so the catch that powers every other assertion
+here never runs: the pull just never settles, the sidebar keeps saying "No
+tickets match.", and its spinner stays latched because `finally` never runs
+either. The pull's own budget (`LIST_TIMEOUT_MS`, `shell/src/lib/tracker.ts`) is
+the only thing that ends it. Same lesson as the workspace store's, one surface
+over — see the section below.
 
 Why a browser and not curl: `curl /api/tracker/tickets` returns a 502 with a
 perfectly clear error body, which is the exact state in which this shipped. The
@@ -136,18 +146,28 @@ git checkout main -- shell/src/composables/layoutStore.ts \
 node scripts/verify/roam.mjs        # expect 6 failures
 git checkout HEAD -- shell/src/composables shell/src/App.vue
 
-git stash push -- shell/src/App.vue shell/src/components/TrackerSidebar.vue
-node scripts/verify/sidebar.mjs     # expect 13 failures, 8 of them in (a)
-git stash pop
+git checkout main -- shell/src/App.vue shell/src/components/TrackerSidebar.vue \
+  shell/src/lib/tracker.ts
+node scripts/verify/sidebar.mjs     # expect failures across (a), (c), (e), (f), (g)
+git checkout HEAD -- shell/src/App.vue shell/src/components/TrackerSidebar.vue \
+  shell/src/lib/tracker.ts
 ```
 
 Vite hot-reloads, so no restart is needed between the two runs. Give it a
 second or two to do so — a run started too soon tests the tree you just
 replaced and reports the result you were hoping for.
 
-`git stash` rather than `git checkout main --` for the second one, and it isn't
-a style choice: `checkout <ref> -- <path>` leaves the reverted file STAGED, so
-the next commit quietly carries a mid-branch revert of the thing you're testing.
+**Commit first.** `checkout main -- <paths>` overwrites the working tree, and
+the `checkout HEAD --` that restores it only knows about the last COMMIT — so
+any uncommitted edit in those paths is gone, silently, with no stash to recover
+it from. (Written down because it happened: a round of review fixes, discarded
+by the step meant to validate them.)
+
+**Not `git stash push -- <paths>`** as the way around that. On a committed
+branch the tree is clean, so it saves nothing, exits 0, and the run you thought
+was testing `main` tests your own code and prints "all passed" — the exact false
+green this section exists to prevent. The `checkout HEAD --` at the end is also
+what puts the index back, so nothing is left staged.
 
 ## Overrides
 

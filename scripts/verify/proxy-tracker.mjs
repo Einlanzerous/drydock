@@ -1,6 +1,6 @@
 // Tracker-outage proxy for the sidebar (DRY-55 verification).
 //
-// Sits in front of a throwaway daemon and 502s `/api/tracker/tickets` on
+// Sits in front of a throwaway daemon and breaks `/api/tracker/tickets` on
 // command while everything else — /api/tracker/info, /api/sessions,
 // /api/workspace, the attach WebSocket — keeps working. That asymmetry IS the
 // shape of the failure: the daemon is fine and says so on every other route, so
@@ -10,14 +10,34 @@
 // Deliberately narrower than proxy-http.mjs, which breaks the state store.
 // Sharing one proxy would mean either a path parameter on a harness three other
 // scripts depend on, or a mode matrix where the two outages are independent.
-// They're separate concerns and this is twenty lines.
+// They're separate concerns, and the modes below aren't the same modes.
 //
-// Note `/api/tracker/info` stays UP while broken, and that's realistic rather
-// than convenient: neither provider touches the tracker to answer it (it's
-// host config), so a real Switchyard/Jira outage leaves the sidebar knowing
-// exactly whose name to put in the error.
+// `/api/tracker/info` stays UP in every mode but `skew`, and that default is
+// realistic rather than convenient: neither provider touches the tracker to
+// answer it (it's host config), so a real Switchyard/Jira outage leaves the
+// sidebar knowing exactly whose name to put in the error. `skew` is the case
+// where it doesn't.
 //
-// Control: POST /__break , POST /__heal , GET /__state
+// Four failure modes, because they are not the same test:
+//   502   a tracker that REFUSES — the daemon's provider throws, its route
+//         catches, and the shell gets an error body promptly.
+//   hang  accept-and-go-silent, which is what a partition feels like and what
+//         `docker stop` can never reproduce (CLAUDE.md). Neither provider's
+//         `req()` carries a deadline, so the daemon's route never answers
+//         either — the shell's own budget is the only thing that can end it.
+//         The mode a 502-only proxy structurally cannot see.
+//   huge  a 502 whose body is kilobytes. Both providers build their error as
+//         `${res.status} ${await res.text()}`, so a Jira behind a proxy that
+//         answers with an HTML error page puts the whole page in the message.
+//         Renders as a wall unless the sidebar caps it.
+//   skew  tickets 502 AND `/api/tracker/info` 404s — a shell newer than its
+//         daemon, which docs/deploy.md makes routine for the length of a
+//         partial deploy (DRY-51). The one case where the shell does NOT know
+//         which tracker it is talking to, so the outage copy must not guess:
+//         `providerName` defaults to "Switchyard" and would otherwise name it
+//         on a host running Jira.
+//
+// Control: POST /__break?mode=502|hang|huge|skew , POST /__heal , GET /__state
 import http from "node:http";
 import net from "node:net";
 
@@ -25,8 +45,9 @@ const LISTEN = Number(process.env.PROXY_PORT ?? 4375);
 const TARGET = Number(process.env.TARGET_PORT ?? 4374);
 const BREAK_PATH = process.env.BREAK_PATH ?? "/api/tracker/tickets";
 
-let broken = false;
+let mode = "ok"; // "ok" | "502" | "hang" | "huge" | "skew"
 let blocked = 0;
+const held = new Set(); // sockets parked by "hang", released on heal
 
 const cors = {
   "Access-Control-Allow-Origin": "*",
@@ -42,15 +63,21 @@ const server = http.createServer((req, res) => {
   };
 
   if (url.pathname === "/__break") {
-    broken = true;
+    const m = url.searchParams.get("mode");
+    mode = m === "hang" || m === "huge" || m === "skew" ? m : "502";
     blocked = 0;
-    return json(200, { broken });
+    return json(200, { mode });
   }
   if (url.pathname === "/__heal") {
-    broken = false;
-    return json(200, { broken });
+    mode = "ok";
+    for (const s of held) s.destroy();
+    held.clear();
+    return json(200, { mode });
   }
-  if (url.pathname === "/__state") return json(200, { broken, blocked });
+  // `blocked` is the answer to "was the request never SENT, or sent and
+  // rejected" — only one of those is a product bug, and the harness asserts on
+  // it rather than inferring from the DOM alone.
+  if (url.pathname === "/__state") return json(200, { mode, blocked, held: held.size });
 
   // Answered whatever the mode. A partitioned tracker does not break the
   // daemon's CORS negotiation, and failing the preflight would stop the browser
@@ -61,11 +88,30 @@ const server = http.createServer((req, res) => {
     return res.end();
   }
 
-  if (broken && url.pathname === BREAK_PATH) {
+  // Only in `skew`: every other mode leaves info UP, which is the realistic
+  // default (neither provider touches the tracker to answer it).
+  if (mode === "skew" && url.pathname === "/api/tracker/info") {
     blocked++;
-    // Same body the daemon's own catch produces (server.ts), because the shell
-    // renders `error` from it — a bare 502 would under-test the message.
-    return json(502, { error: "tracker unreachable: partitioned by proxy" });
+    return json(404, { error: "not found" });
+  }
+
+  if (mode !== "ok" && url.pathname === BREAK_PATH) {
+    blocked++;
+    if (mode === "hang") {
+      // Never answer, never close. The shell's own budget (LIST_TIMEOUT_MS in
+      // lib/tracker.ts) is the only thing that can end this, which is what
+      // makes it the mode that finds a missing one.
+      held.add(req.socket);
+      req.socket.on("close", () => held.delete(req.socket));
+      return;
+    }
+    // Shaped like the daemon's own catch: server.ts sends
+    // `{error: \`tracker: ${String(err)}\`}`, and the provider's Error text is
+    // `${res.status} ${await res.text()}`. The shell prefixes
+    // "daemon returned 502: " on top. Reproduced rather than approximated,
+    // because what's being tested IS the message.
+    const upstreamBody = mode === "huge" ? `<html>${"<p>gateway timeout</p>".repeat(400)}</html>` : "partitioned by proxy";
+    return json(502, { error: `tracker: Error: jira /search/jql -> 502 ${upstreamBody}` });
   }
 
   const upstream = http.request(
@@ -75,7 +121,17 @@ const server = http.createServer((req, res) => {
       up.pipe(res);
     },
   );
-  upstream.on("error", (err) => json(502, { error: `proxy: ${err.message}` }));
+  // Guarded: an upstream that dies AFTER the response started has already had
+  // its head written, and writeHead again throws ERR_HTTP_HEADERS_SENT — which
+  // takes the proxy down mid-run and reads as a product failure.
+  upstream.on("error", (err) => {
+    if (res.headersSent) return res.destroy();
+    json(502, { error: `proxy: ${err.message}` });
+  });
+  // A client that goes away mid-body (page navigation, browser close — both
+  // routine here) emits `error` on `req`; unhandled, that's a process-killing
+  // throw rather than a dropped request.
+  req.on("error", () => upstream.destroy());
   req.pipe(upstream);
 });
 
@@ -98,5 +154,5 @@ server.on("upgrade", (req, socket, head) => {
 });
 
 server.listen(LISTEN, "127.0.0.1", () => {
-  console.log(`[proxy-tracker] :${LISTEN} → :${TARGET}, 502s ${BREAK_PATH} while broken`);
+  console.log(`[proxy-tracker] :${LISTEN} → :${TARGET}, breaks ${BREAK_PATH} on /__break`);
 });

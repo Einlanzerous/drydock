@@ -106,6 +106,44 @@ export interface TicketScope {
   backlog?: boolean;
 }
 
+/**
+ * How often the sidebar re-pulls (DRY-17). Lives here rather than at the
+ * `setInterval` because the budget below has to be picked against it — see why.
+ */
+export const TICKET_POLL_MS = 20_000;
+
+/**
+ * Budget for a ticket pull (DRY-55).
+ *
+ * Load-bearing, not hygiene. A tracker that REFUSES connections fails fast and
+ * the daemon 502s; a tracker that accepts and then goes silent — the partition
+ * shape CLAUDE.md insists is the realistic one — hangs, and neither provider's
+ * `req()` carries a deadline, so the daemon's route never answers. Without a
+ * ceiling here that becomes the shell's deadline too: the pull never settles,
+ * so it neither resolves nor throws, `loadTickets`'s catch never runs, and the
+ * sidebar sits on the "No tickets match." this whole feature exists to remove —
+ * with its spinner latched, because `finally` never runs either.
+ *
+ * **It must be meaningfully SHORTER than `TICKET_POLL_MS`, and that pairing is
+ * the whole subtlety.** `loadTickets` guards every outcome on an epoch so a
+ * slow pull can't overwrite a newer one. Set the budget equal to the interval
+ * and each hung pull aborts at the same instant the next tick supersedes it, so
+ * the guard rejects the failure — every time, forever. Symptom: a hung tracker
+ * reports nothing at all and the spinner never stops, which is indistinguishable
+ * from the bug this constant exists to fix. Measured, not reasoned about: at
+ * 20s/20s the harness's hang case failed exactly this way.
+ *
+ * 12s leaves ~8s for a failure to land and render before the next tick. Still
+ * far above any honest pull (a corporate Jira sidebar query with pagination and
+ * child stats runs 1–3s), and a pull that legitimately takes longer degrades
+ * softly — the last-good list stays, wearing the stale marker.
+ *
+ * The asymmetry with the daemon is deliberate: it has no deadline of its own,
+ * so this aborts a request it may still be waiting on. That costs a socket, and
+ * the alternative is a sidebar that lies.
+ */
+const LIST_TIMEOUT_MS = 12_000;
+
 export async function listTickets(open = true, scope: TicketScope = {}): Promise<Ticket[]> {
   const params = new URLSearchParams({ open: String(open) });
   if (scope.projects?.length) params.set("projects", scope.projects.join(","));
@@ -115,6 +153,7 @@ export async function listTickets(open = true, scope: TicketScope = {}): Promise
   // and blank `tickets` into undefined — a crash in the sidebar's map (DRY-51).
   const body = await getJson<{ tickets?: Ticket[] }>(
     `${DAEMON_HTTP}/api/tracker/tickets?${params}`,
+    { signal: AbortSignal.timeout(LIST_TIMEOUT_MS) },
   );
   return expectList(body.tickets, "tickets");
 }
