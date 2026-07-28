@@ -20,6 +20,8 @@ export interface SwitchyardConfig {
 
 // Shape returned by the Switchyard API (subset we consume).
 interface SwitchyardTicket {
+  /** UUID. Not exposed to the shell — only used to query an epic's children. */
+  id?: string;
   key: string;
   title: string;
   type?: string;
@@ -147,24 +149,83 @@ export class SwitchyardProvider implements TrackerProvider {
       );
       return per.flat();
     }
-    // No explicit limit (the sidebar) means "all open tickets" — a single page
-    // caps at ~100, so follow `next_cursor` until exhausted (bounded by
-    // MAX_TICKETS). A caller that passes a limit (e.g. the palette) gets one page.
+    const rows = await this.fetchPages(
+      q,
+      q.open ? (q.includeBacklog ? OPEN_CATEGORIES_WITH_BACKLOG : OPEN_CATEGORIES) : undefined,
+    );
+    // Epics ride along regardless of the backlog toggle (DRY-13). The exclusion
+    // exists because a real backlog is enormous; the epics inside it are not,
+    // and one is the header its in-flight children hang under — so without this
+    // the sidebar's usual state is a child whose epic is missing. Jira folds the
+    // same rule into its JQL; this API has no OR across filters, so it costs a
+    // second request. Still bounded: `type=epic` is a small slice by definition.
+    if (q.open && !q.includeBacklog) {
+      const seen = new Set(rows.map((t) => t.key));
+      for (const e of await this.fetchPages(q, OPEN_CATEGORIES_WITH_BACKLOG, "epic")) {
+        if (!seen.has(e.key)) rows.push(e);
+      }
+    }
+    const out = rows.map(toTicket);
+    if (q.open) await this.attachChildStats(rows, out);
+    return out;
+  }
+
+  /**
+   * Fill in each epic's child breakdown (DRY-13). One request per epic — the
+   * list filter takes a single `parent_id`, with no OR and no count
+   * aggregation, so there's no batching to be had here. Bounded by the number
+   * of epics, and issued in parallel.
+   *
+   * Failures are swallowed deliberately: this is decoration on a sidebar that
+   * must still draw. The shell falls back to counting the children it loaded.
+   */
+  private async attachChildStats(rows: SwitchyardTicket[], out: Ticket[]): Promise<void> {
+    await Promise.all(
+      rows.map(async (row, i) => {
+        if (row.type !== "epic" || !row.id) return;
+        try {
+          // No limit → follows cursors, so an epic with more children than one
+          // page holds is counted in full.
+          const kids = await this.fetchPages({}, undefined, undefined, row.id);
+          const byCategory: Partial<Record<TicketCategory, number>> = {};
+          for (const k of kids) {
+            const c = mapCategory(k.status?.category, k.status?.display_name);
+            byCategory[c] = (byCategory[c] ?? 0) + 1;
+          }
+          out[i]!.childStats = { total: kids.length, byCategory };
+        } catch {
+          /* leave childStats unset; the shell degrades to loaded children */
+        }
+      }),
+    );
+  }
+
+  /**
+   * Follow `next_cursor` until exhausted. No explicit limit (the sidebar) means
+   * "all matching tickets" — a single page caps at ~100 — bounded by
+   * MAX_TICKETS. A caller that passes a limit (e.g. the palette) gets one page.
+   */
+  private async fetchPages(
+    q: TicketQuery,
+    status?: string,
+    type?: string,
+    parentId?: string,
+  ): Promise<SwitchyardTicket[]> {
     const paginate = q.limit === undefined;
     const pageSize = q.limit ?? 200;
-    const out: Ticket[] = [];
+    const out: SwitchyardTicket[] = [];
     let cursor: string | undefined;
     do {
       const params = new URLSearchParams();
       if (q.project) params.set("project", q.project);
-      if (q.open) {
-        params.set("status", q.includeBacklog ? OPEN_CATEGORIES_WITH_BACKLOG : OPEN_CATEGORIES);
-      }
+      if (status) params.set("status", status);
+      if (type) params.set("type", type);
+      if (parentId) params.set("parent_id", parentId);
       if (q.text) params.set("text", q.text);
       params.set("limit", String(pageSize));
       if (cursor) params.set("cursor", cursor);
       const body = await this.req(`/v1/tickets?${params}`);
-      out.push(...this.items(body).map(toTicket));
+      out.push(...this.items(body));
       cursor = body?.page?.next_cursor ?? undefined;
     } while (paginate && cursor && out.length < MAX_TICKETS);
     return out;

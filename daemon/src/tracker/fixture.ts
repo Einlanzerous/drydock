@@ -82,8 +82,13 @@ export class FixtureProvider implements TrackerProvider {
   }
 
   async listTickets(q: TicketQuery): Promise<Ticket[]> {
+    // Epics are exempt from the backlog exclusion (DRY-13) — see the same rule
+    // in the Switchyard and Jira providers.
     let out = FIXTURES.filter((f) =>
-      q.open ? f.category !== "done" && (q.includeBacklog || f.category !== "backlog") : true,
+      q.open
+        ? f.category !== "done" &&
+          (q.includeBacklog || f.category !== "backlog" || f.type === "epic")
+        : true,
     );
     if (q.project) out = out.filter((f) => this.inProject(f, q.project!));
     if (q.projects?.length) out = out.filter((f) => q.projects!.some((p) => this.inProject(f, p)));
@@ -91,7 +96,20 @@ export class FixtureProvider implements TrackerProvider {
       const t = q.text.toLowerCase();
       out = out.filter((f) => f.key.toLowerCase().includes(t) || f.title.toLowerCase().includes(t));
     }
-    return out.map(toTicket);
+    // Child breakdown per epic (DRY-13), counted over the whole fixture set —
+    // the in-memory stand-in for the extra tracker query the live providers make.
+    return out.map((f) => {
+      const t = toTicket(f);
+      if (f.type !== "epic") return t;
+      const byCategory: Partial<Record<TicketCategory, number>> = {};
+      let total = 0;
+      for (const k of FIXTURES) {
+        if (k.parent?.key !== f.key) continue;
+        byCategory[k.category] = (byCategory[k.category] ?? 0) + 1;
+        total++;
+      }
+      return { ...t, childStats: { total, byCategory } };
+    });
   }
 
   async searchTickets(text: string, projects?: string[]): Promise<Ticket[]> {

@@ -194,7 +194,17 @@ export class JiraProvider implements TrackerProvider {
       // corporate Jira is the mountain of backlog this scoping exists to
       // avoid. Trade-off: statuses that *name-map* to planning/blocked but sit
       // in "To Do" are hidden too — that's what the includeBacklog toggle is for.
-      clauses.push(q.includeBacklog ? `statusCategory != Done` : `statusCategory = "In Progress"`);
+      // Epics ride along regardless (DRY-13). The backlog exclusion exists
+      // because a corporate Jira's "To Do" bucket is enormous; the epics inside
+      // it are not — there are orders of magnitude fewer, and one is the header
+      // its in-flight children hang under. Without this the sidebar's usual
+      // state is a child whose epic is missing. JQL expresses it in the same
+      // request, so this costs nothing.
+      clauses.push(
+        q.includeBacklog
+          ? `statusCategory != Done`
+          : `(statusCategory = "In Progress" OR (issuetype = Epic AND statusCategory != Done))`,
+      );
     }
     if (q.text) clauses.push(`text ~ ${jqlQuote(q.text)}`);
     return `${clauses.join(" AND ")}${clauses.length ? " " : ""}ORDER BY updated DESC`;
@@ -209,9 +219,10 @@ export class JiraProvider implements TrackerProvider {
     jql: string,
     limit: number,
     next?: string,
+    fields: string = FIELDS,
   ): Promise<{ issues: JiraIssue[]; next?: string }> {
     if (this.cloudSearch !== false) {
-      const params = new URLSearchParams({ jql, maxResults: String(limit), fields: FIELDS });
+      const params = new URLSearchParams({ jql, maxResults: String(limit), fields });
       if (next) params.set("nextPageToken", next);
       try {
         const body = await this.req(`/search/jql?${params}`);
@@ -229,7 +240,7 @@ export class JiraProvider implements TrackerProvider {
       jql,
       maxResults: String(limit),
       startAt: String(startAt),
-      fields: FIELDS,
+      fields,
     });
     const body = await this.req(`/search?${params}`);
     const issues: JiraIssue[] = body.issues ?? [];
@@ -267,7 +278,47 @@ export class JiraProvider implements TrackerProvider {
       out.push(...page.issues.map((i) => this.toTicket(i)));
       next = page.next;
     } while (paginate && next && out.length < MAX_TICKETS);
+    if (q.open) await this.attachChildStats(out);
     return out;
+  }
+
+  /**
+   * Fill in each epic's child breakdown (DRY-13). JQL takes `parent in (…)`, so
+   * every epic on screen is answered by ONE extra search no matter how many
+   * there are — and `fields=parent,status` keeps the response to the two things
+   * being counted.
+   *
+   * Failures are swallowed deliberately: this decorates a sidebar that must
+   * still draw, and the shell falls back to counting the children it loaded.
+   * That matters more here than on Switchyard — `parent` is unsupported JQL on
+   * an older DC instance, where this throws every time and must stay harmless.
+   */
+  private async attachChildStats(out: Ticket[]): Promise<void> {
+    const epics = new Map(out.filter((t) => t.type?.toLowerCase() === "epic").map((t) => [t.key, t]));
+    if (!epics.size) return;
+    try {
+      const jql = `parent in (${[...epics.keys()].map(jqlQuote).join(", ")})`;
+      const kids: JiraIssue[] = [];
+      let next: string | undefined;
+      do {
+        const page = await this.searchPage(jql, PAGE_SIZE, next, "parent,status");
+        kids.push(...page.issues);
+        next = page.next;
+      } while (next && kids.length < MAX_TICKETS);
+      for (const k of kids) {
+        const epic = k.fields.parent?.key ? epics.get(k.fields.parent.key) : undefined;
+        if (!epic) continue;
+        const stats = (epic.childStats ??= { total: 0, byCategory: {} });
+        const c = mapCategory(k.fields.status?.statusCategory?.key, k.fields.status?.name);
+        stats.total++;
+        stats.byCategory[c] = (stats.byCategory[c] ?? 0) + 1;
+      }
+      // An epic with no children still gets a definitive zero rather than the
+      // "we didn't ask" absence the shell treats as unknown.
+      for (const e of epics.values()) e.childStats ??= { total: 0, byCategory: {} };
+    } catch {
+      /* leave childStats unset; the shell degrades to loaded children */
+    }
   }
 
   async searchTickets(text: string, projects?: string[]): Promise<Ticket[]> {

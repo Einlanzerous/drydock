@@ -2,10 +2,11 @@
 import { computed, reactive, ref } from "vue";
 import {
   CATEGORY_COLOR,
+  epicRollup,
   groupTickets,
-  rollup,
   tagColor,
   type EpicNode,
+  type Rollup,
   type Ticket,
 } from "../lib/tracker.js";
 
@@ -24,9 +25,9 @@ import {
 //
 // Inside a repo group, tickets nest under their epic (DRY-13) — a second level
 // of the same collapse idiom, with a status rollup on the epic row so a
-// collapsed epic still says something. Epics that were never pulled but are
-// named by a child still head a group; see groupTickets for why that's the
-// common case rather than an edge one.
+// collapsed epic still says something. Providers pull epics whatever the
+// backlog toggle says, so the epic heading a group is normally a real ticket;
+// one named only by a child (out-of-scope project) still heads it, marked.
 const props = defineProps<{
   /**
    * Provider label. Typed `string`, defaulted upstream, and still rendered
@@ -144,20 +145,13 @@ const groups = computed(() => groupTickets(filtered.value, props.tickets));
  * that hang off nothing.
  */
 type Row =
-  | { kind: "epic"; id: string; node: EpicNode; roll: ReturnType<typeof rollup>; hint: string }
+  | { kind: "epic"; id: string; node: EpicNode; roll: Rollup }
   | { kind: "ticket"; id: string; t: Ticket; child: boolean };
 
 function rowsOf(g: { repo: string; epics: EpicNode[]; loose: Ticket[] }): Row[] {
   const out: Row[] = [];
   for (const node of g.epics) {
-    const roll = rollup(node.children);
-    out.push({
-      kind: "epic",
-      id: `${g.repo} ${node.key}`,
-      node,
-      roll,
-      hint: roll.map((s) => `${s.n} ${s.label}`).join(" · ") + " — of tickets currently loaded",
-    });
+    out.push({ kind: "epic", id: `${g.repo} ${node.key}`, node, roll: epicRollup(node) });
     if (isEpicOpen(g.repo, node.key)) {
       for (const t of node.shown) out.push({ kind: "ticket", id: t.key, t, child: true });
     }
@@ -332,23 +326,29 @@ function clearFilters(): void {
                   <span
                     v-else
                     class="slabel unpulled"
-                    title="This epic isn't in the current pull — it's named by its children. Enable the backlog toggle or add its project to see the epic itself."
+                    title="Named by its children but not in the pull — its project is probably outside the current scope. Add that project to see the epic itself."
                   >not pulled</span>
                 </div>
                 <div class="ttitle">{{ row.node.title }}</div>
-                <div v-if="row.node.children.length" class="rollup" :title="row.hint">
+                <div v-if="row.roll.total" class="rollup" :title="row.roll.hint">
                   <span class="bar">
                     <span
-                      v-for="s in row.roll"
+                      v-for="s in row.roll.segments"
                       :key="s.category"
                       class="seg"
                       :style="{
-                        width: `${(s.n / row.node.children.length) * 100}%`,
+                        width: `${(s.n / row.roll.total) * 100}%`,
                         background: CATEGORY_COLOR[s.category].c,
                       }"
                     ></span>
                   </span>
-                  <span class="rollup-n">
+                  <!-- With real counts the ratio means completion, so it says so.
+                       Falling back to loaded children it cannot mean that (the
+                       pull excludes done), so it reports coverage instead. -->
+                  <span v-if="row.roll.authoritative" class="rollup-n">
+                    {{ row.roll.done }}/{{ row.roll.total }} done
+                  </span>
+                  <span v-else class="rollup-n">
                     <template v-if="row.node.shown.length !== row.node.children.length">{{ row.node.shown.length }}/</template>{{ row.node.children.length }}
                   </span>
                 </div>
