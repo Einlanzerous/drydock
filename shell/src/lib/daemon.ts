@@ -30,8 +30,9 @@ export const DAEMON_WS = override
   : `${wsProto}://${host}:${DAEMON_PORT}`;
 
 /**
- * Every read goes through here, because the failure this guards is not a
- * request that fails — it's a request that SUCCEEDS with a failure (DRY-51). A
+ * Every daemon response the shell parses goes through here, because the failure
+ * this guards is not a request that fails — it's one that SUCCEEDS with a
+ * failure (DRY-51). A
  * 404's `{"error":"not found"}` parses as JSON perfectly well, so a bare
  * `res.json()` hands the caller an error object typed as data. The caller's
  * `catch` never runs, the missing field travels three layers, and it finally
@@ -49,10 +50,30 @@ export async function getJson<T>(url: string, init?: RequestInit): Promise<T> {
   // Parsed BEFORE the status check so a daemon that explains itself in `error`
   // gets to. A body that isn't JSON at all (nginx's HTML 502, a wrong port
   // serving an SPA's index.html with a cheerful 200) leaves it undefined.
-  const body = await res.json().catch(() => undefined);
-  if (!res.ok) throw new Error(body?.error ?? `daemon returned ${res.status}`);
-  if (body === undefined) throw new Error("daemon returned a non-JSON body");
+  let body: any;
+  try {
+    body = await res.json();
+  } catch (err) {
+    // An abort is the CALLER's timeout firing mid-body, not a malformed
+    // response — fetchWorkspace's 3s budget is load-bearing (a partitioned
+    // Postgres costs the daemon 5s), and reporting it as bad JSON would send
+    // the next person reading this banner after the wrong problem entirely.
+    if ((err as Error | undefined)?.name === "AbortError") throw err;
+    if (res.ok) throw new Error(`daemon returned a non-JSON body (${res.status})`);
+  }
+  // The status is ALWAYS in the message. `error` alone reads "not found", which
+  // is exactly what the daemon's unknown-route fallthrough says — so the one
+  // case this helper exists for, a shell newer than its daemon, would produce a
+  // banner with nothing in it to distinguish a missing route from a 500.
+  if (!res.ok) throw new Error(`daemon returned ${res.status}${suffix(body)}`);
+  // `null` is valid JSON, so without this it comes back typed as a T and the
+  // crash simply moves to the caller's first property read.
+  if (body === null || body === undefined) throw new Error("daemon returned an empty body");
   return body as T;
+}
+
+function suffix(body: any): string {
+  return typeof body?.error === "string" && body.error ? `: ${body.error}` : "";
 }
 
 /**
@@ -105,13 +126,15 @@ export async function createSession(opts: {
    */
   input?: string;
 }): Promise<SessionInfo> {
-  const res = await fetch(`${DAEMON_HTTP}/api/sessions`, {
+  const body = await getJson<{ session?: SessionInfo }>(`${DAEMON_HTTP}/api/sessions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(opts),
   });
-  const body = await res.json();
-  if (!res.ok) throw new Error(body.error ?? "failed to create session");
+  // Callers reach straight for `.id` and `.cwd` to place a window and co-locate
+  // a shell, so an envelope without a session has to fail here rather than as
+  // "cannot read properties of undefined" two frames later (DRY-51).
+  if (!body.session) throw new Error("daemon returned no session");
   return body.session;
 }
 
@@ -122,10 +145,7 @@ export async function createSession(opts: {
  * stopped it is precisely the state an unattended run must never be left in.
  */
 export async function killSession(id: string): Promise<void> {
-  const res = await fetch(`${DAEMON_HTTP}/api/sessions/${encodeURIComponent(id)}/kill`, {
-    method: "POST",
-  });
-  if (!res.ok) throw new Error(`daemon returned ${res.status}`);
+  await getJson(`${DAEMON_HTTP}/api/sessions/${encodeURIComponent(id)}/kill`, { method: "POST" });
 }
 
 export function attachUrl(id: string): string {
