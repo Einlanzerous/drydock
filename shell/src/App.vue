@@ -1109,6 +1109,13 @@ onBeforeUnmount(() => {
   color: #d8c9a3;
   font-size: 12px;
   border-bottom: 1px solid #4a4130;
+  /* One line, always. A notice that grows with its error message pushes the
+     desk down under the cursor, which is the opposite of unobtrusive. The text
+     is already capped in notices.ts; this is the backstop for a long unbroken
+     token (a URL, a path) that no character limit would split. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .notice-detail {
   margin-left: 8px;

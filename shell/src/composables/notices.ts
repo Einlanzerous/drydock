@@ -31,11 +31,26 @@ export interface Notice {
 const byKey = reactive<Record<string, Notice>>({});
 
 /**
+ * Longest `detail` worth showing inline. A notice is one quiet line above the
+ * desk, and `String(err)` is not always a sentence: a 503 carrying the
+ * migration-drift message (`state store: Error: migration 001_workspace.sql
+ * changed after it was applied (ledger …, file …). An applied migration is
+ * history: …`) is a paragraph, and a paragraph in a 12px strip pushes the desk
+ * down and reads as an alarm. The console line keeps the whole thing.
+ */
+const DETAIL_MAX = 140;
+
+/**
  * Raise (or update) the condition under `key`. Idempotent by design: the caller
  * is usually a retry loop, and re-reporting the same outage must not stack.
  */
 export function setNotice(key: string, text: string, detail?: string): void {
-  byKey[key] = { text, detail };
+  byKey[key] = { text, detail: detail && truncate(detail) };
+}
+
+function truncate(s: string): string {
+  const one = s.replace(/\s+/g, " ").trim();
+  return one.length > DETAIL_MAX ? `${one.slice(0, DETAIL_MAX - 1)}…` : one;
 }
 
 /** The condition no longer holds. Safe to call when it never did. */
