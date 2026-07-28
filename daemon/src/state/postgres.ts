@@ -10,6 +10,7 @@
 // connects and migrates — and every failure surfaces as a rejected promise the
 // routes turn into a 503, leaving the shell on its local cache. A daemon with a
 // dead database still spawns agents, still attaches, still replays scrollback.
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -157,24 +158,40 @@ export class PostgresStore implements StateStore {
             applied_at timestamptz not null default now()
           )
         `);
-        const applied = new Set(
-          (await client.query<{ name: string }>("select name from drydock_schema_migrations")).rows.map(
-            (r) => r.name,
-          ),
+        // Added separately rather than in the create above, because the ledger
+        // predates it: a database migrated by an older Drydock already has the
+        // table, so `create table if not exists` would silently leave it without
+        // the column and every checksum read would come back undefined.
+        await client.query(
+          "alter table drydock_schema_migrations add column if not exists checksum text",
+        );
+        const applied = new Map(
+          (
+            await client.query<{ name: string; checksum: string | null }>(
+              "select name, checksum from drydock_schema_migrations",
+            )
+          ).rows.map((r) => [r.name, r.checksum] as const),
         );
         const files = fs
           .readdirSync(MIGRATIONS_DIR)
           .filter((f) => f.endsWith(".sql"))
           .sort(); // lexical order IS the migration order — hence the 001_ prefix
         for (const file of files) {
-          if (applied.has(file)) continue;
           const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, file), "utf8");
+          const checksum = crypto.createHash("sha256").update(sql).digest("hex");
+          if (applied.has(file)) {
+            await this.checkDrift(client, file, checksum, applied.get(file) ?? null);
+            continue;
+          }
           // Each migration lands whole or not at all, so a failure halfway
           // through leaves nothing half-created for the next attempt to trip on.
           await client.query("begin");
           try {
             await client.query(sql);
-            await client.query("insert into drydock_schema_migrations (name) values ($1)", [file]);
+            await client.query(
+              "insert into drydock_schema_migrations (name, checksum) values ($1, $2)",
+              [file, checksum],
+            );
             await client.query("commit");
             log.info("applied state migration", { file });
           } catch (err) {
@@ -188,6 +205,55 @@ export class PostgresStore implements StateStore {
     } finally {
       client.release();
     }
+  }
+
+  /**
+   * Has an already-applied migration changed on disk since it ran? (DRY-58)
+   *
+   * Recording filenames alone made this invisible, and CLAUDE.md actively
+   * encourages the setup where it bites: dev on :4317, prod on :4318 and a
+   * throwaway verification instance can all point at one database. Edit an
+   * applied `001_workspace.sql` and every one of them skips it — the schema
+   * each daemon *believes* it has and the schema that's actually there diverge
+   * silently, and the symptom surfaces later as a query against a column that
+   * was never added.
+   *
+   * A null checksum is a row from before this existed. Its original bytes are
+   * unknowable, so adopting the current file is the only non-fabricating
+   * option; drift is caught from the next run on. Said out loud because it
+   * means the FIRST run after upgrading can't detect an edit made before it.
+   *
+   * The hash is over raw file bytes, so reformatting an applied migration trips
+   * this too. That's the intent, not a rough edge: the ledger's claim is "these
+   * exact bytes ran here", and a daemon can't tell a whitespace change from a
+   * semantic one without parsing SQL it has no business parsing.
+   */
+  private async checkDrift(
+    client: pg.PoolClient,
+    file: string,
+    checksum: string,
+    stored: string | null,
+  ): Promise<void> {
+    if (stored === checksum) return;
+    if (stored === null) {
+      await client.query("update drydock_schema_migrations set checksum = $2 where name = $1", [
+        file,
+        checksum,
+      ]);
+      log.info("adopted checksum for a migration applied before checksums existed", { file });
+      return;
+    }
+    // Thrown, not logged-and-continued: the two schemas are already different
+    // and every further write is guesswork. It travels the ordinary store
+    // failure path (guard → 503 → the shell keeps its mirror), so a drifted
+    // migration costs the workspace store and never a live PTY. Unlike an
+    // outage it won't heal on its own — which is correct. This is an error
+    // about the repo, not a condition of the network.
+    throw new Error(
+      `migration ${file} changed after it was applied (ledger ${stored.slice(0, 12)}, ` +
+        `file ${checksum.slice(0, 12)}). An applied migration is history: add a new ` +
+        `numbered file instead of editing this one.`,
+    );
   }
 
   async load(owner: string, name: string): Promise<WorkspaceState | null> {
