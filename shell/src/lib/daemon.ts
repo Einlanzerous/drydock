@@ -227,6 +227,13 @@ export function attachUrl(id: string): string {
 /** Host policy the launch panel needs to describe what a run will start as. */
 export interface DaemonConfig {
   autonomous: { permissionMode: PermissionMode; permissionTimeoutMs: number };
+  /**
+   * How long a finished session sits on the desk before clearing itself
+   * (DRY-60), 0 for never. Optional because a daemon older than this shell
+   * doesn't send it, and the desk falls back to its own default rather than
+   * treating a missing field as "off".
+   */
+  desk?: { clearFinishedAfterMs: number };
 }
 
 /**

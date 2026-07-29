@@ -55,6 +55,18 @@ const props = defineProps<{
   }[];
   /** Windows currently on the desk, so a watched run can be marked as such. */
   watchedIds: string[];
+  /**
+   * When a finished run's card will clear itself, epoch ms, keyed by session id
+   * (DRY-60). An absolute deadline rather than a duration, because it is
+   * refreshed on the 3s session poll and rendered against this component's own
+   * 1s clock — a remaining-time number would stall and then jump.
+   *
+   * Absent for anything not on its way out: every failure, and every finished
+   * run on a host with the sweep turned off.
+   */
+  sweepAt: Record<string, number>;
+  /** The host's full sweep delay, so the hairline can drain as a proportion. */
+  sweepAfterMs: number;
 }>();
 
 const emit = defineEmits<{
@@ -166,6 +178,20 @@ interface Card {
   held: string | null;
   detail: string;
   watched: boolean;
+  /** mm:ss until this card clears itself, or null if it isn't going to. */
+  clearsIn: string | null;
+  /** How much of that countdown is left, 0..1 — the hairline drains on it. */
+  clearsFraction: number | null;
+  /**
+   * The one numeric column's text, and whether it is currently the countdown.
+   *
+   * Resolved once here rather than as a ternary in the template beside a
+   * separate `:class` test, because the two disagreed: the class was bound to
+   * "has a deadline" while the text preferred `held`, so a card could be styled
+   * as counting down while displaying something else.
+   */
+  meta: string;
+  metaClearing: boolean;
 }
 
 /**
@@ -187,6 +213,16 @@ const cards = computed<Card[]>(() =>
     const state = runState(session, gating);
     const meta = RUN_STATE_META[state];
     const gate = openGates.value.find((g) => g.sessionId === session.id);
+    // Clamped at zero: the deadline can pass a tick or two before the sweep's
+    // kill round-trips, and a card counting into negative time on its way out
+    // is the sort of thing that gets screenshotted.
+    const due = props.sweepAt[session.id];
+    const left = due !== undefined ? Math.max(0, due - now.value) : null;
+    const held = gate ? clockMs(heldMs(gate, now.value)) : null;
+    // Held time first — a gate is the one thing that outranks everything, and
+    // it is the only case where both numbers could exist at once.
+    const clearsIn = left === null ? null : clockMs(left);
+    const metaClearing = !held && clearsIn !== null;
     return {
       session,
       state,
@@ -194,9 +230,14 @@ const cards = computed<Card[]>(() =>
       label: session.ticket || session.title,
       repo: repoOf(session),
       elapsed: clockMs(now.value - session.createdAt),
-      held: gate ? clockMs(heldMs(gate, now.value)) : null,
+      held,
       detail: detailFor(session, state, gate),
       watched: props.watchedIds.includes(session.id),
+      clearsIn,
+      clearsFraction:
+        left === null || props.sweepAfterMs <= 0 ? null : Math.min(1, left / props.sweepAfterMs),
+      meta: held ? `held ${held}` : metaClearing ? `clears ${clearsIn}` : clockMs(now.value - session.createdAt),
+      metaClearing,
     };
   }),
 );
@@ -286,7 +327,8 @@ const tier = computed<"full" | "compact" | "tile">(() =>
 );
 
 function densityFor(card: Card): "full" | "compact" | "tile" {
-  return card.loud ? "full" : tier.value;
+  if (card.loud) return "full";
+  return tier.value;
 }
 
 // --- the chooser ------------------------------------------------------------
@@ -372,14 +414,32 @@ function onCardClick(card: Card): void {
                 v-for="card in seg.items"
                 :key="card.session.id"
                 class="card"
-                :class="[card.state, densityFor(card), { watched: card.watched }]"
+                :class="[
+                  card.state,
+                  densityFor(card),
+                  { watched: card.watched, clearing: card.metaClearing },
+                ]"
                 :title="cardTitle(card)"
                 @click="onCardClick(card)"
               >
                 <span class="glyph">{{ card.glyph }}</span>
                 <span class="id">{{ card.label }}</span>
                 <span class="origin">{{ card.session.origin.toUpperCase() }}</span>
-                <span class="meta">{{ card.held ? `held ${card.held}` : card.elapsed }}</span>
+                <!-- The countdown displaces the elapsed clock rather than
+                     joining it: a finished run's runtime stops being the
+                     interesting number the moment the card is on its way out,
+                     and the column is one card-width wide (DRY-60). -->
+                <!-- Below full density the countdown moves to the SECOND ROW
+                     rather than competing with the id for row 1 (DRY-60). That
+                     row holds the action line, which crowding has already
+                     hidden, so it is empty and full-width exactly when the
+                     countdown needs somewhere to go — and the card keeps its
+                     tile width. Widening the card to fit the clock on row 1
+                     was the first attempt and it traded `display:none` for
+                     something no better: at 176px a ten-card rail needs
+                     2023px of lane and only has 1208, so five cards went off
+                     the right edge (measured, 1500px viewport). -->
+                <span class="meta" :class="{ clearing: card.metaClearing }">{{ card.meta }}</span>
                 <!-- The one control any card ever shows, and only on the two
                      states that persist until acknowledged. -->
                 <button
@@ -398,7 +458,19 @@ function onCardClick(card: Card): void {
                      while the run is moving and frozen when it isn't. It carries
                      no fraction — step-against-plan has no signal reaching the
                      daemon, and a bar that invented one would be a lie. -->
-                <span class="hairline" :class="card.state"></span>
+                <!-- On a finished card it doubles as the countdown, draining
+                     left-to-right over the sweep delay (DRY-60) — the same
+                     2px strip, so nothing on the card moves or resizes as a
+                     run goes from finished to gone. -->
+                <span
+                  class="hairline"
+                  :class="card.state"
+                  :style="
+                    card.clearsFraction === null
+                      ? undefined
+                      : { transform: `scaleX(${card.clearsFraction})`, transformOrigin: 'left' }
+                  "
+                ></span>
               </div>
             </div>
           </div>
@@ -639,10 +711,36 @@ function onCardClick(card: Card): void {
 .card.gating .meta {
   color: #e0a33c;
 }
+/* Dimmer than the elapsed clock it replaces. A card telling you it is about to
+   remove itself is information, not an alarm — the loud states are the ones
+   that want a person, and this one has stopped wanting anything. */
+.meta.clearing {
+  color: #55606d;
+}
 .card.tile .origin,
 .card.tile .meta,
 .card.compact .meta {
   display: none;
+}
+/* …except a countdown, which is a WARNING rather than a stat and is the one
+   number that must never be the thing crowding takes away (DRY-60). Placed
+   after the rule above deliberately: same specificity, later wins. */
+.card.clearing .meta {
+  display: block;
+}
+/* And it takes the action line's row, which these densities have already
+   emptied. Row 1 is the crowded one — the id, the badge and the ✕ are all
+   there — while row 2 is the full width of the card and holds nothing, so the
+   clock keeps the word "clears" even at 112px and never has to be measured
+   against an 8-character ticket key. The card's WIDTH is the thing that must
+   not move: the lane is one non-wrapping scrolling row, so every px added here
+   pushes a card at the other end out of sight. */
+.card.compact.clearing .meta,
+.card.tile.clearing .meta {
+  grid-column: 1 / 6;
+  grid-row: 2;
+  justify-self: start;
+  margin-right: 0;
 }
 /* Keep the clock clear of the ✕, which is absolutely positioned in the same
    top-right corner and only exists on these two states. Overlapping, a click

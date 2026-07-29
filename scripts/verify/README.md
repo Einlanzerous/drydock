@@ -22,6 +22,11 @@ Nothing here runs in CI or on install. Three groups:
   throwaway Postgres, about a minute. Run it when touching
   `daemon/src/transcripts.ts`, the history route, or either half of the resume
   gate.
+- **Clearing finished sessions (DRY-60)** —
+  [its own section](#clearing-finished-sessions-dry-60). A browser, about two
+  minutes. Run it when touching `sweepFinished` / `mayClear` / `clearSession` in
+  `App.vue`, `isFinished` in `runState.ts`, or anything that changes when a
+  window is removed.
 
 ## The ticket brief (DRY-53)
 
@@ -123,6 +128,76 @@ the `claude` it spawns is never prompted. Note the plant must come AFTER the
 spawn's own hook — `agent_session_id` is written `where agent_session_id is
 null`, so the first writer wins.
 
+## Clearing finished sessions (DRY-60)
+
+Runs against **either tier**, and should be run against both — the file store is
+where a swept session's scrollback was the only copy there ever was. It reads
+the tier from `/healthz` and flips the notice assertion accordingly.
+
+```sh
+npm i playwright --prefix scripts/verify     # ad-hoc; not a repo dependency
+
+(cd daemon && DRYDOCK_PORT=4360 DRYDOCK_HOST=127.0.0.1 DRYDOCK_SESSIONS_DIR=/tmp/d60 \
+   DRYDOCK_STATE_FILE=/tmp/dry60-state.json DRYDOCK_RUNS_ROOT=/tmp/dry60-runs \
+   DRYDOCK_TRACKER=fixture DRYDOCK_CLEAR_FINISHED_AFTER_MS=8000 \
+   node --import tsx src/index.ts &)
+(cd shell && VITE_DAEMON_URL=http://127.0.0.1:4360 bunx vite --port 5360 --strictPort &)
+
+node scripts/verify/sweep.mjs                # from the repo root
+
+# then again on the database tier — same shell, same harness
+docker run -d --name dry60-db -e POSTGRES_PASSWORD=dry60pw -e POSTGRES_USER=drydock \
+  -e POSTGRES_DB=drydock -p 127.0.0.1:55460:5432 postgres:16-alpine
+# (restart the daemon on :4360 with DRYDOCK_DATABASE_URL instead of the state file)
+```
+
+**`DRYDOCK_CLEAR_FINISHED_AFTER_MS` is not optional here.** The default is five
+minutes, which is right for a desk and useless for a test; the harness refuses
+to run (exit 2) against anything over 30s rather than quietly waiting out the
+real delay and calling it a pass.
+
+| harness | what it holds down |
+|---|---|
+| `sweep.mjs` | Finished sessions clear themselves and **nothing else does**. Four rounds: **A** the rail (a run that ended while you were in another tab is still there when you come back, never having counted down to nobody; the finished card announces itself before it goes; the failed one never does either; plus the tier's own line — raised on the file store once the sweep has actually cost something, absent before that and absent entirely on Postgres). **B** the desk (an unfocused finished window clears, the focused one doesn't, a running session and a workspace whose zsh is still alive are both left, `Clear finished` counts only what it would take and takes nothing that was running). **C** a crowded rail — ten runs, every countdown still rendered, still fitting its card, and still costing that card no width (the lane is one non-wrapping scrolling row, so a wider card is one pushed off the end). **D** the dock and synthetic focus: a docked window is never swept, and two windows nobody has clicked both clear. |
+
+Why a browser and not curl: at the API all four of round B's sessions look
+identical — `status: "exited"`. Which one gets swept turns on what is on the
+desk, which window has focus, and whether the tab is in front of anybody, and
+none of those exist outside a page. The visibility half is faked by overriding
+`document.visibilityState` and firing the event rather than actually
+backgrounding the tab, which would also throttle the 3s poll to once a minute
+and test Chromium instead of the rule.
+
+**Rounds C and D exist because the first cut of this harness passed against two
+real bugs.** It read the countdown with `textContent`, which is returned for a
+`display:none` node, and it never put more than two cards on the rail — so it
+never met the density rule that hid `.meta` from four cards up, i.e. the
+countdown was absent in exactly the crowded case the feature is for. So: assert
+`getComputedStyle().display` and the element's GEOMETRY, and put ten cards up
+rather than two. Round D is the same lesson on the desk — `wm.focusedId` is
+assigned synthetically in three places, so a harness that always clicks a window
+before asserting can't tell the focus exemption from "whatever the window
+manager last touched is immortal".
+
+**And round C grew a WIDTH check because the second cut passed too.** Geometry
+was measured against the card, and the question is the lane: `.underway` is a
+non-wrapping `overflow-x: auto` row, `getClientRects()` is non-empty for an
+element an ancestor clips, so a card entirely off the right-hand edge satisfied
+both "is it displayed" and "does it fit its card". The fix that prompted this
+widened a counting-down card from tile (112px) to compact (176px) to make room
+for the clock — measured at a 1500px viewport, that took ten cards from 1383px
+of lane to 2023px against 1208px available, so it went from two cards off the
+edge to five, and the sort puts the quiet counting-down ones last. Rendered and
+off-screen is not better than hidden. The countdown now takes the card's second
+row (the action line's, which crowding has already emptied), so it costs no
+width at all — which is what the check asserts, since "all ten are visible" is
+not true at any density and never was.
+
+Two sessions per shape, deliberately: `sleep 1` ends cleanly, `exit 3` ends with
+a `failure` set, `while :; do sleep 1; done` never ends. No `claude`, no tokens,
+no tracker — the sweep cannot tell what was running inside a PTY and shouldn't
+be tested as though it could.
+
 ## Workspace store: why a proxy and not `docker stop`
 
 `docker stop` frees the port, so every connect fails instantly with
@@ -199,9 +274,39 @@ git checkout HEAD -- shell/src/App.vue shell/src/components/TrackerSidebar.vue \
   shell/src/lib/tracker.ts
 ```
 
+`sweep.mjs` has no pre-DRY-60 file to check out — there was no sweep to break —
+so it was validated by breaking its load-bearing rules instead, a line each.
+Worth re-checking after any change to `sweepFinished` or the rail's density:
+
+```sh
+# (1) the failure guard, and the "only while somebody is looking" gate
+perl -0pi -e 's/return s\.status === "exited" && !s\.failure;/return s.status === "exited";/' \
+  shell/src/composables/runState.ts
+perl -0pi -e 's/if \(visible\) finishedSeenAt\[session\.id\] \?\?= at;/finishedSeenAt[session.id] ??= at;/' \
+  shell/src/App.vue
+node scripts/verify/sweep.mjs       # expect 4 failures, incl. the failed run being swept
+git checkout HEAD -- shell/src/App.vue shell/src/composables/runState.ts
+
+# (2) the countdown's row, and both of the sweep's own exemptions
+perl -0pi -e 's/\.card\.compact\.clearing \.meta,\n\.card\.tile\.clearing \.meta \{[^}]*\}\n//' \
+  shell/src/components/RunRail.vue
+perl -0pi -e 's/if \(userFocusedId\.value === session\.id \|\| win\?\.minimized\) continue;/if (wm.focusedId.value === session.id) continue;/' \
+  shell/src/App.vue
+node scripts/verify/sweep.mjs       # expect 4: C's fit check, and 3 of D's
+git checkout HEAD -- shell/src/App.vue shell/src/components/RunRail.vue
+```
+
 Vite hot-reloads, so no restart is needed between the two runs. Give it a
 second or two to do so — a run started too soon tests the tree you just
 replaced and reports the result you were hoping for.
+
+**Check that each `perl` actually matched**, because a substitution that hits
+nothing is silent and the run that follows is just the harness passing. Recipe
+(1) shipped broken for exactly this reason: it patched `if (!visible) continue;`,
+which was refactored into two guards one commit later, so the second break
+became a no-op and "expect 4" quietly meant 2 — a documented expectation that is
+wrong in the safe direction, which is how the next re-validation gets read as a
+regression. `grep -c` the replacement before running.
 
 **Commit first.** `checkout main -- <paths>` overwrites the working tree, and
 the `checkout HEAD --` that restores it only knows about the last COMMIT — so

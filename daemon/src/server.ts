@@ -253,6 +253,11 @@ const server = http.createServer(async (req, res) => {
           permissionMode: CONFIG.autonomous.permissionMode,
           permissionTimeoutMs: CONFIG.autonomous.permissionTimeoutMs,
         },
+        // Policy this daemon never applies itself (DRY-60) — the desk does the
+        // sweeping, because only the desk can see what's on screen. Served here
+        // so the delay is host config like everything else, and so turning it
+        // off is one env var rather than a setting per browser profile.
+        desk: { clearFinishedAfterMs: CONFIG.desk.clearFinishedAfterMs },
       });
     }
 
