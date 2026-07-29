@@ -486,6 +486,14 @@ Five minutes is the right default and a terrible test — the same trap DRY-49's
 timeout has. Harness: `scripts/verify/sweep.mjs`, rig in its README, and it
 refuses to run against a delay over 30s rather than pass by waiting.
 
+Note the two surfaces render the same countdown at different resolutions on
+purpose: the rail card counts seconds off its own 1s clock, the window frame
+says whole minutes because it is driven by the 3s poll and a seconds display
+there would visibly skip. Below a minute the frame says `<1m` rather than
+rounding up — a frame reading "clears in 1m" beside a card reading "0:05" is two
+surfaces contradicting each other, which is what any turned-down delay (every
+harness run) would otherwise show.
+
 The traps:
 
 1. **The clock must measure time IN FRONT OF SOMEBODY, not time since the run
@@ -516,21 +524,40 @@ The traps:
    and it contradicts the rail's stated contract for that lane ("you put them
    here and you're coming back; they never change unless you touch them"). The
    sweep skips minimized windows; `Clear finished` still counts and takes them.
-5. **The rail HIDES the countdown by density, which is backwards.** `.meta` is
-   `display:none` from four cards up (`.card.compact .meta`) and `loud` is false
-   for `finished`, so before this the number vanished at exactly the crowd the
-   feature exists for. A counting-down card now floors at `compact` and the
-   origin badge yields its place — and the word "clears" is dropped below full
-   density because at 176px it overlaps an 8-character ticket key by 6px
-   (measured, not estimated). Compact hides the ELAPSED clock outright, so a
-   bare number there is unambiguous.
+5. **The rail HIDES the countdown by density, which is backwards — and the
+   obvious fix trades it for something no better.** `.meta` is `display:none`
+   from four cards up (`.card.compact .meta`) and `loud` is false for
+   `finished`, so the number vanished at exactly the crowd the feature exists
+   for. The first fix widened a counting-down card instead (tile 112px →
+   compact 176px) so the clock had room on row 1 beside the id. That is
+   **horizontal overflow wearing the same clothes**: `.underway` is a single
+   non-wrapping `overflow-x: auto` row, so at a 1500px viewport ten cards went
+   from wanting 1383px of a 1208px lane to wanting 2023px — two cards off the
+   right-hand edge became five. And the sort is `loud`-first, so `finished`
+   cards go LAST: the ones pushed past the clip are precisely the ones counting
+   down. Rendered-and-off-screen is not an improvement on hidden. What works
+   instead is that below full density the countdown takes the card's **second
+   row** — the action line's, which crowding has already emptied — so it costs
+   no width, keeps the word "clears" even at 112px, and cannot collide with the
+   id because they are on different rows. Measure any change here against the
+   LANE's rect, never the card's: `getClientRects()` is non-empty for an element
+   an ancestor clips, so a card entirely off-screen looks fine from inside.
 6. **Whatever sweeps must remove the window CLIENT-SIDE.** Kill the session and
    let `reconcile` notice, and on a history tier every swept window comes back as
    a DRY-56 tombstone — the "third dismissal" — while on the file tier each one
    raises "a window that closes can't be resumed" for a removal that was
    deliberate. There is a poll between the kill landing and the window going, so
    reconcile also has to skip ids that are mid-clear; it is not enough to remove
-   the window afterwards.
+   the window afterwards. **And the mid-clear set is not sufficient on its own**,
+   because it only covers the span from the kill being issued to the window being
+   forgotten. A `listSessions()` issued BEFORE that span and landing after it
+   sees neither end of it: the guard is already released and the session is still
+   in the list it carries, so reconcile re-adds the window at a cascade position
+   and gives it focus, for a PTY that is dead. Hence the epoch pair in `App.vue`
+   — one retiring a superseded refresh, one retiring a list a teardown has
+   invalidated. Narrow on loopback and ordinary against a remote daemon, and
+   `clearFinished` calls `refresh` itself while the 3s poll may already have one
+   in flight, so two are genuinely concurrent.
 7. **A workspace's agent exiting does not finish the workspace.** It binds a
    second PTY with no window of its own, and clearing the window kills both — so
    a finished agent beside a live zsh must be left alone, and the zsh must never

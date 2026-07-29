@@ -158,7 +158,7 @@ real delay and calling it a pass.
 
 | harness | what it holds down |
 |---|---|
-| `sweep.mjs` | Finished sessions clear themselves and **nothing else does**. Four rounds: **A** the rail (a run that ended while you were in another tab is still there when you come back, never having counted down to nobody; the finished card announces itself before it goes; the failed one never does either; plus the tier's own line — raised on the file store once the sweep has actually cost something, absent before that and absent entirely on Postgres). **B** the desk (an unfocused finished window clears, the focused one doesn't, a running session and a workspace whose zsh is still alive are both left, `Clear finished` counts only what it would take and takes nothing that was running). **C** a crowded rail — ten runs, and every countdown still rendered and still fitting its card. **D** the dock and synthetic focus: a docked window is never swept, and two windows nobody has clicked both clear. |
+| `sweep.mjs` | Finished sessions clear themselves and **nothing else does**. Four rounds: **A** the rail (a run that ended while you were in another tab is still there when you come back, never having counted down to nobody; the finished card announces itself before it goes; the failed one never does either; plus the tier's own line — raised on the file store once the sweep has actually cost something, absent before that and absent entirely on Postgres). **B** the desk (an unfocused finished window clears, the focused one doesn't, a running session and a workspace whose zsh is still alive are both left, `Clear finished` counts only what it would take and takes nothing that was running). **C** a crowded rail — ten runs, every countdown still rendered, still fitting its card, and still costing that card no width (the lane is one non-wrapping scrolling row, so a wider card is one pushed off the end). **D** the dock and synthetic focus: a docked window is never swept, and two windows nobody has clicked both clear. |
 
 Why a browser and not curl: at the API all four of round B's sessions look
 identical — `status: "exited"`. Which one gets swept turns on what is on the
@@ -173,11 +173,25 @@ real bugs.** It read the countdown with `textContent`, which is returned for a
 `display:none` node, and it never put more than two cards on the rail — so it
 never met the density rule that hid `.meta` from four cards up, i.e. the
 countdown was absent in exactly the crowded case the feature is for. So: assert
-`getComputedStyle().display` and the element's GEOMETRY (inside its card, not
-overlapping the id beside it), and put ten cards up rather than two. Round D is
-the same lesson on the desk — `wm.focusedId` is assigned synthetically in three
-places, so a harness that always clicks a window before asserting can't tell the
-focus exemption from "whatever the window manager last touched is immortal".
+`getComputedStyle().display` and the element's GEOMETRY, and put ten cards up
+rather than two. Round D is the same lesson on the desk — `wm.focusedId` is
+assigned synthetically in three places, so a harness that always clicks a window
+before asserting can't tell the focus exemption from "whatever the window
+manager last touched is immortal".
+
+**And round C grew a WIDTH check because the second cut passed too.** Geometry
+was measured against the card, and the question is the lane: `.underway` is a
+non-wrapping `overflow-x: auto` row, `getClientRects()` is non-empty for an
+element an ancestor clips, so a card entirely off the right-hand edge satisfied
+both "is it displayed" and "does it fit its card". The fix that prompted this
+widened a counting-down card from tile (112px) to compact (176px) to make room
+for the clock — measured at a 1500px viewport, that took ten cards from 1383px
+of lane to 2023px against 1208px available, so it went from two cards off the
+edge to five, and the sort puts the quiet counting-down ones last. Rendered and
+off-screen is not better than hidden. The countdown now takes the card's second
+row (the action line's, which crowding has already emptied), so it costs no
+width at all — which is what the check asserts, since "all ten are visible" is
+not true at any density and never was.
 
 Two sessions per shape, deliberately: `sleep 1` ends cleanly, `exit 3` ends with
 a `failure` set, `while :; do sleep 1; done` never ends. No `claude`, no tokens,
@@ -268,12 +282,13 @@ Worth re-checking after any change to `sweepFinished` or the rail's density:
 # (1) the failure guard, and the "only while somebody is looking" gate
 perl -0pi -e 's/return s\.status === "exited" && !s\.failure;/return s.status === "exited";/' \
   shell/src/composables/runState.ts
-perl -0pi -e 's/    if \(!visible\) continue;\n//' shell/src/App.vue
+perl -0pi -e 's/if \(visible\) finishedSeenAt\[session\.id\] \?\?= at;/finishedSeenAt[session.id] ??= at;/' \
+  shell/src/App.vue
 node scripts/verify/sweep.mjs       # expect 4 failures, incl. the failed run being swept
 git checkout HEAD -- shell/src/App.vue shell/src/composables/runState.ts
 
-# (2) the density floor, and both of the sweep's own exemptions
-perl -0pi -e 's/  if \(card\.clearsIn\) return tier\.value === "tile" \? "compact" : tier\.value;\n//' \
+# (2) the countdown's row, and both of the sweep's own exemptions
+perl -0pi -e 's/\.card\.compact\.clearing \.meta,\n\.card\.tile\.clearing \.meta \{[^}]*\}\n//' \
   shell/src/components/RunRail.vue
 perl -0pi -e 's/if \(userFocusedId\.value === session\.id \|\| win\?\.minimized\) continue;/if (wm.focusedId.value === session.id) continue;/' \
   shell/src/App.vue
@@ -284,6 +299,14 @@ git checkout HEAD -- shell/src/App.vue shell/src/components/RunRail.vue
 Vite hot-reloads, so no restart is needed between the two runs. Give it a
 second or two to do so — a run started too soon tests the tree you just
 replaced and reports the result you were hoping for.
+
+**Check that each `perl` actually matched**, because a substitution that hits
+nothing is silent and the run that follows is just the harness passing. Recipe
+(1) shipped broken for exactly this reason: it patched `if (!visible) continue;`,
+which was refactored into two guards one commit later, so the second break
+became a no-op and "expect 4" quietly meant 2 — a documented expectation that is
+wrong in the safe direction, which is how the next re-validation gets read as a
+regression. `grep -c` the replacement before running.
 
 **Commit first.** `checkout main -- <paths>` overwrites the working tree, and
 the `checkout HEAD --` that restores it only knows about the last COMMIT — so

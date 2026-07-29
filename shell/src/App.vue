@@ -337,6 +337,8 @@ async function endWindow(id: string): Promise<string[] | null> {
     return failed;
   } finally {
     clearing.delete(id);
+    // The guard is down; anything already in flight predates it. See deskEpoch.
+    deskEpoch++;
   }
 }
 
@@ -363,6 +365,22 @@ const finishedSeenAt = reactive<Record<string, number>>({});
  * of a window somebody asked to be cleared.
  */
 const clearing = new Set<string>();
+
+/**
+ * Epoch guards for the session poll, the pair that makes `clearing` airtight.
+ *
+ * `clearing` only covers the span between the kill being issued and the window
+ * being forgotten. A `listSessions()` issued BEFORE that span and landing after
+ * it sees neither: the guard has already been released, and the list it carries
+ * still has the session in it. `refreshEpoch` retires a superseded refresh (two
+ * run concurrently whenever `clearFinished` fires between poll ticks);
+ * `deskEpoch` retires a list that a teardown has invalidated under it.
+ *
+ * Same shape as `loadTickets`' guard above, for the same reason — the newest
+ * answer is the only one entitled to commit.
+ */
+let refreshEpoch = 0;
+let deskEpoch = 0;
 
 /**
  * What may be cleared at all — by the button, by the sweep, by anything.
@@ -774,6 +792,8 @@ async function resumeSession(record: SessionRecord) {
 }
 
 async function refresh() {
+  const epoch = ++refreshEpoch;
+  const desk = deskEpoch;
   try {
     // NOT awaited, and not called per tick — reconcile forces a fetch at the
     // one moment the answer matters (a window whose session has gone), and the
@@ -781,6 +801,17 @@ async function refresh() {
     // it. Awaiting a store that is slow or partitioned would delay every pane
     // attaching and the poll behind it, which is DRY-58's bug class exactly.
     const list = await listSessions();
+    // This list describes a desk that no longer exists (DRY-60). Two ways:
+    // a NEWER refresh has already committed off a fresher list, or a teardown
+    // finished while this one was in flight — and `clearing` was the only thing
+    // stopping reconcile re-adding those windows, so by now that guard is down
+    // and the session is still in this list. Re-adding it puts the window back
+    // at a cascade position WITH FOCUS, for a PTY that is already dead; the
+    // next poll drops it again, so it reads as a window flickering onto the
+    // desk on its way out. Narrow on loopback, ordinary against a remote
+    // daemon — and clearFinished() calls refresh() itself while the 3s poll may
+    // already have one in flight, so two are genuinely concurrent.
+    if (epoch !== refreshEpoch || desk !== deskEpoch) return;
     reconcile(list);
     now.value = Date.now();
     // AFTER reconcile, off the same list: the sweep decides using window state
@@ -836,10 +867,16 @@ function winStatus(id: string) {
   // is driven by the 3s poll, and a seconds display would visibly skip.
   // Absent means it isn't going anywhere: a failure, a workspace whose shell is
   // still alive, the window you have focused, or a host with the sweep off.
+  //
+  // Under a minute it says "<1m" rather than rounding up to "1m", because the
+  // rail card beside it is counting real seconds: a frame reading "clears in
+  // 1m" for the whole of an 8s countdown contradicts a card reading "0:05" on
+  // the same desk. Rounding UP is right for the 5-minute default; it was the
+  // max(1, …) floor that manufactured a wrong number instead of a vague one.
   if (status === "exited") {
     const seen = finishedSeenAt[id];
     const left = seen !== undefined ? seen + clearFinishedAfterMs.value - now.value : 0;
-    const tag = left > 0 ? `clears in ${Math.max(1, Math.ceil(left / 60_000))}m` : "";
+    const tag = left > 0 ? `clears in ${left < 60_000 ? "<1" : Math.ceil(left / 60_000)}m` : "";
     return { c: "#6a737f", g: "#6a737f55", attention: false, tag }; // exited
   }
   if (idle) return { c: "#d6a651", g: "#d6a65177", attention: true, tag: "Your turn" }; // yielded

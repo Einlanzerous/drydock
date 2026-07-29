@@ -108,42 +108,57 @@ async function setVisible(page, visible) {
 }
 
 /**
- * Every rail card, as {label, meta, metaShown, metaFits, state}.
+ * Every rail card, as {label, meta, metaShown, metaFits, cardInLane, state}.
  *
- * `metaShown` and `metaFits` exist because `textContent` is returned for a
- * `display:none` node, so a harness that only reads the string passes happily
- * against a countdown nobody can see — and the rail hides `.meta` by density
- * once there are more than three cards, which is exactly the crowded case this
- * feature is for. Read the computed style and the geometry, not the text.
+ * Three separate questions, and each one has been the bug:
+ *
+ *  - **is it in the DOM** — what `textContent` answers, and it answers it for a
+ *    `display:none` node too, so the first cut of this harness passed against a
+ *    countdown nobody could see.
+ *  - **is it in its card** — `metaFits`. The card is `overflow: hidden`, so a
+ *    clock too wide for it is silently cut, and the id sits beside it.
+ *  - **is the CARD in the lane** — `cardInLane`. The one the second cut still
+ *    missed: `.underway` is a non-wrapping `overflow-x: auto` row, and
+ *    `getClientRects()` is non-empty for an element an ANCESTOR clips —
+ *    clipping doesn't remove the layout box. So a card 300px past the lane's
+ *    right edge passed both of the checks above, and widening the card to fit
+ *    the clock on row 1 is exactly what pushes the far cards out there. The
+ *    sort puts quiet (finished, counting-down) cards last, so they are the ones
+ *    that go.
  */
 const cards = (page) =>
-  page.evaluate(() =>
-    [...document.querySelectorAll(".card")].map((c) => {
+  page.evaluate(() => {
+    const laneRect = document.querySelector(".underway")?.getBoundingClientRect();
+    return [...document.querySelectorAll(".card")].map((c) => {
       const meta = c.querySelector(".meta");
       const id = c.querySelector(".id");
       const cr = c.getBoundingClientRect();
       const mr = meta?.getBoundingClientRect();
       const ir = id?.getBoundingClientRect();
+      // The countdown moved to the card's SECOND ROW below full density, so
+      // "not sitting on the id" is a question about rows, not columns — two
+      // elements on different rows cannot overlap whatever their x extents are.
+      const sharesRowWithId =
+        !!mr && !!ir && !(mr.top >= ir.bottom - 0.5 || mr.bottom <= ir.top + 0.5);
       return {
         label: id?.textContent.trim() ?? "",
         meta: meta?.textContent.trim() ?? "",
         state: c.className.replace("card", "").trim(),
-        // The card's own verdict, not the wording — the countdown drops the
-        // word "clears" once the card narrows, so a harness keyed on the string
-        // reports a crowded rail as having no countdowns at all.
+        // The card's own verdict, not the wording.
         clearing: c.classList.contains("clearing"),
         metaShown:
           !!meta && getComputedStyle(meta).display !== "none" && meta.getClientRects().length > 0,
-        // Inside the card (which is overflow:hidden, so an overflowing child is
-        // silently cut) and not sitting on top of the id beside it.
         metaFits:
           !!mr &&
           mr.right <= cr.right + 0.5 &&
           mr.left >= cr.left - 0.5 &&
-          (!ir || ir.right <= mr.left + 0.5),
+          mr.bottom <= cr.bottom + 0.5 &&
+          (!sharesRowWithId || ir.right <= mr.left + 0.5),
+        cardInLane:
+          !!laneRect && cr.right <= laneRect.right + 0.5 && cr.left >= laneRect.left - 0.5,
       };
-    }),
-  );
+    });
+  });
 
 /** Every window frame, as {title, tag}. `.statustag` is where the countdown renders. */
 const frames = (page) =>
@@ -386,6 +401,15 @@ for (const id of [liveC, wsAgent, wsShell]) await api(`/api/sessions/${id}/kill`
 // `.meta` is the first thing to go. That put the countdown at `display:none`
 // from four runs upward, which is the crowded desk the whole ticket is about:
 // cards vanishing with the warning never having rendered once.
+//
+// The FIRST fix for that was to widen a counting-down card instead (tile 112px
+// → compact 176px), and it was no better, because the lane is a single
+// non-wrapping `overflow-x: auto` row: measured at a 1500px viewport, ten
+// compact cards want 2023px of a 1208px lane and five of them sat off the
+// right-hand edge — rendered, and no more readable than `display:none`. Hence
+// the width assertion below, which is the one that discriminates: the countdown
+// has to cost the card NO width, and it doesn't, because below full density it
+// takes the second row (the action line's, which crowding has already emptied).
 console.log("\n--- round C: ten runs, and every countdown still legible ---");
 
 const CROWD = 10;
@@ -420,13 +444,40 @@ check(
   counting.length > 0 && counting.every((c) => c.metaFits),
   `${counting.filter((c) => !c.metaFits).length} clipped/overlapping`,
 );
+// The regression the first fix shipped, and the check that discriminates it.
+// At ten cards the tier is `tile`; a counting-down card any wider than that is
+// buying its own legibility with somebody else's card, because the lane is one
+// non-wrapping scrolling row.
+//
+// This is deliberately a claim about WIDTH and not about how many cards are
+// visible. "All ten are on screen" is not true at any density — the lane has
+// always scrolled at ten — so asserting it would be asserting the rail is
+// something it isn't. The off-lane count rides along in the detail because it
+// is the human-readable consequence: it went 2 → 5 when the card widened, and
+// back to 2 when the clock moved to the second row.
+//
+// Note there is no separate "the countdown is inside the lane" check, though an
+// earlier draft had one. It cannot fail: a meta inside its card (metaFits) on a
+// card inside the lane is inside the lane by construction, so it passed against
+// the very bug it was written for. A check that can't fail is worse than none.
+const offLane = counting.filter((c) => !c.cardInLane).length;
+check(
+  "and it costs the card no width — the crowd is still at the tier's own size",
+  counting.length > 0 && counting.every((c) => c.state.includes("tile")),
+  `${offLane}/${counting.length} cards scrolled off the lane; ` +
+    `sizes: ${JSON.stringify([...new Set(counting.map((c) => c.state))])}`,
+);
 
 await sleep(PAST_SWEEP);
 seen = await cards(page);
 check(
   "then the whole crowd clears itself",
-  seen.length === 0 && (await listed()).length === 0,
-  `${seen.length} card(s) left, ${(await listed()).length} session(s)`,
+  // Our own ids, not a global count: `listed()` is a claim about everything
+  // that has ever run against this daemon, which round A explicitly refuses to
+  // make for exactly this reason.
+  !seen.some((c) => c.label.startsWith("DRY60-C")) &&
+    (await Promise.all(crowd.map(byId))).every((s) => s === undefined),
+  `${seen.length} card(s) left: ${JSON.stringify(seen.map((c) => c.label))}`,
 );
 
 // --- Round D: docked, and focus nobody chose --------------------------------

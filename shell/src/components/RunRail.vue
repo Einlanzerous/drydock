@@ -328,13 +328,6 @@ const tier = computed<"full" | "compact" | "tile">(() =>
 
 function densityFor(card: Card): "full" | "compact" | "tile" {
   if (card.loud) return "full";
-  // A card counting down to its own removal never drops to `tile` (DRY-60).
-  // Tile is 112px and carries a glyph and an id and nothing else, so at nine
-  // runs the countdown was `display:none` — which is precisely the crowded
-  // rail this feature exists for, and it meant windows and cards disappearing
-  // with the warning never once having rendered. Compact has room; the origin
-  // badge gives up its place for it (see the stylesheet).
-  if (card.clearsIn) return tier.value === "tile" ? "compact" : tier.value;
   return tier.value;
 }
 
@@ -436,17 +429,17 @@ function onCardClick(card: Card): void {
                      joining it: a finished run's runtime stops being the
                      interesting number the moment the card is on its way out,
                      and the column is one card-width wide (DRY-60). -->
-                <!-- The word goes when the card narrows (DRY-60). Measured: at
-                     176px, "clears 0:42" beside an 8-character ticket key
-                     overlaps it by 6px — and the countdown losing its last
-                     digit to the key is the one failure this column must not
-                     have. Dropping to the bare clock is unambiguous here
-                     because compact hides the ELAPSED clock outright, so a
-                     number on a narrow card can only be a countdown; the
-                     dimmed colour and the draining hairline say the rest. -->
-                <span class="meta" :class="{ clearing: card.metaClearing }">{{
-                  card.metaClearing && densityFor(card) !== "full" ? card.clearsIn : card.meta
-                }}</span>
+                <!-- Below full density the countdown moves to the SECOND ROW
+                     rather than competing with the id for row 1 (DRY-60). That
+                     row holds the action line, which crowding has already
+                     hidden, so it is empty and full-width exactly when the
+                     countdown needs somewhere to go — and the card keeps its
+                     tile width. Widening the card to fit the clock on row 1
+                     was the first attempt and it traded `display:none` for
+                     something no better: at 176px a ten-card rail needs
+                     2023px of lane and only has 1208, so five cards went off
+                     the right edge (measured, 1500px viewport). -->
+                <span class="meta" :class="{ clearing: card.metaClearing }">{{ card.meta }}</span>
                 <!-- The one control any card ever shows, and only on the two
                      states that persist until acknowledged. -->
                 <button
@@ -731,14 +724,23 @@ function onCardClick(card: Card): void {
 }
 /* …except a countdown, which is a WARNING rather than a stat and is the one
    number that must never be the thing crowding takes away (DRY-60). Placed
-   after the rule above deliberately: same specificity, later wins. In compact
-   the origin badge gives up its place so the row still fits at 176px — this is
-   the only card that shows the clock without it. */
+   after the rule above deliberately: same specificity, later wins. */
 .card.clearing .meta {
   display: block;
 }
-.card.compact.clearing .origin {
-  display: none;
+/* And it takes the action line's row, which these densities have already
+   emptied. Row 1 is the crowded one — the id, the badge and the ✕ are all
+   there — while row 2 is the full width of the card and holds nothing, so the
+   clock keeps the word "clears" even at 112px and never has to be measured
+   against an 8-character ticket key. The card's WIDTH is the thing that must
+   not move: the lane is one non-wrapping scrolling row, so every px added here
+   pushes a card at the other end out of sight. */
+.card.compact.clearing .meta,
+.card.tile.clearing .meta {
+  grid-column: 1 / 6;
+  grid-row: 2;
+  justify-self: start;
+  margin-right: 0;
 }
 /* Keep the clock clear of the ✕, which is absolutely positioned in the same
    top-right corner and only exists on these two states. Overlapping, a click
