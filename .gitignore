@@ -8,6 +8,12 @@ dist/
 .env.*
 !.env.example
 
+# Machine-local npm registry override (DRY-68). Behind a corporate mirror this
+# file is what stops `bun install` inheriting a jfrog registry from ~/.npmrc, so
+# it exists on some hosts and not others — committing one developer's would
+# point everyone else's install at a registry they can't reach.
+.npmrc
+
 # Ad-hoc playwright install for scripts/verify (see its README)
 scripts/verify/node_modules/
 scripts/verify/package*.json
