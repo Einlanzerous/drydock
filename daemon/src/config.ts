@@ -363,6 +363,49 @@ export const CONFIG = {
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean),
+    /**
+     * How long a tracker answer may be reused before it's refreshed (DRY-72).
+     *
+     * The sidebar polls every 20s per browser tab and a corporate Jira pull
+     * measures 5.7-6s, so uncached this was a permanent ~30% duty cycle against
+     * the tracker per tab — enough that the browser's own 12s budget tripped on
+     * ordinary load. See tracker/cache.ts for why this is stale-while-revalidate
+     * rather than a plain TTL; nothing here makes a client wait longer, it only
+     * bounds how old an answer can be.
+     */
+    cache: {
+      /**
+       * The sidebar's ticket list. Matched to the shell's own poll interval so
+       * a single tab sees data no older than it did before, while N tabs (and
+       * back-to-back polls) collapse onto one fan-out.
+       *
+       * Zero switches the cache OFF — a straight passthrough to the provider,
+       * for reproducing a tracker bug the cache would otherwise mask. Hence
+       * `msOrOff`: through `num()` a deliberate 0 would silently restore the
+       * default, and the off switch would do nothing (DRY-60's trap 9).
+       */
+      ticketsMs: msOrOff(process.env.DRYDOCK_TRACKER_CACHE_MS, 20_000),
+      /**
+       * An epic's child counts (DRY-13), which are the unbounded half of a pull
+       * — that query spans every status, so it grows with years of closed work
+       * rather than with what's on screen. Five minutes because a completion
+       * ratio moves over days; the list beside it still refreshes at the rate
+       * above. Zero switches it off, as with the list.
+       */
+      childStatsMs: msOrOff(process.env.DRYDOCK_TRACKER_CHILD_STATS_CACHE_MS, 300_000),
+    },
+    /**
+     * Deadline on a single tracker HTTP request (DRY-72).
+     *
+     * The providers had none, and nothing propagates a client's abort, so when
+     * the shell gave up at 12s the daemon kept walking pages for a browser that
+     * had stopped listening — and 8s later the next poll started a second
+     * fan-out on top of it. Generous rather than tight: since the cache moved
+     * these off the request path, blowing this costs a background refresh, not a
+     * sidebar. A caller with its own tighter budget (the SessionStart brief's
+     * extras) keeps it.
+     */
+    requestTimeoutMs: num(process.env.DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS, 20_000),
     switchyard: {
       url: process.env.DRYDOCK_SWITCHYARD_URL,
       token: process.env.DRYDOCK_SWITCHYARD_TOKEN,

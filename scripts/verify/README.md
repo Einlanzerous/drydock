@@ -17,6 +17,14 @@ Nothing here runs in CI or on install. Three groups:
   [its own section](#the-tracker-sidebar-dry-55), with its own rig. A browser,
   about a minute. Run it when touching the sidebar's empty/outage states or
   `loadTickets` in `App.vue`.
+- **The tracker cache (DRY-72)** —
+  [its own section](#the-tracker-cache-dry-72), with its own rig again (a
+  counting stub tracker, since the claims are about upstream requests that
+  didn't happen). A browser, about a minute. Run it when touching
+  `daemon/src/tracker/cache.ts`, either provider's `attachChildStats`, or the
+  ticket poll's scheduling in `App.vue`. **Run `sidebar.mjs` too** — the two
+  overlap on who reports a tracker outage, and DRY-72 moved that decision from
+  the browser to the daemon.
 - **The tombstone's resume button (DRY-62)** —
   [its own section](#the-tombstones-resume-button-dry-62). A browser and a
   throwaway Postgres, about a minute. Run it when touching
@@ -86,6 +94,64 @@ couldn't ask" from "we asked and there are none".
 Why a second proxy rather than a mode on `proxy-http.mjs`: that one breaks the
 state store, and the two outages are independent conditions — sharing it would
 mean a path parameter on a harness three other scripts depend on.
+
+## The tracker cache (DRY-72)
+
+Also self-contained, and it needs a tracker the daemon can really talk to —
+`stub-tracker.mjs`, a Switchyard-shaped origin that **counts what arrives**.
+That counter is the whole point: every claim here is about requests that didn't
+happen, and `curl /api/tracker/tickets` returns the same 200 with the same body
+whether the daemon answered from memory or spent six seconds re-walking a
+corporate Jira. Which is the state the bug shipped in.
+
+```sh
+npm i playwright --prefix scripts/verify     # ad-hoc; not a repo dependency
+
+node scripts/verify/stub-tracker.mjs &                    # :4386, counting
+(cd daemon && DRYDOCK_PORT=4385 DRYDOCK_HOST=127.0.0.1 \
+   DRYDOCK_TRACKER=switchyard DRYDOCK_SWITCHYARD_URL=http://127.0.0.1:4386 \
+   DRYDOCK_TRACKER_PROJECTS=DRY \
+   DRYDOCK_TRACKER_CACHE_MS=4000 DRYDOCK_TRACKER_CHILD_STATS_CACHE_MS=60000 \
+   DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS=3000 \
+   DRYDOCK_DATABASE_URL= DRYDOCK_STATE_FILE=/tmp/dry72-state.json \
+   DRYDOCK_SESSIONS_DIR=/tmp/dry72-sessions node --import tsx src/index.ts &)
+(cd shell && VITE_DAEMON_URL=http://127.0.0.1:4385 bunx vite --port 5385 --strictPort &)
+
+node scripts/verify/tracker-cache.mjs
+```
+
+| harness | what it holds down |
+|---|---|
+| `tracker-cache.mjs` | Six concurrent pulls cost ONE fan-out upstream, not six. The child-stats query — the unbounded half, since it spans every status — doesn't repeat with each list refresh. A 2500ms tracker doesn't make a 2500ms sidebar, while Refresh still overrules the cache and waits. A dead tracker leaves the daemon serving last-good with `stale` set (200, not 502) while a key it has never fetched still 502s. And the surface section re-proves DRY-55 end-to-end. |
+
+**Turn the TTLs down, and the harness insists on it.** 20s is the right default
+and a terrible test — the same trap DRY-49's timeout and DRY-60's sweep delay
+have — so section (c) measures the TTL it actually observes and fails if it took
+15s or more, rather than passing by waiting.
+
+The rig deliberately does NOT reuse `proxy-tracker.mjs`. That one sits between
+the *browser* and the daemon, so it can break `/api/tracker/tickets` but can
+never see what the daemon does upstream — which is the only place any of these
+claims live. Different position, different question, different file.
+
+Sections (e), (g) and (j) are **guards, not discriminators**: they pass against
+an uncached daemon too, because the contract they check is supposed to hold in
+both worlds. Don't read their green as evidence the cache works.
+
+### Making sure this one still discriminates
+
+The config knob gives you the pre-DRY-72 daemon exactly — restart it with the
+caches off and the deadline out of reach:
+
+```sh
+DRYDOCK_TRACKER_CACHE_MS=0 DRYDOCK_TRACKER_CHILD_STATS_CACHE_MS=0 \
+  DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS=600000   # …rest of the env as above
+```
+
+Expect **15 failures**, and expect the numbers to be the diagnosis: six pulls
+becoming `18 upstream requests`, one pull taking `7509ms against a 2500ms
+tracker`, and the hang case never answering at all (`0 after 30001ms` — the
+probe's own budget, which is why `pull()` carries one).
 
 ## The tombstone's resume button (DRY-62)
 

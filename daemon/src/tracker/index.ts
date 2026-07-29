@@ -24,7 +24,11 @@ export function createTracker(): TrackerProvider {
       );
       return new FixtureProvider();
     }
-    return new SwitchyardProvider({ baseUrl: url, token });
+    return new SwitchyardProvider({
+      baseUrl: url,
+      token,
+      requestTimeoutMs: CONFIG.tracker.requestTimeoutMs,
+    });
   }
 
   if (kind === "jira") {
@@ -42,6 +46,7 @@ export function createTracker(): TrackerProvider {
       // For multi-component tickets: prefer the component this host has an
       // explicit repo path for (DRY-31).
       repoOverrides: Object.keys(CONFIG.repos.overrides),
+      requestTimeoutMs: CONFIG.tracker.requestTimeoutMs,
     });
   }
 

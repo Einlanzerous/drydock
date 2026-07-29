@@ -107,19 +107,32 @@ export interface TicketScope {
 }
 
 /**
- * How often the sidebar re-pulls (DRY-17). Lives here rather than at the
- * `setInterval` because the budget below has to be picked against it — see why.
+ * How often the sidebar re-pulls (DRY-17). Lives here rather than at the poll
+ * because the budget below has to be picked against it — see why.
+ *
+ * Since DRY-72 this is the FLOOR, not the fixed rate: the poll backs off while
+ * the daemon is unreachable. Backoff may only ever lengthen it, which is what
+ * keeps the pairing below intact.
  */
 export const TICKET_POLL_MS = 20_000;
+
+/**
+ * Ceiling on that backoff (DRY-72). Long enough that a daemon down for an hour
+ * isn't polled 180 times, short enough that coming back is noticed without a
+ * reload — the sidebar is a live surface, and a two-minute wait to discover the
+ * tracker is healthy again is at the edge of what reads as "still working".
+ */
+export const TICKET_POLL_MAX_MS = 120_000;
 
 /**
  * Budget for a ticket pull (DRY-55).
  *
  * Load-bearing, not hygiene. A tracker that REFUSES connections fails fast and
  * the daemon 502s; a tracker that accepts and then goes silent — the partition
- * shape CLAUDE.md insists is the realistic one — hangs, and neither provider's
- * `req()` carries a deadline, so the daemon's route never answers. Without a
- * ceiling here that becomes the shell's deadline too: the pull never settles,
+ * shape CLAUDE.md insists is the realistic one — hangs, and when this was
+ * written neither provider's `req()` carried a deadline, so the daemon's route
+ * never answered. Without a ceiling here that becomes the shell's deadline
+ * too: the pull never settles,
  * so it neither resolves nor throws, `loadTickets`'s catch never runs, and the
  * sidebar sits on the "No tickets match." this whole feature exists to remove —
  * with its spinner latched, because `finally` never runs either.
@@ -138,24 +151,56 @@ export const TICKET_POLL_MS = 20_000;
  * child stats runs 1–3s), and a pull that legitimately takes longer degrades
  * softly — the last-good list stays, wearing the stale marker.
  *
- * The asymmetry with the daemon is deliberate: it has no deadline of its own,
- * so this aborts a request it may still be waiting on. That costs a socket, and
- * the alternative is a sidebar that lies.
+ * The asymmetry with the daemon USED to be the sharp edge here: it had no
+ * deadline of its own, so this aborted a request it went on serving, and the
+ * next tick's fan-out piled on top. DRY-72 fixed both ends — the daemon now
+ * caps every tracker request and answers this route from cache — so an ordinary
+ * poll no longer waits on a tracker at all. This still guards the three paths
+ * that do: a cold daemon cache, a forced refresh, and a daemon that isn't
+ * answering.
  */
 const LIST_TIMEOUT_MS = 12_000;
 
-export async function listTickets(open = true, scope: TicketScope = {}): Promise<Ticket[]> {
+/**
+ * What a pull came back with (DRY-72).
+ *
+ * `stale` is the daemon saying "this list is real, but I couldn't refresh it" —
+ * a case that did not exist before the daemon cached anything, because an
+ * outage used to reach the browser as a failed fetch. It doesn't any more: the
+ * daemon answers 200 from its last-good list, so without this field the
+ * sidebar's stale marker and DRY-55's notice would both quietly stop appearing
+ * while looking exactly like everything working.
+ */
+export interface TicketPull {
+  tickets: Ticket[];
+  stale?: { ageMs: number; error: string };
+}
+
+export async function listTickets(
+  open = true,
+  scope: TicketScope = {},
+  /**
+   * Overrule the daemon's cache — the Refresh button and the outage Retry, and
+   * nothing else. A poll must NOT set it: forcing on every tick would put the
+   * uncached fan-out back and undo the whole of DRY-72.
+   */
+  force = false,
+): Promise<TicketPull> {
   const params = new URLSearchParams({ open: String(open) });
   if (scope.projects?.length) params.set("projects", scope.projects.join(","));
   if (scope.backlog) params.set("backlog", "true");
+  if (force) params.set("fresh", "true");
   // 502 here is the everyday case, not just version skew: the daemon answers
   // an unreachable tracker with `{error}`, which used to parse as a ticket list
   // and blank `tickets` into undefined — a crash in the sidebar's map (DRY-51).
-  const body = await getJson<{ tickets?: Ticket[] }>(
+  const body = await getJson<{ tickets?: Ticket[]; stale?: TicketPull["stale"] }>(
     `${DAEMON_HTTP}/api/tracker/tickets?${params}`,
     { signal: AbortSignal.timeout(LIST_TIMEOUT_MS) },
   );
-  return expectList(body.tickets, "tickets");
+  return {
+    tickets: expectList(body.tickets, "tickets"),
+    ...(body.stale ? { stale: body.stale } : {}),
+  };
 }
 
 export async function searchTickets(q: string, projects?: string[]): Promise<Ticket[]> {

@@ -656,6 +656,77 @@ healthy tracker with nothing in scope says. Harness:
    A tracker outage must NOT reach the red banner — that one belongs to the
    session poll, and the daemon is fine.
 
+## The tracker pull is cached and coalesced (DRY-72)
+
+Until this, nothing in the tracker path cached anything: `/api/tracker/tickets`
+went straight at the provider, and the sidebar polls it every 20s **per browser
+tab**. Measured against a corporate Jira (3 projects, ~225 open) one pull runs
+**5.7-6s** — three cursor pages plus a `parent in (…)` child query — so the
+browser's own 12s budget was tripping on ordinary load, and every abort left the
+daemon still walking pages for a client that had stopped listening.
+
+Now the daemon answers from memory and refreshes behind the response
+(`daemon/src/tracker/cache.ts`), child stats sit on a much longer TTL, every
+tracker request carries a deadline, and the shell's poll backs off and skips a
+hidden tab. Knobs: `DRYDOCK_TRACKER_CACHE_MS`,
+`DRYDOCK_TRACKER_CHILD_STATS_CACHE_MS`, `DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS`.
+
+Harness: `scripts/verify/tracker-cache.mjs` + `stub-tracker.mjs`, rig in its
+README — and run `sidebar.mjs` beside it, because this moved who reports an
+outage. The traps:
+
+1. **A plain TTL cannot work here.** The shell polls on a fixed interval, so a
+   TTL shorter than it misses on every poll (one tab gets nothing) and a TTL
+   longer than it just makes the sidebar staler without removing the wait.
+   Stale-while-revalidate sidesteps the choice: the TTL sets how old data may
+   be, not how long anybody waits. Only the first request after a daemon start
+   still blocks.
+2. **`stale` must ride the response, or DRY-55 dies silently.** Every one of
+   that ticket's assertions hangs off the browser's `catch`, and a tracker
+   outage no longer reaches it — the daemon answers 200 from last-good. Without
+   the field the stale marker and the notice both stop appearing while every
+   poll looks healthy. It is set only when a refresh FAILED, never merely
+   because an entry aged out: an entry is stale by design for the fraction of a
+   second between a poll noticing and the refresh landing, and a notice that
+   flickers every 20s is worse than none.
+3. **Refresh has to force past the cache** (`?fresh=true`), or the one button
+   somebody presses when they've stopped trusting the screen is a no-op that
+   still spins. A forced pull WAITS; a poll never forces, or the cache buys
+   nothing. A forced refresh that fails still answers from last-good rather than
+   throwing away a working list.
+4. **Never cache a failure, and a cold key must still 502.** Serving last-good
+   is right; inventing one is not. That's DRY-55's empty case one layer down.
+5. **The child-stats query is the unbounded half.** It spans every status, so it
+   grows with years of closed work rather than with what's on screen, and on an
+   ordinary corporate Jira it can reach the 2000 cap (twenty sequential pages)
+   only to be **abandoned** — maximum cost, zero value, every 20s, and until now
+   silent. Both providers log it once per onset. The cache is shared rather than
+   per-provider because the two ask differently (Jira: one query for every epic,
+   so all-or-nothing; Switchyard: one per epic, so per-epic).
+6. **The TTLs go through `msOrOff`, not `num()`** — DRY-60's trap 9. Zero means
+   "no cache" for reproducing a tracker bug the cache would mask, and through
+   `num()` a deliberate 0 silently restores the default.
+7. **A caller's own deadline wins.** The brief's `extrasDeadline` is 6s and
+   tighter for a reason; the new one is a backstop, not an override.
+8. **Backoff may only ever LENGTHEN the poll interval**, or it breaks the
+   `LIST_TIMEOUT_MS < TICKET_POLL_MS` pairing — which is load-bearing and fails
+   invisibly (see the comment on the budget).
+9. **A hidden tab must stop polling**, and not to save the browser a fetch —
+   since the cache that fetch is a memory read. It's that a poll keeps the
+   daemon's entry live, so a tab left open overnight is a background refresh
+   against a corporate Jira every 20 seconds until morning.
+10. **`proxy-tracker.mjs` structurally cannot test any of this.** It sits between
+   the browser and the daemon, so it never sees what the daemon does upstream —
+   which is where every claim here lives. Hence a counting origin instead. And
+   assert on request COUNTS and timings, never on the route's body: a 200 with
+   the right tickets is exactly what the bug returned.
+11. **Turn the TTLs down** — 20s is the right default and a terrible test, same
+   as DRY-49's timeout and DRY-60's sweep delay. The harness measures the TTL it
+   observes and refuses a run over 15s rather than passing by waiting. But note
+   the child-stats TTL deliberately outlives a run, so its assertion is "at most
+   one query", not "exactly one" — pinning it exact makes the file pass only on
+   the first run after a daemon start.
+
 ## Verifying a tracker provider (Switchyard / Jira)
 
 The tracker is host config; the browser only ever sees `/api/tracker/*`.
