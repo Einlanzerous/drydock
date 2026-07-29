@@ -108,20 +108,37 @@ const scrollbackPath = path.join(dir, `${meta.id}${SUFFIX.scrollback}`);
  * also how the CLI takes host config a spawned agent legitimately needs
  * (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`, …). `ANTHROPIC_*`
  * and `CLAUDE_CONFIG_DIR` are host config for the same reason and stay.
- * Measured against Claude Code v2.1.220: the first five are what the CLI itself
- * injects into a child process, and the rest are what its own scrub-before-
- * spawning-a-clean-claude helper deletes.
+ *
+ * Read off v2.1.220, and grouped below by WHERE, because "what was set in the
+ * shell I happened to test from" is not a method that can find these: an
+ * interactive terminal cannot contain the variables only an IDE terminal sets,
+ * so an env-dump census comes up short by exactly the cases it can't observe.
+ * Re-derive from the binary, not from `env`, if a CLI upgrade moves things.
  */
 const INHERITED_SESSION_MARKERS = [
+  // What the CLI injects into every child process it spawns.
   "CLAUDECODE",
   "CLAUDE_CODE_SESSION_ID",
   "CLAUDE_CODE_CHILD_SESSION",
   "CLAUDE_PID",
   "CLAUDE_EFFORT",
   "AI_AGENT",
+  // What its own "build a clean env and spawn a fresh claude" helper deletes.
   "CLAUDE_CODE_BRIDGE_SESSION_ID",
+  "CLAUDE_BG_AUTH_SNAPSHOT_PATH",
+  // Set by the launching session, and per-session by nature.
   "CLAUDE_CODE_ENTRYPOINT",
   "CLAUDE_CODE_EXECPATH",
+  // The IDE extension's port for its MCP/SSE server, exported into the
+  // integrated terminal. Inherited, it is an address: `autoConnectIde` turns on
+  // when it is merely SET, so every agent a daemon launched from an IDE
+  // terminal spawns would dial back to the launcher's editor. Not observable
+  // from a plain shell, which is why it was missed on the first pass.
+  "CLAUDE_CODE_SSE_PORT",
+  // NB not `ENABLE_IDE_INTEGRATION`, though the extension exports it too: the
+  // string does not occur anywhere in the v2.1.220 binary, so a spawned claude
+  // cannot act on it. Stripping it would be decoration in a list whose whole
+  // claim is that every entry was checked against the CLI that reads it.
 ];
 
 /**
@@ -135,16 +152,19 @@ const INHERITED_SESSION_MARKERS = [
  * process.env and has no way to remove one.
  */
 function ptyEnv(): Record<string, string> {
-  // `?? {}` earns its keep: `in` throws on undefined where the spread below
-  // would shrug, and this runs before the PTY exists — a throw here is a
-  // session that never starts, in the process with nothing underneath it.
-  const added = meta.env ?? {};
+  // The typeof check, not `?? {}`. Nothing validates this field: the daemon's
+  // own reader checks `protocol` and `id` and passes the rest through
+  // (sessions-dir.ts), and the parse above only checks `protocol` — so a
+  // hand-edited or half-written `"env": ""` reaches here. Spreading a string is
+  // harmless (`{..."" }` is `{}`), which is why the old one-liner could not
+  // fail, but `in` throws on any non-object. This runs at module top level,
+  // before the socket binds and before the uncaughtException handler at the
+  // bottom of this file exists, so that throw is a session that never starts.
+  const added: Record<string, string> =
+    meta.env && typeof meta.env === "object" ? meta.env : {};
   const env = { ...(process.env as Record<string, string>), ...added };
   const stripped: string[] = [];
   for (const key of INHERITED_SESSION_MARKERS) {
-    // Only ever the inherited value: a marker the daemon set deliberately in
-    // meta.env is an instruction, not a leak.
-    if (key in added) continue;
     if (!(key in env)) continue;
     delete env[key];
     stripped.push(key);
