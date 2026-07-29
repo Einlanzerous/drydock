@@ -16,6 +16,7 @@ import { clearNotice, noticeList, setNotice } from "./composables/notices.js";
 import { useWindowManager, type LayoutMode, type Win } from "./composables/useWindowManager.js";
 import {
   DAEMON_HTTP,
+  canResumeConversation,
   createSession,
   fetchConfig,
   fetchSessionHistory,
@@ -406,18 +407,17 @@ async function doRefreshHistory(): Promise<void> {
 /**
  * Put a working session back where a dead one was.
  *
- * `--resume` only when the CLI's own session id was captured; otherwise this is
- * an honest fresh start in the same worktree, and the card says so rather than
- * offering a "Resume" that silently discards the conversation.
+ * `--resume` only when the CLI's own session id was captured AND its transcript
+ * is still on disk; otherwise this is an honest fresh start in the same
+ * worktree, and the card says so rather than offering a "Resume" that silently
+ * discards the conversation. One predicate, shared with the card, so its label
+ * and its behaviour cannot drift apart (DRY-62).
  */
 async function resumeSession(record: SessionRecord) {
   if (resuming.value) return;
   resuming.value = record.id;
   try {
-    const resumeArgs =
-      record.command === "claude" && record.agentSessionId
-        ? ["--resume", record.agentSessionId]
-        : [];
+    const resumeArgs = canResumeConversation(record) ? ["--resume", record.agentSessionId!] : [];
     const session = await createSession({
       command: record.command,
       // Strip any PREVIOUS --resume and the id that follows it. Filtering the

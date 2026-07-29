@@ -21,6 +21,7 @@ import { ticketContext } from "./tracker/context.js";
 import { createStore } from "./state/index.js";
 import { runEndHandler } from "./runs.js";
 import { SessionHistoryRecorder } from "./history.js";
+import { knownTranscripts } from "./transcripts.js";
 
 const manager = new SessionManager();
 const tracker = createTracker();
@@ -280,7 +281,24 @@ const server = http.createServer(async (req, res) => {
       const asked = Number(url.searchParams.get("limit"));
       const limit = Number.isFinite(asked) && asked > 0 ? Math.min(asked, 200) : 50;
       try {
-        return send(res, 200, { sessions: (await history.recent(limit)) ?? [] });
+        const records = (await history.recent(limit)) ?? [];
+        // Say which of these can actually be resumed (DRY-62). Recording an
+        // `agentSessionId` only means a hook reported one — a session spawned
+        // before DRY-59 has one AND no transcript, so the tombstone would offer
+        // a Resume that lands on the CLI's own "no conversation found". Marked
+        // here rather than stored, because it is a fact about the filesystem
+        // now and not about the run then: a transcript can be pruned, and the
+        // record would go on claiming otherwise.
+        const transcripts = knownTranscripts();
+        return send(res, 200, {
+          sessions: transcripts
+            ? records.map((r) =>
+                r.agentSessionId && !transcripts.has(r.agentSessionId)
+                  ? { ...r, transcriptMissing: true }
+                  : r,
+              )
+            : records,
+        });
       } catch (err) {
         // Same rule as /api/workspace: a store that can't answer degrades, it
         // never escalates. The desk still restores, it just can't draw

@@ -79,6 +79,20 @@ export interface SessionRecord {
   title?: string;
   /** `claude --resume <id>` — the CLI's own id, null until a hook reports it. */
   agentSessionId?: string;
+  /**
+   * There is an `agentSessionId` but no transcript behind it (DRY-62).
+   *
+   * NOT persisted — set by `/api/sessions/history` from a look at the disk. The
+   * id alone was never a promise of a resumable conversation: a hook reports it
+   * whether or not the CLI is writing anything, so every session a pre-DRY-59
+   * daemon spawned recorded one against a transcript that does not exist.
+   *
+   * Three-valued on purpose. Absent means "not checked" — a daemon that cannot
+   * read the transcript directory says nothing rather than reporting every
+   * conversation gone, so the gate that reads this must treat undefined as
+   * resumable.
+   */
+  transcriptMissing?: boolean;
   createdAt: number;
   lastActiveAt?: number;
   endedAt?: number;

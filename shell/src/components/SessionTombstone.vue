@@ -14,7 +14,7 @@
 // transcript. (An unattended run's transcript survives as its handoff document,
 // which is DRY-49's job and a different artefact.)
 import { computed } from "vue";
-import type { SessionRecord } from "../lib/daemon.js";
+import { canResumeConversation as resumable, type SessionRecord } from "../lib/daemon.js";
 
 const props = defineProps<{ record: SessionRecord; busy?: boolean }>();
 const emit = defineEmits<{
@@ -52,16 +52,31 @@ const when = computed(() => {
 });
 
 /**
- * Resuming an agent's own conversation needs the CLI's session id, which is
- * only there if a hook reported one. Without it the button still works — it
- * just starts the agent fresh in the same place — and says so, because a
- * "Resume" that quietly discards the conversation is worse than a "Start again"
- * that doesn't pretend.
+ * Resuming an agent's own conversation needs the CLI's session id AND the
+ * transcript it points at. Without either the button still works — it just
+ * starts the agent fresh in the same place — and says so, because a "Resume"
+ * that quietly discards the conversation is worse than a "Start again" that
+ * doesn't pretend.
  */
-const canResumeConversation = computed(
-  () => props.record.command === "claude" && Boolean(props.record.agentSessionId),
-);
+const canResumeConversation = computed(() => resumable(props.record));
 const actionLabel = computed(() => (canResumeConversation.value ? "Resume" : "Start again"));
+
+/**
+ * Why this one can't be resumed, in the card's own terms.
+ *
+ * The two cases are worth separating: no id at all is ordinary (a shell, a
+ * session whose hook never fired), while an id whose transcript is gone means
+ * the conversation was never written down — the DRY-59 leak for old sessions,
+ * or a pruned transcript for any of them. Saying "no agent session id was
+ * recorded" for the second would be a small lie, and the one that sends
+ * somebody looking in the wrong place.
+ */
+const freshStartReason = computed(() => {
+  if (canResumeConversation.value || props.record.command !== "claude") return "";
+  return props.record.transcriptMissing
+    ? "Its transcript is no longer on disk, so this starts a fresh conversation in the same worktree."
+    : "No agent session id was recorded, so this starts a fresh conversation in the same worktree.";
+});
 </script>
 
 <template>
@@ -87,9 +102,7 @@ const actionLabel = computed(() => (canResumeConversation.value ? "Resume" : "St
       </button>
       <button class="ghost" :disabled="busy" @click="emit('dismiss', record.id)">Dismiss</button>
     </div>
-    <p v-if="!canResumeConversation && record.command === 'claude'" class="note">
-      No agent session id was recorded, so this starts a fresh conversation in the same worktree.
-    </p>
+    <p v-if="freshStartReason" class="note">{{ freshStartReason }}</p>
   </div>
 </template>
 

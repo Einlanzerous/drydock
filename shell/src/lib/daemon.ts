@@ -114,11 +114,29 @@ export interface SessionRecord {
   title?: string;
   /** `claude --resume <id>`. Absent when the CLI never reported one. */
   agentSessionId?: string;
+  /** The id is recorded but its transcript isn't on disk (DRY-62). */
+  transcriptMissing?: boolean;
   createdAt: number;
   lastActiveAt?: number;
   endedAt?: number;
   exitCode?: number;
   endReason?: "finished" | "failed" | "stopped" | "unknown";
+}
+
+/**
+ * Can this tombstone's button actually reopen the agent's conversation?
+ *
+ * Lives here because TWO places ask — the card, to choose its label, and the
+ * spawn, to choose its args — and DRY-62 was the two of them agreeing on a
+ * condition that had stopped being sufficient. One of them drifting from the
+ * other is a button whose label and behaviour disagree.
+ *
+ * `transcriptMissing` is undefined when the daemon could not look, and that
+ * case must stay resumable: refusing on "don't know" would take the button away
+ * from every conversation on a host whose transcript directory is unreadable.
+ */
+export function canResumeConversation(record: SessionRecord): boolean {
+  return record.command === "claude" && Boolean(record.agentSessionId) && !record.transcriptMissing;
 }
 
 /**
