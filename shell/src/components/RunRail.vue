@@ -182,6 +182,16 @@ interface Card {
   clearsIn: string | null;
   /** How much of that countdown is left, 0..1 — the hairline drains on it. */
   clearsFraction: number | null;
+  /**
+   * The one numeric column's text, and whether it is currently the countdown.
+   *
+   * Resolved once here rather than as a ternary in the template beside a
+   * separate `:class` test, because the two disagreed: the class was bound to
+   * "has a deadline" while the text preferred `held`, so a card could be styled
+   * as counting down while displaying something else.
+   */
+  meta: string;
+  metaClearing: boolean;
 }
 
 /**
@@ -208,6 +218,11 @@ const cards = computed<Card[]>(() =>
     // is the sort of thing that gets screenshotted.
     const due = props.sweepAt[session.id];
     const left = due !== undefined ? Math.max(0, due - now.value) : null;
+    const held = gate ? clockMs(heldMs(gate, now.value)) : null;
+    // Held time first — a gate is the one thing that outranks everything, and
+    // it is the only case where both numbers could exist at once.
+    const clearsIn = left === null ? null : clockMs(left);
+    const metaClearing = !held && clearsIn !== null;
     return {
       session,
       state,
@@ -215,12 +230,14 @@ const cards = computed<Card[]>(() =>
       label: session.ticket || session.title,
       repo: repoOf(session),
       elapsed: clockMs(now.value - session.createdAt),
-      held: gate ? clockMs(heldMs(gate, now.value)) : null,
+      held,
       detail: detailFor(session, state, gate),
       watched: props.watchedIds.includes(session.id),
-      clearsIn: left === null ? null : clockMs(left),
+      clearsIn,
       clearsFraction:
         left === null || props.sweepAfterMs <= 0 ? null : Math.min(1, left / props.sweepAfterMs),
+      meta: held ? `held ${held}` : metaClearing ? `clears ${clearsIn}` : clockMs(now.value - session.createdAt),
+      metaClearing,
     };
   }),
 );
@@ -310,7 +327,15 @@ const tier = computed<"full" | "compact" | "tile">(() =>
 );
 
 function densityFor(card: Card): "full" | "compact" | "tile" {
-  return card.loud ? "full" : tier.value;
+  if (card.loud) return "full";
+  // A card counting down to its own removal never drops to `tile` (DRY-60).
+  // Tile is 112px and carries a glyph and an id and nothing else, so at nine
+  // runs the countdown was `display:none` — which is precisely the crowded
+  // rail this feature exists for, and it meant windows and cards disappearing
+  // with the warning never once having rendered. Compact has room; the origin
+  // badge gives up its place for it (see the stylesheet).
+  if (card.clearsIn) return tier.value === "tile" ? "compact" : tier.value;
+  return tier.value;
 }
 
 // --- the chooser ------------------------------------------------------------
@@ -396,7 +421,11 @@ function onCardClick(card: Card): void {
                 v-for="card in seg.items"
                 :key="card.session.id"
                 class="card"
-                :class="[card.state, densityFor(card), { watched: card.watched }]"
+                :class="[
+                  card.state,
+                  densityFor(card),
+                  { watched: card.watched, clearing: card.metaClearing },
+                ]"
                 :title="cardTitle(card)"
                 @click="onCardClick(card)"
               >
@@ -407,12 +436,16 @@ function onCardClick(card: Card): void {
                      joining it: a finished run's runtime stops being the
                      interesting number the moment the card is on its way out,
                      and the column is one card-width wide (DRY-60). -->
-                <span class="meta" :class="{ clearing: card.clearsIn }">{{
-                  card.held
-                    ? `held ${card.held}`
-                    : card.clearsIn
-                      ? `clears ${card.clearsIn}`
-                      : card.elapsed
+                <!-- The word goes when the card narrows (DRY-60). Measured: at
+                     176px, "clears 0:42" beside an 8-character ticket key
+                     overlaps it by 6px — and the countdown losing its last
+                     digit to the key is the one failure this column must not
+                     have. Dropping to the bare clock is unambiguous here
+                     because compact hides the ELAPSED clock outright, so a
+                     number on a narrow card can only be a countdown; the
+                     dimmed colour and the draining hairline say the rest. -->
+                <span class="meta" :class="{ clearing: card.metaClearing }">{{
+                  card.metaClearing && densityFor(card) !== "full" ? card.clearsIn : card.meta
                 }}</span>
                 <!-- The one control any card ever shows, and only on the two
                      states that persist until acknowledged. -->
@@ -694,6 +727,17 @@ function onCardClick(card: Card): void {
 .card.tile .origin,
 .card.tile .meta,
 .card.compact .meta {
+  display: none;
+}
+/* …except a countdown, which is a WARNING rather than a stat and is the one
+   number that must never be the thing crowding takes away (DRY-60). Placed
+   after the rule above deliberately: same specificity, later wins. In compact
+   the origin badge gives up its place so the row still fits at 176px — this is
+   the only card that shows the clock without it. */
+.card.clearing .meta {
+  display: block;
+}
+.card.compact.clearing .origin {
   display: none;
 }
 /* Keep the clock clear of the ✕, which is absolutely positioned in the same

@@ -238,21 +238,63 @@ function claimedShellIds(): Set<string> {
   return s;
 }
 
+/**
+ * The window the USER last put focus in — which is not `wm.focusedId` (DRY-60).
+ *
+ * That ref is also assigned synthetically: `remove()` hands focus to the first
+ * non-minimized window in array order when the focused one goes, `add()` claims
+ * it for every window reconcile cascades in, and `minimize()` leaves it pointing
+ * at a window that is now in the dock. Any of those is enough to make the
+ * sweep's focus exemption land on a finished window nobody has ever clicked —
+ * which exempts it permanently, so the desk quietly keeps one dead window
+ * forever and the pile this ticket is about starts growing again.
+ *
+ * So the exemption reads intent instead: set only where somebody acted, cleared
+ * when the window is minimized or forgotten. Restoring a saved desk does NOT
+ * set it — on a reload you haven't touched anything yet, and the countdown
+ * showing is the honest answer.
+ */
+const userFocusedId = ref<string | null>(null);
+
+/** Raise a window because somebody clicked it. */
+function focusWindow(id: string): void {
+  userFocusedId.value = id;
+  wm.bringFront(id);
+}
+
+/** Bring one back from the dock, likewise on purpose. */
+function restoreWindow(id: string): void {
+  userFocusedId.value = id;
+  wm.restore(id);
+}
+
 // Everything this desk remembers about a window, forgotten in one place. No
 // kill: the PTY side is the caller's business (some callers have already killed
 // it, some have nothing to kill), and every one of them used to reclaim a
 // different subset of these maps.
 //
 // `tombstones` is merged rather than replaced on each fetch, so this is where
-// its entries are reclaimed; the rest keep a dead id out of the ticket badges
-// and the pre-filled-prompt seed.
+// its entries are reclaimed. `live` is here too: it is fed by a mounted pane's
+// WebSocket and nothing else ever removes an entry, so on a desk that spawns
+// and clears all day it is the one map that only grows — and a workspace's
+// co-located shell has an entry under an id no window is keyed by, which is why
+// the window has to be read before it is spliced out.
+//
+// `finishedSeenAt` is deliberately NOT reclaimed here. It is keyed by SESSION,
+// not by window — an autonomous run has a stamp and no window at all — and the
+// sweep prunes it against the session list each tick. Clearing it here would
+// restart the countdown on a run whose window you merely closed.
 function forgetWindow(id: string) {
+  const w = wm.windows.find((x) => x.id === id);
+  if (w?.kind === "workspace" && w.shellId) delete live[w.shellId];
   wm.remove(id);
   delete tombstones[id];
   awaitingHistory.delete(id);
   delete initialInputById[id];
   delete ticketById[id];
-  delete finishedSeenAt[id];
+  delete live[id];
+  // A window nobody can see is not a window somebody is in (DRY-60).
+  if (userFocusedId.value === id) userFocusedId.value = null;
 }
 
 // Drop a window from the desk. For a workspace, its co-located shell PTY has no
@@ -261,6 +303,41 @@ function dropWindow(id: string) {
   const w = wm.windows.find((x) => x.id === id);
   if (w?.kind === "workspace" && w.shellId) killSession(w.shellId).catch(() => {});
   forgetWindow(id);
+}
+
+/**
+ * End a window's session(s) and take the window off the desk.
+ *
+ * The one path for it, shared by the ✕, the rail's dismiss and the sweep. They
+ * had three near-identical copies of this block, differing only in their error
+ * copy — and, after DRY-60, in whether they took the `clearing` guard, which
+ * meant the ✕ kept a race the sweep had just been taught to avoid.
+ *
+ * Returns the failures, empty when it worked, or `null` when another caller is
+ * already ending this window (which is not success, and must not be reported as
+ * one). Both PTYs are killed independently and the window only goes once both
+ * are actually dead: killing is what the ✕ promises, so if it didn't happen the
+ * window is the only handle left on a live PTY and keeping it is the lesser
+ * failure (DRY-51 review).
+ */
+async function endWindow(id: string): Promise<string[] | null> {
+  if (clearing.has(id)) return null;
+  clearing.add(id);
+  try {
+    const w = wm.windows.find((x) => x.id === id);
+    const shellId = w?.kind === "workspace" ? w.shellId : undefined;
+    const outcomes = await Promise.allSettled([
+      killSession(id),
+      ...(shellId ? [killSession(shellId)] : []),
+    ]);
+    const failed = outcomes
+      .filter((o) => o.status === "rejected")
+      .map((o) => String((o as PromiseRejectedResult).reason));
+    if (!failed.length) forgetWindow(id);
+    return failed;
+  } finally {
+    clearing.delete(id);
+  }
 }
 
 // --- clearing finished sessions (DRY-60) ------------------------------------
@@ -288,9 +365,14 @@ const finishedSeenAt = reactive<Record<string, number>>({});
 const clearing = new Set<string>();
 
 /**
- * May this session be cleared at all — by the button, by the sweep, by anything?
+ * What may be cleared at all — by the button, by the sweep, by anything.
  *
- * Three exemptions, and each one is a thing that would otherwise be destroyed:
+ * Takes the whole list rather than one session because both exemptions need an
+ * index of the desk, and building `claimedShellIds()` plus a `windows.find()`
+ * per session made this quadratic in a function the 3s poll and a computed both
+ * call. One pass, two maps.
+ *
+ * The exemptions, each a thing that would otherwise be destroyed:
  *
  *  - a FAILURE. The ticket's one hard constraint: clearing must never be how you
  *    lose a failed run. `isFinished` carries this, so it holds for the button
@@ -300,62 +382,54 @@ const clearing = new Set<string>();
  *  - a workspace whose agent exited while that zsh is still alive. Clearing the
  *    window kills both, and the shell is where somebody's half-finished command
  *    line lives. Half a workspace is not a finished session.
+ *
+ * The window is handed back alongside because the SWEEP needs it for two
+ * further exemptions the button deliberately doesn't take (see sweepFinished).
  */
-function mayClear(s: SessionInfo): boolean {
-  if (!isFinished(s)) return false;
-  if (claimedShellIds().has(s.id)) return false;
-  const w = wm.windows.find((x) => x.id === s.id);
-  if (w?.kind === "workspace" && w.shellId) {
-    const shell = sessionsById[w.shellId];
-    if (shell && shell.status !== "exited") return false;
+function clearable(list: SessionInfo[]): { session: SessionInfo; win?: Win }[] {
+  const claimed = claimedShellIds();
+  const byId = new Map(wm.windows.map((w) => [w.id, w]));
+  const out: { session: SessionInfo; win?: Win }[] = [];
+  for (const session of list) {
+    if (!isFinished(session) || claimed.has(session.id)) continue;
+    const win = byId.get(session.id);
+    if (win?.kind === "workspace" && win.shellId) {
+      const shell = sessionsById[win.shellId];
+      if (shell && shell.status !== "exited") continue;
+    }
+    out.push({ session, win });
   }
-  return true;
+  return out;
 }
 
 /** What "Clear finished" would take right now. Also the button's count. */
-const clearableIds = computed(() => sessionList.value.filter(mayClear).map((s) => s.id));
+const clearableIds = computed(() => clearable(sessionList.value).map((c) => c.session.id));
 
 /**
  * Kill a finished session and take its window with it.
  *
- * The kills are awaited and checked, like closeWindow's and for the same reason:
- * if the daemon didn't actually drop the session, the window is the only handle
- * left on it, so removing it would leave a PTY nothing on the desk can reach.
- * A failure also re-stamps the clock, or an auto-clear that can't succeed
- * retries every 3s and rewrites the banner each time.
+ * A failure re-stamps the clock as well as reporting itself: without that, an
+ * auto-clear that cannot succeed retries on every 3s poll and rewrites the
+ * banner each time.
  */
 async function clearSession(id: string): Promise<boolean> {
-  if (clearing.has(id)) return false;
-  clearing.add(id);
-  try {
-    const w = wm.windows.find((x) => x.id === id);
-    const shellId = w?.kind === "workspace" ? w.shellId : undefined;
-    const outcomes = await Promise.allSettled([
-      killSession(id),
-      ...(shellId ? [killSession(shellId)] : []),
-    ]);
-    const failed = outcomes.filter((o) => o.status === "rejected");
-    if (failed.length) {
-      finishedSeenAt[id] = Date.now();
-      actionError.value = `Couldn't clear a finished session — it may still be listed: ${failed
-        .map((f) => String((f as PromiseRejectedResult).reason))
-        .join("; ")}`;
-      return false;
-    }
-    forgetWindow(id);
-    return true;
-  } finally {
-    clearing.delete(id);
+  const failed = await endWindow(id);
+  if (failed === null) return false; // already going; not ours to report on
+  if (failed.length) {
+    finishedSeenAt[id] = Date.now();
+    actionError.value = `Couldn't clear a finished session — it may still be listed: ${failed.join("; ")}`;
+    return false;
   }
+  return true;
 }
 
 /**
  * "Clear finished" — every ending at once, which is the escape hatch the sweep's
  * policy needs for when it guesses wrong (either way: too slow, or turned off).
  *
- * Deliberately ignores the clock and the focus rule that hold the sweep back.
- * Those exist to stop the desk throwing something away on its own; this is
- * somebody saying to.
+ * Deliberately ignores every restraint the sweep works under — the clock, the
+ * focused window, the docked ones. Those exist to stop the desk throwing
+ * something away on its own; this is somebody saying to.
  */
 async function clearFinished(): Promise<void> {
   const ids = clearableIds.value;
@@ -375,26 +449,34 @@ async function clearFinished(): Promise<void> {
 function sweepFinished(list: SessionInfo[]): void {
   const at = Date.now();
   const visible = document.visibilityState === "visible";
-  const clearable = new Set<string>();
-  for (const s of list) {
-    if (!mayClear(s)) continue;
-    clearable.add(s.id);
-    if (!visible) continue;
-    // The focused window is being read, so it has no clock at all — not a
-    // restarting one. Two things fall out of that and both are the point: it
-    // cannot expire under the cursor, and it shows no countdown, where a
-    // perpetually-restarting one would sit there promising to close for as long
-    // as you kept looking at it. Clicking away stamps it fresh on the next poll.
-    if (wm.focusedId.value === s.id) delete finishedSeenAt[s.id];
-    else finishedSeenAt[s.id] ??= at;
+  const candidates = clearable(list);
+  const stamped = new Set<string>();
+  for (const { session, win } of candidates) {
+    // Two exemptions the BUTTON doesn't take, because both mark a window
+    // somebody placed deliberately — and only the automatic path is at risk of
+    // taking one out from under them:
+    //
+    //  - the window they are in. It gets no clock at all, not a restarting one:
+    //    the latter also survives the sweep, but renders a window sitting there
+    //    promising to close for as long as you keep looking at it. Clicking
+    //    away stamps it fresh on the next poll, so it still counts down in full.
+    //  - a DOCKED window. The rail's contract for that lane is "you put them
+    //    here and you're coming back; they never change unless you touch them",
+    //    and a dock item has nowhere to render a countdown — so sweeping one is
+    //    the only removal on this desk that could happen with no warning
+    //    anywhere. `Clear finished` still takes them, and still counts them.
+    if (userFocusedId.value === session.id || win?.minimized) continue;
+    stamped.add(session.id);
+    if (visible) finishedSeenAt[session.id] ??= at;
   }
   // A stamp outlives its session by one poll at most: the id is gone from the
   // list once the kill lands, and a stale entry would be a countdown on a card
-  // that no longer exists.
-  for (const id of Object.keys(finishedSeenAt)) if (!clearable.has(id)) delete finishedSeenAt[id];
+  // that no longer exists. Keyed off what may be SWEPT, so focusing or docking
+  // a window drops its countdown rather than freezing it mid-number.
+  for (const id of Object.keys(finishedSeenAt)) if (!stamped.has(id)) delete finishedSeenAt[id];
 
   if (!visible || !clearFinishedAfterMs.value) return;
-  for (const id of clearable) {
+  for (const id of stamped) {
     const seen = finishedSeenAt[id];
     if (seen === undefined || at - seen < clearFinishedAfterMs.value) continue;
     // Announced only once the clear ACTUALLY happened. Raising it first would
@@ -466,6 +548,13 @@ function reconcile(list: SessionInfo[]) {
     // deliberately (openRun); reconcile then leaves it alone, because a window
     // for it already exists.
     if (s.autonomous && !wm.windows.find((w) => w.id === s.id)) continue;
+    // Being cleared right now (DRY-60). This list may predate the kill — it is
+    // fetched at the top of refresh() and a clear can land while it is in
+    // flight — and re-adding here would put the window back at a CASCADE
+    // position and steal focus (wm.add sets focusedId), for a session that is
+    // already gone. The next poll would then drop it again: a window that
+    // flickers back onto the desk on its way out.
+    if (clearing.has(s.id)) continue;
     if (!wm.windows.find((w) => w.id === s.id)) {
       wm.add({
         id: s.id,
@@ -676,7 +765,7 @@ async function resumeSession(record: SessionRecord) {
     if (record.ticket) ticketById[session.id] = record.ticket;
     delete tombstones[record.id];
     sessionsById[session.id] = session;
-    wm.bringFront(session.id);
+    focusWindow(session.id);
   } catch (e) {
     actionError.value = `Could not resume: ${String(e)}`;
   } finally {
@@ -773,6 +862,9 @@ function onIdle(id: string, idle: boolean) {
 // still lights its dock dot (driven by the 3s pendingPermissions poll).
 function minimizeWindow(id: string) {
   wm.minimize(id);
+  // `wm.minimize` deliberately leaves `wm.focusedId` alone; this ref tracks
+  // where somebody IS, and they just put this one away (DRY-60).
+  if (userFocusedId.value === id) userFocusedId.value = null;
   // The unmounted pane's WS can no longer update these overrides, and the `??`
   // in winStatus would let them shadow the daemon poll. Clear both so the 3s
   // poll (pendingPermissions / idle) drives the dock dot while docked.
@@ -795,7 +887,7 @@ async function spawnFresh(kind: "claude" | "shell") {
   try {
     const s = await createSession({ command: kind, title: kind === "claude" ? "claude-code" : "shell" });
     await refresh();
-    wm.bringFront(s.id);
+    focusWindow(s.id);
   } catch (e) {
     actionError.value = String(e);
   }
@@ -857,7 +949,7 @@ async function spawnWorkspace(
       h: 620,
     });
     await refresh();
-    wm.bringFront(agent.id);
+    focusWindow(agent.id);
   } catch (e) {
     actionError.value = String(e);
   }
@@ -961,33 +1053,25 @@ async function closeWindow(id: string) {
   // killing the session here would make looking at a run the way you destroy
   // it. Take over first if you want the X to mean what it usually means.
   if (sessionsById[id]?.autonomous) {
-    wm.remove(id);
+    forgetWindow(id);
     return;
   }
-  // A workspace also owns a co-located shell PTY with no window of its own —
-  // kill it alongside the agent so closing the window leaves nothing running.
-  const w = wm.windows.find((x) => x.id === id);
-  const shellId = w?.kind === "workspace" ? w.shellId : undefined;
-  // Both PTYs are killed independently, and the window only goes once both are
+  // A workspace also owns a co-located shell PTY with no window of its own, so
+  // both are killed — independently, and the window only goes once both are
   // actually dead. Sequential awaits meant a failed agent kill skipped the
   // shell entirely; removing the window regardless then left a live PTY with no
   // window, no dock entry and no way back to it — an orphan you can only find
   // from the API (DRY-51 review). Killing is what the X promises, so if it
   // didn't happen the window is the only handle you have left: keep it.
-  const outcomes = await Promise.allSettled([
-    killSession(id),
-    ...(shellId ? [killSession(shellId)] : []),
-  ]);
-  const failed = outcomes.filter((o) => o.status === "rejected");
-  if (failed.length) {
-    actionError.value = `Couldn't stop that session — it may still be running: ${failed
-      .map((f) => String((f as PromiseRejectedResult).reason))
-      .join("; ")}`;
-    return;
+  //
+  // Via endWindow since DRY-60, which is also where the `clearing` guard lives:
+  // there is a poll between the kill landing and the window going, and this path
+  // has always had it — long enough for reconcile to answer a deliberate close
+  // with a DRY-56 tombstone, or with the file tier's lost-session notice.
+  const failed = await endWindow(id);
+  if (failed?.length) {
+    actionError.value = `Couldn't stop that session — it may still be running: ${failed.join("; ")}`;
   }
-  wm.remove(id);
-  delete initialInputById[id];
-  delete ticketById[id];
 }
 
 // --- visible windows + computed rects ---
@@ -1005,7 +1089,7 @@ const sessionList = computed(() => Object.values(sessionsById));
 // would find nothing and the button would silently do nothing.
 function openSessionWindow(sessionId: string): void {
   const w = wm.windows.find((x) => x.id === sessionId || x.shellId === sessionId);
-  if (w) wm.restore(w.id);
+  if (w) restoreWindow(w.id);
 }
 
 // --- the rail (DRY-49) ------------------------------------------------------
@@ -1048,7 +1132,7 @@ function watchRun(sessionId: string): void {
     ticket: s.ticket,
     repo: basename(s.cwd),
   });
-  wm.bringFront(s.id);
+  focusWindow(s.id);
 }
 
 /**
@@ -1069,7 +1153,7 @@ async function takeOver(sessionId: string): Promise<void> {
   // whose window was minimized stayed hidden and both "Take over" and the
   // panel's "Open the terminal instead" appeared to do nothing at all.
   if (!wm.windows.some((w) => w.id === sessionId)) watchRun(sessionId);
-  else wm.restore(sessionId);
+  else restoreWindow(sessionId);
 }
 
 /**
@@ -1078,15 +1162,16 @@ async function takeOver(sessionId: string): Promise<void> {
  * registry is what clears the card — no separate acknowledged-state to persist.
  */
 async function dismissRun(sessionId: string): Promise<void> {
-  try {
-    await killSession(sessionId);
-  } catch (e) {
+  // endWindow handles the no-window case (an unwatched run has no window to
+  // find, so it just kills the session), and brings the `clearing` guard with
+  // it — this path raced reconcile exactly as closeWindow did.
+  const failed = await endWindow(sessionId);
+  if (failed?.length) {
     // Keep the card: dismissing it is only meaningful once the daemon has
     // actually dropped the session, and the next poll would re-add it anyway.
-    actionError.value = `Couldn't dismiss that run: ${String(e)}`;
+    actionError.value = `Couldn't dismiss that run: ${failed.join("; ")}`;
     return;
   }
-  wm.remove(sessionId);
   await refresh();
 }
 
@@ -1359,7 +1444,7 @@ onBeforeUnmount(() => {
         <button
           v-if="clearableIds.length"
           class="ghost sweep"
-          title="Close every session that ended cleanly — their windows and their rail cards. Failed runs stay."
+          title="Close the sessions that ended cleanly — their windows and their rail cards. Failed runs stay, and so does a workspace whose shell is still running."
           @click="blurSpawn($event), clearFinished()"
         >
           Clear finished
@@ -1444,7 +1529,7 @@ onBeforeUnmount(() => {
           :attention="winStatus(w.id).attention"
           :status-tag="winStatus(w.id).tag"
           :dragging="wm.isDragging()"
-          @focus="wm.bringFront(w.id)"
+          @focus="focusWindow(w.id)"
           @drag-start="(e) => wm.startDrag(e, w.id)"
           @resize-start="(e) => wm.startResize(e, w.id)"
           @minimize="minimizeWindow(w.id)"
@@ -1505,7 +1590,7 @@ onBeforeUnmount(() => {
           @watch="watchRun"
           @take-over="takeOver"
           @dismiss="dismissRun"
-          @restore="wm.restore"
+          @restore="restoreWindow"
           @focus="openSessionWindow"
         />
       </div>

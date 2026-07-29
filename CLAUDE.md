@@ -500,27 +500,51 @@ The traps:
    stamp every tick also works, and renders a window that sits there saying
    "clears in 1m" forever while never clearing. Deleting the stamp is what makes
    the countdown absent, which is the honest signal that it isn't going anywhere.
-3. **Whatever sweeps must remove the window CLIENT-SIDE.** Kill the session and
+3. **`wm.focusedId` is not "the window somebody is in", so the exemption can't
+   read it.** It is assigned synthetically in three places: `remove()` hands it
+   to the first non-minimized window in ARRAY order when the focused one goes,
+   `add()` claims it for every window reconcile cascades in, and `minimize()`
+   leaves it pointing into the dock. Any of those lands the exemption on a
+   window nobody has ever clicked — and since the exemption is permanent, the
+   desk then keeps one dead window forever and the pile starts growing again.
+   `userFocusedId` tracks intent instead. Test it by seeding a desk and clicking
+   NOTHING: `apply()` focuses the top-z window, and both finished windows must
+   still clear.
+4. **A docked window has no surface that could warn it.** `dockItems` carries no
+   status tag and a non-autonomous session has no rail card, so sweeping one is
+   the only removal on this desk that can happen with no countdown anywhere —
+   and it contradicts the rail's stated contract for that lane ("you put them
+   here and you're coming back; they never change unless you touch them"). The
+   sweep skips minimized windows; `Clear finished` still counts and takes them.
+5. **The rail HIDES the countdown by density, which is backwards.** `.meta` is
+   `display:none` from four cards up (`.card.compact .meta`) and `loud` is false
+   for `finished`, so before this the number vanished at exactly the crowd the
+   feature exists for. A counting-down card now floors at `compact` and the
+   origin badge yields its place — and the word "clears" is dropped below full
+   density because at 176px it overlaps an 8-character ticket key by 6px
+   (measured, not estimated). Compact hides the ELAPSED clock outright, so a
+   bare number there is unambiguous.
+6. **Whatever sweeps must remove the window CLIENT-SIDE.** Kill the session and
    let `reconcile` notice, and on a history tier every swept window comes back as
    a DRY-56 tombstone — the "third dismissal" — while on the file tier each one
    raises "a window that closes can't be resumed" for a removal that was
    deliberate. There is a poll between the kill landing and the window going, so
    reconcile also has to skip ids that are mid-clear; it is not enough to remove
    the window afterwards.
-4. **A workspace's agent exiting does not finish the workspace.** It binds a
+7. **A workspace's agent exiting does not finish the workspace.** It binds a
    second PTY with no window of its own, and clearing the window kills both — so
    a finished agent beside a live zsh must be left alone, and the zsh must never
    be swept on its own account either (it has no window to remove). This is the
    "bulk clear that takes a running agent with it" the ticket warns about, and
    it is the one exemption a mixed desk is needed to catch.
-5. **A run somebody STOPPED never reaches this code**, which is why `isFinished`
+8. **A run somebody STOPPED never reaches this code**, which is why `isFinished`
    only has to tell finished from failed: `/kill` removes it from the registry
    synchronously, so the only exited sessions a client ever sees are the two.
    Deriving "stopped" from the exit code here would be DRY-49's trap 2 again.
-6. **`num()` in config.ts rejects 0**, deliberately — for a cap it's a typo. For
+9. **`num()` in config.ts rejects 0**, deliberately — for a cap it's a typo. For
    a delay whose 0 means "never sweep" that silently restores the default and the
    off switch does nothing, hence `msOrOff` beside it.
-7. The notice belongs to the AUTOMATIC path only. The ✕ and the button are
+10. The notice belongs to the AUTOMATIC path only. The ✕ and the button are
    somebody choosing to discard something; a line explaining what they just chose
    is noise. And it has to *ask* the tier rather than assume — `historyKept` is
    demand-driven, so on a desk that has never lost a window it is still null at

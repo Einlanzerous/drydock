@@ -158,7 +158,7 @@ real delay and calling it a pass.
 
 | harness | what it holds down |
 |---|---|
-| `sweep.mjs` | Finished sessions clear themselves and **nothing else does**. Two rounds: the rail (a run that ended while you were in another tab is still there when you come back, never having counted down to nobody; the finished card announces itself before it goes; the failed one never does either) and the desk (an unfocused finished window clears, the focused one doesn't, a running session and a workspace whose zsh is still alive are both left, "Clear finished" counts only what it would take and takes nothing that was running). Plus the tier's own line: raised on the file store once the sweep has actually cost something, absent before that and absent entirely on Postgres. |
+| `sweep.mjs` | Finished sessions clear themselves and **nothing else does**. Four rounds: **A** the rail (a run that ended while you were in another tab is still there when you come back, never having counted down to nobody; the finished card announces itself before it goes; the failed one never does either; plus the tier's own line — raised on the file store once the sweep has actually cost something, absent before that and absent entirely on Postgres). **B** the desk (an unfocused finished window clears, the focused one doesn't, a running session and a workspace whose zsh is still alive are both left, `Clear finished` counts only what it would take and takes nothing that was running). **C** a crowded rail — ten runs, and every countdown still rendered and still fitting its card. **D** the dock and synthetic focus: a docked window is never swept, and two windows nobody has clicked both clear. |
 
 Why a browser and not curl: at the API all four of round B's sessions look
 identical — `status: "exited"`. Which one gets swept turns on what is on the
@@ -167,6 +167,17 @@ none of those exist outside a page. The visibility half is faked by overriding
 `document.visibilityState` and firing the event rather than actually
 backgrounding the tab, which would also throttle the 3s poll to once a minute
 and test Chromium instead of the rule.
+
+**Rounds C and D exist because the first cut of this harness passed against two
+real bugs.** It read the countdown with `textContent`, which is returned for a
+`display:none` node, and it never put more than two cards on the rail — so it
+never met the density rule that hid `.meta` from four cards up, i.e. the
+countdown was absent in exactly the crowded case the feature is for. So: assert
+`getComputedStyle().display` and the element's GEOMETRY (inside its card, not
+overlapping the id beside it), and put ten cards up rather than two. Round D is
+the same lesson on the desk — `wm.focusedId` is assigned synthetically in three
+places, so a harness that always clicks a window before asserting can't tell the
+focus exemption from "whatever the window manager last touched is immortal".
 
 Two sessions per shape, deliberately: `sleep 1` ends cleanly, `exit 3` ends with
 a `failure` set, `while :; do sleep 1; done` never ends. No `claude`, no tokens,
@@ -250,16 +261,24 @@ git checkout HEAD -- shell/src/App.vue shell/src/components/TrackerSidebar.vue \
 ```
 
 `sweep.mjs` has no pre-DRY-60 file to check out — there was no sweep to break —
-so it was validated by breaking its two load-bearing rules instead, one line
-each. Both are worth re-checking after any change to `sweepFinished`:
+so it was validated by breaking its load-bearing rules instead, a line each.
+Worth re-checking after any change to `sweepFinished` or the rail's density:
 
 ```sh
-# drop the failure guard, and the "only while somebody is looking" gate
+# (1) the failure guard, and the "only while somebody is looking" gate
 perl -0pi -e 's/return s\.status === "exited" && !s\.failure;/return s.status === "exited";/' \
   shell/src/composables/runState.ts
 perl -0pi -e 's/    if \(!visible\) continue;\n//' shell/src/App.vue
 node scripts/verify/sweep.mjs       # expect 4 failures, incl. the failed run being swept
 git checkout HEAD -- shell/src/App.vue shell/src/composables/runState.ts
+
+# (2) the density floor, and both of the sweep's own exemptions
+perl -0pi -e 's/  if \(card\.clearsIn\) return tier\.value === "tile" \? "compact" : tier\.value;\n//' \
+  shell/src/components/RunRail.vue
+perl -0pi -e 's/if \(userFocusedId\.value === session\.id \|\| win\?\.minimized\) continue;/if (wm.focusedId.value === session.id) continue;/' \
+  shell/src/App.vue
+node scripts/verify/sweep.mjs       # expect 4: C's fit check, and 3 of D's
+git checkout HEAD -- shell/src/App.vue shell/src/components/RunRail.vue
 ```
 
 Vite hot-reloads, so no restart is needed between the two runs. Give it a

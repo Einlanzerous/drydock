@@ -107,14 +107,42 @@ async function setVisible(page, visible) {
   }, visible);
 }
 
-/** Every rail card, as {label, meta}. `.meta` is where the countdown renders. */
+/**
+ * Every rail card, as {label, meta, metaShown, metaFits, state}.
+ *
+ * `metaShown` and `metaFits` exist because `textContent` is returned for a
+ * `display:none` node, so a harness that only reads the string passes happily
+ * against a countdown nobody can see — and the rail hides `.meta` by density
+ * once there are more than three cards, which is exactly the crowded case this
+ * feature is for. Read the computed style and the geometry, not the text.
+ */
 const cards = (page) =>
   page.evaluate(() =>
-    [...document.querySelectorAll(".card")].map((c) => ({
-      label: c.querySelector(".id")?.textContent.trim() ?? "",
-      meta: c.querySelector(".meta")?.textContent.trim() ?? "",
-      state: c.className.replace("card", "").trim(),
-    })),
+    [...document.querySelectorAll(".card")].map((c) => {
+      const meta = c.querySelector(".meta");
+      const id = c.querySelector(".id");
+      const cr = c.getBoundingClientRect();
+      const mr = meta?.getBoundingClientRect();
+      const ir = id?.getBoundingClientRect();
+      return {
+        label: id?.textContent.trim() ?? "",
+        meta: meta?.textContent.trim() ?? "",
+        state: c.className.replace("card", "").trim(),
+        // The card's own verdict, not the wording — the countdown drops the
+        // word "clears" once the card narrows, so a harness keyed on the string
+        // reports a crowded rail as having no countdowns at all.
+        clearing: c.classList.contains("clearing"),
+        metaShown:
+          !!meta && getComputedStyle(meta).display !== "none" && meta.getClientRects().length > 0,
+        // Inside the card (which is overflow:hidden, so an overflowing child is
+        // silently cut) and not sitting on top of the id beside it.
+        metaFits:
+          !!mr &&
+          mr.right <= cr.right + 0.5 &&
+          mr.left >= cr.left - 0.5 &&
+          (!ir || ir.right <= mr.left + 0.5),
+      };
+    }),
   );
 
 /** Every window frame, as {title, tag}. `.statustag` is where the countdown renders. */
@@ -192,8 +220,8 @@ const okCard = seen.find((c) => c.label === "DRY60-OK");
 const badCard = seen.find((c) => c.label === "DRY60-BAD");
 check(
   "the finished card says it is going, before it goes",
-  okCard?.meta.startsWith("clears") === true,
-  `meta=${JSON.stringify(okCard?.meta)}`,
+  okCard?.meta.startsWith("clears") === true && okCard.metaShown && okCard.metaFits,
+  `meta=${JSON.stringify(okCard?.meta)} shown=${okCard?.metaShown} fits=${okCard?.metaFits}`,
 );
 check(
   "the failed card does not — it is not going anywhere",
@@ -352,6 +380,128 @@ check(
 );
 
 for (const id of [liveC, wsAgent, wsShell]) await api(`/api/sessions/${id}/kill`, json({}));
+
+// --- Round C: a crowded rail still says what it is about to do ---------------
+// The rail sheds detail as it fills — full (≤3) → compact (≤8) → tile — and
+// `.meta` is the first thing to go. That put the countdown at `display:none`
+// from four runs upward, which is the crowded desk the whole ticket is about:
+// cards vanishing with the warning never having rendered once.
+console.log("\n--- round C: ten runs, and every countdown still legible ---");
+
+const CROWD = 10;
+const crowd = [];
+for (let i = 0; i < CROWD; i++) {
+  crowd.push(
+    await spawn(ENDS_WELL, { autonomous: true, ticket: `DRY60-C${i}`, title: `DRY60-C${i}` }),
+  );
+}
+await sleep(4000);
+
+await page.goto(SHELL, { waitUntil: "domcontentloaded" });
+await page.waitForSelector(".topbar");
+await page.waitForSelector(".card", { timeout: 20000 });
+await setVisible(page, true);
+await sleep(POLL_MS * 2);
+
+seen = await cards(page);
+const counting = seen.filter((c) => c.clearing);
+check(
+  `all ${CROWD} crowded cards are counting down`,
+  counting.length === CROWD && counting.every((c) => /^(clears )?\d+:\d\d$/.test(c.meta)),
+  `${counting.length}/${CROWD}: ${JSON.stringify(seen.map((c) => c.meta))}`,
+);
+check(
+  "and the number is actually on screen, not hidden by the density tier",
+  counting.length > 0 && counting.every((c) => c.metaShown),
+  `${counting.filter((c) => !c.metaShown).length} hidden`,
+);
+check(
+  "and it fits its card rather than being clipped or sat on the id",
+  counting.length > 0 && counting.every((c) => c.metaFits),
+  `${counting.filter((c) => !c.metaFits).length} clipped/overlapping`,
+);
+
+await sleep(PAST_SWEEP);
+seen = await cards(page);
+check(
+  "then the whole crowd clears itself",
+  seen.length === 0 && (await listed()).length === 0,
+  `${seen.length} card(s) left, ${(await listed()).length} session(s)`,
+);
+
+// --- Round D: docked, and focus nobody chose --------------------------------
+// Two separate ways a window could be taken with no warning anywhere:
+//   a DOCKED window has no surface that can render a countdown at all;
+//   and `wm.focusedId` is assigned SYNTHETICALLY — by remove(), by add(), and
+//   left stale by minimize() — so the sweep's focus exemption could land on a
+//   window nobody has ever clicked and hold it forever.
+console.log("\n--- round D: the dock, and focus nobody chose ---");
+
+const dockedD = await spawn(ENDS_WELL, { title: "DRY60-DOCKED" });
+const plainE = await spawn(ENDS_WELL, { title: "DRY60-TOPZ" });
+const plainF = await spawn(ENDS_WELL, { title: "DRY60-UNDER" });
+await sleep(3000);
+
+await api("/api/workspace", {
+  method: "PUT",
+  headers: { "Content-Type": "application/json" },
+  // plainE has the top z, so restore() focuses it (useWindowManager.apply) —
+  // without anybody having touched it. NOTHING is clicked in this round.
+  body: JSON.stringify({
+    version: 2,
+    layout: "float",
+    windows: [
+      win(plainE, "DRY60-TOPZ", 5),
+      win(plainF, "DRY60-UNDER", 4),
+      { ...win(dockedD, "DRY60-DOCKED", 3), minimized: true },
+    ],
+  }),
+});
+
+await page.goto(SHELL, { waitUntil: "domcontentloaded" });
+await page.waitForSelector(".topbar");
+await page.waitForSelector(".frame", { timeout: 20000 });
+await setVisible(page, true);
+await sleep(POLL_MS * 2);
+
+open = await frames(page);
+const tagFor = (t) => open.find((f) => f.title === t)?.tag ?? "(no frame)";
+check(
+  "a window focused by the window manager, not by a person, still counts down",
+  tagFor("DRY60-TOPZ").startsWith("clears in") && tagFor("DRY60-UNDER").startsWith("clears in"),
+  `topz=${JSON.stringify(tagFor("DRY60-TOPZ"))} under=${JSON.stringify(tagFor("DRY60-UNDER"))}`,
+);
+
+await sleep(PAST_SWEEP);
+open = await frames(page);
+const left = open.map((f) => f.title);
+check(
+  "so both of them clear — a synthetic focus can't exempt one forever",
+  !left.includes("DRY60-TOPZ") && !left.includes("DRY60-UNDER"),
+  `frames=${JSON.stringify(left)}`,
+);
+// DOCKED is the you-owned lane: "you put them here and you're coming back, and
+// they never change unless you touch them". A dock item has nowhere to put a
+// countdown, so the sweep must not be what touches it.
+check(
+  "a docked window is never taken by the sweep — nothing there could have warned you",
+  (await byId(dockedD)) !== undefined,
+  `session ${(await byId(dockedD)) ? "still listed" : "GONE"}`,
+);
+const dockCount = await page.textContent(".sweep-n").catch(() => null);
+check(
+  "but the button still counts it, and still takes it",
+  dockCount?.trim() === "1",
+  `"Clear finished" offers ${JSON.stringify(dockCount)}, want "1"`,
+);
+await page.click(".sweep");
+await sleep(POLL_MS * 2);
+check(
+  "…and it is gone once asked",
+  (await byId(dockedD)) === undefined,
+  `session ${(await byId(dockedD)) ? "STILL LISTED" : "gone"}`,
+);
+
 await browser.close();
 console.log(failures ? `\n${failures} FAILURE(S)` : "\nall checks passed");
 process.exit(failures ? 1 : 0);

@@ -65,8 +65,16 @@ export const PERMISSION_MODES = new Set<string>([
  * `num()` above rejects it, which is right for a cap or a budget — a scrollback
  * of 0 bytes is nobody's intent. For a delay that means "and then clear it",
  * 0 is the off switch and has to survive the parse.
+ *
+ * Which makes the empty string the hazard, because `Number("")` and
+ * `Number("   ")` are both 0 — so `DRYDOCK_CLEAR_FINISHED_AFTER_MS=` (a knob
+ * half-commented-out in a .env, the commonest way to write one) would read as a
+ * deliberate "never sweep" and the feature would be silently off. Every other
+ * knob here treats that as unset; so does this one, and only a written-out
+ * number can turn it off.
  */
 function msOrOff(raw: string | undefined, fallback: number): number {
+  if (raw === undefined || raw.trim() === "") return fallback;
   const n = Number(raw);
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
