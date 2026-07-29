@@ -17,6 +17,11 @@ Nothing here runs in CI or on install. Three groups:
   [its own section](#the-tracker-sidebar-dry-55), with its own rig. A browser,
   about a minute. Run it when touching the sidebar's empty/outage states or
   `loadTickets` in `App.vue`.
+- **The tombstone's resume button (DRY-62)** —
+  [its own section](#the-tombstones-resume-button-dry-62). A browser and a
+  throwaway Postgres, about a minute. Run it when touching
+  `daemon/src/transcripts.ts`, the history route, or either half of the resume
+  gate.
 
 ## The ticket brief (DRY-53)
 
@@ -76,6 +81,47 @@ couldn't ask" from "we asked and there are none".
 Why a second proxy rather than a mode on `proxy-http.mjs`: that one breaks the
 state store, and the two outages are independent conditions — sharing it would
 mean a path parameter on a harness three other scripts depend on.
+
+## The tombstone's resume button (DRY-62)
+
+Needs a **database tier** — tombstones are drawn from session history, and only
+Postgres retains it. Throwaway container, throwaway everything:
+
+```sh
+npm i playwright --prefix scripts/verify     # ad-hoc; not a repo dependency
+
+docker run -d --name dry62-db -e POSTGRES_PASSWORD=dry62pw -e POSTGRES_USER=drydock \
+  -e POSTGRES_DB=drydock -p 127.0.0.1:55462:5432 postgres:16-alpine
+
+(cd daemon && CLAUDE_CONFIG_DIR=/tmp/dry62-claude DRYDOCK_PORT=4392 \
+   DRYDOCK_HOST=127.0.0.1 DRYDOCK_SESSIONS_DIR=/tmp/d62 DRYDOCK_TRACKER=fixture \
+   DRYDOCK_DATABASE_URL='postgres://drydock:dry62pw@127.0.0.1:55462/drydock' \
+   node --import tsx src/index.ts &)
+(cd shell && VITE_DAEMON_URL=http://127.0.0.1:4392 bunx vite --port 5392 --strictPort &)
+
+CLAUDE_CONFIG_DIR=/tmp/dry62-claude node scripts/verify/tombstone.mjs   # from the repo root
+```
+
+`CLAUDE_CONFIG_DIR` must be the same value in both places: the harness plants
+and deletes a transcript under it, and the daemon resolves transcripts from its
+own environment. Point it at a scratch directory rather than `~/.claude`, or
+the harness will `chmod 000` your real one for six seconds.
+
+| harness | what it holds down |
+|---|---|
+| `tombstone.mjs` | A tombstone's button tells the truth about the conversation behind it. The gate was `command === "claude" && agentSessionId`, and an id is not a transcript: the SessionStart hook reports one whether or not the CLI is persisting anything, so every session a pre-DRY-59 daemon spawned recorded an id pointing at nothing. Asserts the label BOTH ways, that the click's args agree with the label, and that a daemon which cannot read the transcript directory says nothing rather than stripping Resume from every card on the desk. |
+
+Why a browser and not curl: `/api/sessions/history` shows the flag either way.
+The claim is which word the button shows and which args the click sends — and
+those are computed in two different files (`SessionTombstone.vue` and
+`App.vue`), which is why they now call one shared predicate and why the harness
+checks the label and the spawn separately rather than trusting either.
+
+No SQL and no API tokens, both on purpose: the agent session id is planted
+through the daemon's own SessionStart hook exactly as an agent reports it, and
+the `claude` it spawns is never prompted. Note the plant must come AFTER the
+spawn's own hook — `agent_session_id` is written `where agent_session_id is
+null`, so the first writer wins.
 
 ## Workspace store: why a proxy and not `docker stop`
 

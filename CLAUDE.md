@@ -436,6 +436,28 @@ role there is a construct-server change, deliberately out of scope (DRY-28/58).
    `claude` rather than assuming the field is there. It is captured before the
    ticket early-return in `/hook/sessionstart`, so a ticketless session records
    one too.
+6. **An id is not a transcript** (DRY-62). That hook fires whether or not the
+   CLI is persisting anything, so `agentSessionId` being set says only that a
+   session started — every session a pre-DRY-59 daemon spawned recorded one
+   against a transcript that was never written, and the card offered to reopen
+   a conversation that doesn't exist. `/api/sessions/history` marks those
+   `transcriptMissing` by looking (`daemon/src/transcripts.ts`), and the gate
+   is one predicate in `lib/daemon.ts` because the card and the spawn both ask
+   and had drifted apart once already.
+   - **Scan for the id; do not derive the path from the record.** Claude Code
+     names its project directories by escaping the cwd, and the record's `cwd`
+     is not where a ticket session ran anyway — `worktree` is. Get either wrong
+     and the flag is set for sessions that DO have a transcript, which takes
+     Resume away instead of the reverse. Session ids are UUIDs; a flat index of
+     them can't collide.
+   - **"Couldn't look" is a third state, not a "no".** An unreadable transcript
+     directory must leave the flag unset, or one bad permission strips Resume
+     from every card on the desk. Test it by taking the directory away, not by
+     reasoning about it.
+   - Harness: `scripts/verify/tombstone.mjs`, rig in its README. Assert the
+     label AND the args the click sends — they're computed in different files,
+     and a card that says "Start again" while still passing `--resume` is the
+     same bug in better copy.
 
 ## Verifying the ticket brief (DRY-53)
 
