@@ -22,6 +22,11 @@ Nothing here runs in CI or on install. Three groups:
   throwaway Postgres, about a minute. Run it when touching
   `daemon/src/transcripts.ts`, the history route, or either half of the resume
   gate.
+- **Clearing finished sessions (DRY-60)** —
+  [its own section](#clearing-finished-sessions-dry-60). A browser, about two
+  minutes. Run it when touching `sweepFinished` / `mayClear` / `clearSession` in
+  `App.vue`, `isFinished` in `runState.ts`, or anything that changes when a
+  window is removed.
 
 ## The ticket brief (DRY-53)
 
@@ -123,6 +128,51 @@ the `claude` it spawns is never prompted. Note the plant must come AFTER the
 spawn's own hook — `agent_session_id` is written `where agent_session_id is
 null`, so the first writer wins.
 
+## Clearing finished sessions (DRY-60)
+
+Runs against **either tier**, and should be run against both — the file store is
+where a swept session's scrollback was the only copy there ever was. It reads
+the tier from `/healthz` and flips the notice assertion accordingly.
+
+```sh
+npm i playwright --prefix scripts/verify     # ad-hoc; not a repo dependency
+
+(cd daemon && DRYDOCK_PORT=4360 DRYDOCK_HOST=127.0.0.1 DRYDOCK_SESSIONS_DIR=/tmp/d60 \
+   DRYDOCK_STATE_FILE=/tmp/dry60-state.json DRYDOCK_RUNS_ROOT=/tmp/dry60-runs \
+   DRYDOCK_TRACKER=fixture DRYDOCK_CLEAR_FINISHED_AFTER_MS=8000 \
+   node --import tsx src/index.ts &)
+(cd shell && VITE_DAEMON_URL=http://127.0.0.1:4360 bunx vite --port 5360 --strictPort &)
+
+node scripts/verify/sweep.mjs                # from the repo root
+
+# then again on the database tier — same shell, same harness
+docker run -d --name dry60-db -e POSTGRES_PASSWORD=dry60pw -e POSTGRES_USER=drydock \
+  -e POSTGRES_DB=drydock -p 127.0.0.1:55460:5432 postgres:16-alpine
+# (restart the daemon on :4360 with DRYDOCK_DATABASE_URL instead of the state file)
+```
+
+**`DRYDOCK_CLEAR_FINISHED_AFTER_MS` is not optional here.** The default is five
+minutes, which is right for a desk and useless for a test; the harness refuses
+to run (exit 2) against anything over 30s rather than quietly waiting out the
+real delay and calling it a pass.
+
+| harness | what it holds down |
+|---|---|
+| `sweep.mjs` | Finished sessions clear themselves and **nothing else does**. Two rounds: the rail (a run that ended while you were in another tab is still there when you come back, never having counted down to nobody; the finished card announces itself before it goes; the failed one never does either) and the desk (an unfocused finished window clears, the focused one doesn't, a running session and a workspace whose zsh is still alive are both left, "Clear finished" counts only what it would take and takes nothing that was running). Plus the tier's own line: raised on the file store once the sweep has actually cost something, absent before that and absent entirely on Postgres. |
+
+Why a browser and not curl: at the API all four of round B's sessions look
+identical — `status: "exited"`. Which one gets swept turns on what is on the
+desk, which window has focus, and whether the tab is in front of anybody, and
+none of those exist outside a page. The visibility half is faked by overriding
+`document.visibilityState` and firing the event rather than actually
+backgrounding the tab, which would also throttle the 3s poll to once a minute
+and test Chromium instead of the rule.
+
+Two sessions per shape, deliberately: `sleep 1` ends cleanly, `exit 3` ends with
+a `failure` set, `while :; do sleep 1; done` never ends. No `claude`, no tokens,
+no tracker — the sweep cannot tell what was running inside a PTY and shouldn't
+be tested as though it could.
+
 ## Workspace store: why a proxy and not `docker stop`
 
 `docker stop` frees the port, so every connect fails instantly with
@@ -197,6 +247,19 @@ git checkout main -- shell/src/App.vue shell/src/components/TrackerSidebar.vue \
 node scripts/verify/sidebar.mjs     # expect failures across (a), (c), (e), (f), (g)
 git checkout HEAD -- shell/src/App.vue shell/src/components/TrackerSidebar.vue \
   shell/src/lib/tracker.ts
+```
+
+`sweep.mjs` has no pre-DRY-60 file to check out — there was no sweep to break —
+so it was validated by breaking its two load-bearing rules instead, one line
+each. Both are worth re-checking after any change to `sweepFinished`:
+
+```sh
+# drop the failure guard, and the "only while somebody is looking" gate
+perl -0pi -e 's/return s\.status === "exited" && !s\.failure;/return s.status === "exited";/' \
+  shell/src/composables/runState.ts
+perl -0pi -e 's/    if \(!visible\) continue;\n//' shell/src/App.vue
+node scripts/verify/sweep.mjs       # expect 4 failures, incl. the failed run being swept
+git checkout HEAD -- shell/src/App.vue shell/src/composables/runState.ts
 ```
 
 Vite hot-reloads, so no restart is needed between the two runs. Give it a

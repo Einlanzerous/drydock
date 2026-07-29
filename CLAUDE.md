@@ -459,6 +459,74 @@ role there is a construct-server change, deliberately out of scope (DRY-28/58).
      and a card that says "Start again" while still passing `--resume` is the
      same bug in better copy.
 
+## Clearing finished sessions (DRY-60)
+
+A session that ends stays in the registry — a terminal state has to survive
+until somebody sees it — and seeing it used to be the only thing that cleared
+it, one window and one card at a time. Two dozen autonomous runs finishing is
+two dozen dismissals over overlapping windows. So a run that ended **cleanly**
+now clears itself, and the header grows a `Clear finished` button that does the
+lot at once.
+
+**The daemon does none of this.** `DRYDOCK_CLEAR_FINISHED_AFTER_MS` is served
+over `/api/config` and applied by the shell, because a sweep has to know what is
+on screen, which window has focus, and whether anybody is looking at the tab.
+The daemon goes on listing every exited session, so a browser that wasn't open
+still finds them.
+
+```sh
+DRYDOCK_PORT=4360 DRYDOCK_CLEAR_FINISHED_AFTER_MS=8000 \
+  DRYDOCK_STATE_FILE=/tmp/dry60-state.json node --import tsx src/index.ts
+# then: sleep 1 finishes, exit 3 fails, `while :; do sleep 1; done` never ends
+curl -s -X POST localhost:4360/api/sessions -H 'Content-Type: application/json' \
+  -d '{"command":"/bin/sh","args":["-c","sleep 1"],"autonomous":true,"title":"ok"}'
+```
+
+Five minutes is the right default and a terrible test — the same trap DRY-49's
+timeout has. Harness: `scripts/verify/sweep.mjs`, rig in its README, and it
+refuses to run against a delay over 30s rather than pass by waiting.
+
+The traps:
+
+1. **The clock must measure time IN FRONT OF SOMEBODY, not time since the run
+   ended.** Otherwise a desk opened in the morning sweeps everything that
+   finished overnight on its first poll, and the runs are gone before the
+   countdown rendered once — deleting the notification instead of the clutter.
+   Stamps are taken only while `document.visibilityState === "visible"` and
+   dropped when it isn't. Test it by faking the property and firing the event;
+   actually backgrounding a headless tab throttles the 3s poll to once a minute
+   and you end up testing Chromium.
+2. **The focused window gets NO clock, not a restarting one.** Refreshing its
+   stamp every tick also works, and renders a window that sits there saying
+   "clears in 1m" forever while never clearing. Deleting the stamp is what makes
+   the countdown absent, which is the honest signal that it isn't going anywhere.
+3. **Whatever sweeps must remove the window CLIENT-SIDE.** Kill the session and
+   let `reconcile` notice, and on a history tier every swept window comes back as
+   a DRY-56 tombstone — the "third dismissal" — while on the file tier each one
+   raises "a window that closes can't be resumed" for a removal that was
+   deliberate. There is a poll between the kill landing and the window going, so
+   reconcile also has to skip ids that are mid-clear; it is not enough to remove
+   the window afterwards.
+4. **A workspace's agent exiting does not finish the workspace.** It binds a
+   second PTY with no window of its own, and clearing the window kills both — so
+   a finished agent beside a live zsh must be left alone, and the zsh must never
+   be swept on its own account either (it has no window to remove). This is the
+   "bulk clear that takes a running agent with it" the ticket warns about, and
+   it is the one exemption a mixed desk is needed to catch.
+5. **A run somebody STOPPED never reaches this code**, which is why `isFinished`
+   only has to tell finished from failed: `/kill` removes it from the registry
+   synchronously, so the only exited sessions a client ever sees are the two.
+   Deriving "stopped" from the exit code here would be DRY-49's trap 2 again.
+6. **`num()` in config.ts rejects 0**, deliberately — for a cap it's a typo. For
+   a delay whose 0 means "never sweep" that silently restores the default and the
+   off switch does nothing, hence `msOrOff` beside it.
+7. The notice belongs to the AUTOMATIC path only. The ✕ and the button are
+   somebody choosing to discard something; a line explaining what they just chose
+   is noise. And it has to *ask* the tier rather than assume — `historyKept` is
+   demand-driven, so on a desk that has never lost a window it is still null at
+   the first sweep, and a bare `=== false` stays quiet on exactly the tier the
+   notice exists for.
+
 ## Verifying the ticket brief (DRY-53)
 
 What a spawned agent is told about its ticket: `tracker/context.ts` turns a

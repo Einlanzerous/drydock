@@ -55,6 +55,18 @@ const props = defineProps<{
   }[];
   /** Windows currently on the desk, so a watched run can be marked as such. */
   watchedIds: string[];
+  /**
+   * When a finished run's card will clear itself, epoch ms, keyed by session id
+   * (DRY-60). An absolute deadline rather than a duration, because it is
+   * refreshed on the 3s session poll and rendered against this component's own
+   * 1s clock — a remaining-time number would stall and then jump.
+   *
+   * Absent for anything not on its way out: every failure, and every finished
+   * run on a host with the sweep turned off.
+   */
+  sweepAt: Record<string, number>;
+  /** The host's full sweep delay, so the hairline can drain as a proportion. */
+  sweepAfterMs: number;
 }>();
 
 const emit = defineEmits<{
@@ -166,6 +178,10 @@ interface Card {
   held: string | null;
   detail: string;
   watched: boolean;
+  /** mm:ss until this card clears itself, or null if it isn't going to. */
+  clearsIn: string | null;
+  /** How much of that countdown is left, 0..1 — the hairline drains on it. */
+  clearsFraction: number | null;
 }
 
 /**
@@ -187,6 +203,11 @@ const cards = computed<Card[]>(() =>
     const state = runState(session, gating);
     const meta = RUN_STATE_META[state];
     const gate = openGates.value.find((g) => g.sessionId === session.id);
+    // Clamped at zero: the deadline can pass a tick or two before the sweep's
+    // kill round-trips, and a card counting into negative time on its way out
+    // is the sort of thing that gets screenshotted.
+    const due = props.sweepAt[session.id];
+    const left = due !== undefined ? Math.max(0, due - now.value) : null;
     return {
       session,
       state,
@@ -197,6 +218,9 @@ const cards = computed<Card[]>(() =>
       held: gate ? clockMs(heldMs(gate, now.value)) : null,
       detail: detailFor(session, state, gate),
       watched: props.watchedIds.includes(session.id),
+      clearsIn: left === null ? null : clockMs(left),
+      clearsFraction:
+        left === null || props.sweepAfterMs <= 0 ? null : Math.min(1, left / props.sweepAfterMs),
     };
   }),
 );
@@ -379,7 +403,17 @@ function onCardClick(card: Card): void {
                 <span class="glyph">{{ card.glyph }}</span>
                 <span class="id">{{ card.label }}</span>
                 <span class="origin">{{ card.session.origin.toUpperCase() }}</span>
-                <span class="meta">{{ card.held ? `held ${card.held}` : card.elapsed }}</span>
+                <!-- The countdown displaces the elapsed clock rather than
+                     joining it: a finished run's runtime stops being the
+                     interesting number the moment the card is on its way out,
+                     and the column is one card-width wide (DRY-60). -->
+                <span class="meta" :class="{ clearing: card.clearsIn }">{{
+                  card.held
+                    ? `held ${card.held}`
+                    : card.clearsIn
+                      ? `clears ${card.clearsIn}`
+                      : card.elapsed
+                }}</span>
                 <!-- The one control any card ever shows, and only on the two
                      states that persist until acknowledged. -->
                 <button
@@ -398,7 +432,19 @@ function onCardClick(card: Card): void {
                      while the run is moving and frozen when it isn't. It carries
                      no fraction — step-against-plan has no signal reaching the
                      daemon, and a bar that invented one would be a lie. -->
-                <span class="hairline" :class="card.state"></span>
+                <!-- On a finished card it doubles as the countdown, draining
+                     left-to-right over the sweep delay (DRY-60) — the same
+                     2px strip, so nothing on the card moves or resizes as a
+                     run goes from finished to gone. -->
+                <span
+                  class="hairline"
+                  :class="card.state"
+                  :style="
+                    card.clearsFraction === null
+                      ? undefined
+                      : { transform: `scaleX(${card.clearsFraction})`, transformOrigin: 'left' }
+                  "
+                ></span>
               </div>
             </div>
           </div>
@@ -638,6 +684,12 @@ function onCardClick(card: Card): void {
 }
 .card.gating .meta {
   color: #e0a33c;
+}
+/* Dimmer than the elapsed clock it replaces. A card telling you it is about to
+   remove itself is information, not an alarm — the loud states are the ones
+   that want a person, and this one has stopped wanting anything. */
+.meta.clearing {
+  color: #55606d;
 }
 .card.tile .origin,
 .card.tile .meta,

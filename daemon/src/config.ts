@@ -59,6 +59,18 @@ export const PERMISSION_MODES = new Set<string>([
   "dontAsk",
 ]);
 
+/**
+ * Numeric knob where ZERO is a meaningful value rather than a typo.
+ *
+ * `num()` above rejects it, which is right for a cap or a budget — a scrollback
+ * of 0 bytes is nobody's intent. For a delay that means "and then clear it",
+ * 0 is the off switch and has to survive the parse.
+ */
+function msOrOff(raw: string | undefined, fallback: number): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
 /** Read once: the default log path is per-port so concurrent daemons don't share a file. */
 const PORT = Number(process.env.DRYDOCK_PORT ?? 4317);
 
@@ -297,6 +309,31 @@ export const CONFIG = {
      * handler for that scheme exists on any platform we run on.
      */
     shellUrl: process.env.DRYDOCK_SHELL_URL || undefined,
+  },
+
+  /**
+   * The desk's own housekeeping (DRY-60).
+   *
+   * Host policy that THIS PROCESS NEVER ACTS ON, which is unusual enough to say
+   * out loud: it is served over /api/config and enforced by the shell, like the
+   * autonomous permission posture above. That isn't laziness — a sweep has to
+   * know what is on screen, which window has focus, and whether anybody is
+   * looking at the tab, and the daemon knows none of those. It deliberately goes
+   * on keeping every exited session listed until a client says otherwise, so a
+   * run that ended at 3am is still there at 9am for a browser that wasn't open.
+   */
+  desk: {
+    /**
+     * How long a cleanly-finished session stays on the desk before it clears
+     * itself, in ms. Zero turns the sweep off and leaves every ending to be
+     * dismissed by hand — the behaviour that shipped before DRY-60.
+     *
+     * Five minutes because the countdown only runs while the tab is in front of
+     * you (see the shell's sweep): this is five minutes of somebody being in a
+     * position to read the card, not five minutes of wall clock. A FAILED run is
+     * never swept whatever this says, and neither is the window you have focused.
+     */
+    clearFinishedAfterMs: msOrOff(process.env.DRYDOCK_CLEAR_FINISHED_AFTER_MS, 300_000),
   },
 
   /**

@@ -37,6 +37,24 @@ export function runState(session: SessionInfo, gating: boolean): RunState {
 }
 
 /**
+ * Ended, and ended cleanly — the ONLY thing DRY-60's sweep may take.
+ *
+ * Deliberately `runState(s, false) === "finished"` written out, and it lives
+ * beside that function so the two cannot drift: three surfaces ask this
+ * question — the countdown on a card, the count on the header button, and the
+ * sweep itself — and DRY-62 was two of them agreeing on a predicate that had
+ * quietly stopped meaning the same thing.
+ *
+ * `failure` rather than the exit code, for the reason `runState` gives above,
+ * and rather than "not still running": a run somebody STOPPED is already gone
+ * from /api/sessions (kill removes it from the registry synchronously), so the
+ * only exited sessions a client ever sees are these two.
+ */
+export function isFinished(s: SessionInfo): boolean {
+  return s.status === "exited" && !s.failure;
+}
+
+/**
  * Per-state presentation. The glyph is a SHAPE, not a dot, so the whole
  * grammar survives greyscale; the word is absent for the quiet states, which
  * is what makes them quiet. Colour is the fifth signal and never load-bearing.
