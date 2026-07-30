@@ -363,6 +363,60 @@ export const CONFIG = {
       .split(",")
       .map((s) => s.trim())
       .filter(Boolean),
+    /**
+     * How long a tracker answer may be reused before it's refreshed (DRY-72).
+     *
+     * The sidebar polls every 20s per browser tab and a corporate Jira pull
+     * measures 5.7-6s, so uncached this was a permanent ~30% duty cycle against
+     * the tracker per tab — enough that the browser's own 12s budget tripped on
+     * ordinary load. See tracker/cache.ts for why this is stale-while-revalidate
+     * rather than a plain TTL; nothing here makes a client wait longer, it only
+     * bounds how old an answer can be.
+     */
+    cache: {
+      /**
+       * The sidebar's ticket list. Matched to the shell's own poll interval so
+       * a single tab sees data no older than it did before, while N tabs (and
+       * back-to-back polls) collapse onto one fan-out.
+       *
+       * Zero switches the cache OFF — a straight passthrough to the provider,
+       * for reproducing a tracker bug the cache would otherwise mask. Hence
+       * `msOrOff`: through `num()` a deliberate 0 would silently restore the
+       * default, and the off switch would do nothing (DRY-60's trap 9).
+       */
+      ticketsMs: msOrOff(process.env.DRYDOCK_TRACKER_CACHE_MS, 20_000),
+      /**
+       * An epic's child counts (DRY-13), which are the unbounded half of a pull
+       * — that query spans every status, so it grows with years of closed work
+       * rather than with what's on screen. Five minutes because a completion
+       * ratio moves over days; the list beside it still refreshes at the rate
+       * above. Zero switches it off, as with the list.
+       */
+      childStatsMs: msOrOff(process.env.DRYDOCK_TRACKER_CHILD_STATS_CACHE_MS, 300_000),
+    },
+    /**
+     * Deadline on a single tracker HTTP request (DRY-72).
+     *
+     * The providers had none, and nothing propagates a client's abort, so when
+     * the shell gave up at 12s the daemon kept walking pages for a browser that
+     * had stopped listening — and 8s later the next poll started a second
+     * fan-out on top of it. Generous rather than tight: since the cache moved
+     * these off the request path, blowing this costs a background refresh, not a
+     * sidebar. A caller with its own tighter budget (the SessionStart brief's
+     * extras) keeps it.
+     *
+     * Through `msOrOff`, not `num()`: zero means "no deadline" — the behaviour
+     * that shipped before DRY-72 — and that is a real posture somebody might
+     * want back while chasing a tracker that is merely very slow. `num()`
+     * rejects 0, so the off switch would silently restore the 20s default
+     * instead: DRY-60's trap 9, which the sibling TTLs above already avoid.
+     *
+     * NB this bounds ONE request, not a whole pull. A page-walk of N pages can
+     * still take N × this, bounded by MAX_TICKETS (~20 pages) rather than by a
+     * clock. That is why the list cache reports staleness by AGE as well as by
+     * failure — see `staleAfterMs` in tracker/cache.ts.
+     */
+    requestTimeoutMs: msOrOff(process.env.DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS, 20_000),
     switchyard: {
       url: process.env.DRYDOCK_SWITCHYARD_URL,
       token: process.env.DRYDOCK_SWITCHYARD_TOKEN,

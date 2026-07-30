@@ -1,3 +1,4 @@
+import { ChildStatsCache } from "./cache.js";
 import type {
   Project,
   Ticket,
@@ -38,6 +39,18 @@ export interface JiraConfig {
    * CONFIG) so the provider stays constructible in isolation.
    */
   repoOverrides?: string[];
+  /**
+   * Deadline on a single request, ms (DRY-72). Injected for the same reason as
+   * `repoOverrides` above. Omitted = no deadline, which is what shipped before
+   * and what the fixture-shaped callers want.
+   */
+  requestTimeoutMs?: number;
+  /**
+   * Where epic child counts are remembered between pulls (DRY-72). Injected, and
+   * shared with whatever other provider a host might construct, because it caches
+   * a property of the TRACKER rather than of this class. Omitted = no caching.
+   */
+  childStats?: ChildStatsCache;
 }
 
 // Subset of a Jira issue we consume (fields= keeps responses to exactly this).
@@ -165,6 +178,17 @@ export class JiraProvider implements TrackerProvider {
   private readonly baseUrl: string;
   private readonly auth: string;
   private readonly repoOverrides: Set<string>;
+  private readonly requestTimeoutMs?: number;
+  /** DRY-72. A disabled instance when the host injected none, so no `?.` below. */
+  private readonly childStats: ChildStatsCache;
+  /**
+   * Epics whose child count has already been reported as uncountable, so the
+   * warning below is one line per onset rather than one per sidebar poll
+   * (DRY-72) — the "a notice is a condition, not an event" rule the shell's
+   * notices follow. Tracked as a SET of keys rather than a boolean because a
+   * boolean is only correct while one pull means one call to this method.
+   */
+  private readonly cappedWarned = new Set<string>();
   /** Resolved on first search: true = Cloud (`/search/jql`), false = DC (`/search`). */
   private cloudSearch: boolean | undefined;
   /**
@@ -180,6 +204,8 @@ export class JiraProvider implements TrackerProvider {
       ? `Basic ${Buffer.from(`${cfg.email}:${cfg.token}`).toString("base64")}`
       : `Bearer ${cfg.token}`;
     this.repoOverrides = new Set(cfg.repoOverrides ?? []);
+    this.requestTimeoutMs = cfg.requestTimeoutMs;
+    this.childStats = cfg.childStats ?? new ChildStatsCache(0);
   }
 
   /**
@@ -201,6 +227,15 @@ export class JiraProvider implements TrackerProvider {
   private async req(path: string, init?: RequestInit): Promise<any> {
     const res = await fetch(`${this.baseUrl}/rest/api/2${path}`, {
       ...init,
+      // Every request gets a deadline (DRY-72). Nothing propagates a client's
+      // abort into here, so before this a page-walk begun for a browser that
+      // gave up at 12s ran on to completion — and the next poll's fan-out piled
+      // on top of it. A caller carrying its own, tighter budget (extrasDeadline,
+      // where a blown deadline costs one line of a brief rather than the brief)
+      // keeps it: this is a backstop, not an override.
+      signal:
+        init?.signal ??
+        (this.requestTimeoutMs ? AbortSignal.timeout(this.requestTimeoutMs) : undefined),
       headers: {
         Accept: "application/json",
         Authorization: this.auth,
@@ -308,7 +343,17 @@ export class JiraProvider implements TrackerProvider {
       try {
         const body = await this.req(`/search/jql?${params}`);
         this.cloudSearch = true;
-        return { issues: body.issues ?? [], next: body.nextPageToken ?? undefined };
+        const issues: JiraIssue[] = body.issues ?? [];
+        // An empty page ends the walk even if a token came with it. The DC branch
+        // below has always had this guard via its `issues.length &&`; the Cloud
+        // branch trusted the token, so a deployment that hands back an empty page
+        // AND a token spins forever — `out.length` never grows, so neither the
+        // MAX_TICKETS backstop nor the paging condition can stop it. That was
+        // survivable while each poll merely leaked its own runaway loop; with a
+        // cache in front it also wedges the entry, because a flight that never
+        // settles is a `refreshing` handle that is never cleared and an entry
+        // `evictIdle` will never reclaim.
+        return { issues, next: issues.length ? (body.nextPageToken ?? undefined) : undefined };
       } catch (e) {
         // Only reroute when the endpoint itself is absent (DC); a live probe
         // failing with 400/401/… must surface, not silently switch APIs.
@@ -399,6 +444,20 @@ export class JiraProvider implements TrackerProvider {
   private async attachChildStats(out: Ticket[]): Promise<void> {
     const epics = new Map(out.filter((t) => isEpic(t.type)).map((t) => [t.key, t]));
     if (!epics.size) return;
+    // Is there anything left to learn? Then the expensive half of a sidebar pull
+    // doesn't happen at all (DRY-72) — and this is the half that scales with
+    // years of closed work rather than with what's on screen. All-or-nothing
+    // because one query answers every epic here, so a partial hit saves nothing.
+    //
+    // "Known uncountable" counts as settled, or the branch below would re-run a
+    // full twenty-page walk on every refresh purely to abandon it again.
+    const known = [...epics.keys()].map((k) => [k, this.childStats.peek(k)] as const);
+    if (known.every(([, v]) => v !== undefined)) {
+      for (const [key, v] of known) {
+        if (v && v !== "capped") epics.get(key)!.childStats = v;
+      }
+      return;
+    }
     try {
       const jql = `parent in (${[...epics.keys()].map(jqlQuote).join(", ")})`;
       const kids: JiraIssue[] = [];
@@ -416,7 +475,28 @@ export class JiraProvider implements TrackerProvider {
       // Returning early leaves childStats unset, and the shell falls back to
       // counting loaded children without a ratio. Narrowing
       // DRYDOCK_TRACKER_PROJECTS is the lever that brings the real numbers back.
-      if (next) return;
+      //
+      // Which nobody could know to pull, because until DRY-72 this branch was
+      // silent: the most expensive poll the daemon can make — twenty sequential
+      // pages — fetched and discarded on every refresh, presenting only as a
+      // slow sidebar with no progress bars. Latched so it's one line per onset.
+      if (next) {
+        // Remembered as capped, so the walk isn't repeated every 20s just to be
+        // thrown away again. It expires with the TTL, so an epic that gets
+        // archived back under the cap starts counting on its own.
+        for (const key of epics.keys()) this.childStats.putCapped(key);
+        const fresh = [...epics.keys()].filter((k) => !this.cappedWarned.has(k));
+        if (fresh.length) {
+          for (const k of fresh) this.cappedWarned.add(k);
+          console.warn(
+            `[drydock] jira: counting children of ${epics.size} epics exceeded ${MAX_TICKETS} issues, ` +
+              `so epic progress bars will count only loaded children. That query spans every status — ` +
+              `narrow DRYDOCK_TRACKER_PROJECTS to bring the real numbers back.`,
+          );
+        }
+        return;
+      }
+      for (const key of epics.keys()) this.cappedWarned.delete(key);
       for (const k of kids) {
         const epic = k.fields.parent?.key ? epics.get(k.fields.parent.key) : undefined;
         if (!epic) continue;
@@ -428,6 +508,11 @@ export class JiraProvider implements TrackerProvider {
       // An epic with no children still gets a definitive zero rather than the
       // "we didn't ask" absence the shell treats as unknown.
       for (const e of epics.values()) e.childStats ??= { total: 0, byCategory: {} };
+      // Publish for the next pull (DRY-72). Storing the object by reference is
+      // safe because nothing mutates one after this point: a later pull that
+      // MISSES builds its counts on freshly-mapped tickets (`??=` on a new
+      // Ticket), and one that HITS only ever reads.
+      for (const [key, e] of epics) this.childStats.put(key, e.childStats!);
     } catch {
       /* leave childStats unset; the shell degrades to loaded children */
     }

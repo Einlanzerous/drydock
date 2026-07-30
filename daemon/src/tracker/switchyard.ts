@@ -1,3 +1,4 @@
+import { ChildStatsCache } from "./cache.js";
 import type {
   Project,
   Ticket,
@@ -18,6 +19,18 @@ import type {
 export interface SwitchyardConfig {
   baseUrl: string;
   token?: string;
+  /**
+   * Deadline on a single request, ms (DRY-72). Injected rather than read from
+   * CONFIG so the provider stays constructible in isolation, like the Jira one.
+   * Omitted = no deadline, which is what shipped before.
+   */
+  requestTimeoutMs?: number;
+  /**
+   * Where epic child counts are remembered between pulls (DRY-72). Injected, and
+   * shared with whatever other provider a host might construct, because it caches
+   * a property of the TRACKER rather than of this class. Omitted = no caching.
+   */
+  childStats?: ChildStatsCache;
 }
 
 // Shape returned by the Switchyard API (subset we consume).
@@ -175,15 +188,37 @@ export class SwitchyardProvider implements TrackerProvider {
 
   private readonly baseUrl: string;
   private readonly token?: string;
+  private readonly requestTimeoutMs?: number;
+  /** DRY-72. A disabled instance when the host injected none, so no `?.` below. */
+  private readonly childStats: ChildStatsCache;
+  /**
+   * Epics already reported as uncountable, so the warning is one line per onset
+   * rather than one per sidebar poll (DRY-72).
+   *
+   * A SET of keys and not a boolean, because a boolean is wrong HERE in a way it
+   * isn't in the Jira provider: `listTickets` fans out one nested call per
+   * project, each running its own child-stats pass, so a project with no capped
+   * epics would clear the flag a previous project had just set and the "one line
+   * per onset" warning would print on essentially every refresh.
+   */
+  private readonly cappedWarned = new Set<string>();
 
   constructor(cfg: SwitchyardConfig) {
     this.baseUrl = cfg.baseUrl.replace(/\/$/, "");
     this.token = cfg.token;
+    this.requestTimeoutMs = cfg.requestTimeoutMs;
+    this.childStats = cfg.childStats ?? new ChildStatsCache(0);
   }
 
   private async req(path: string, init?: RequestInit): Promise<any> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       ...init,
+      // Backstop deadline (DRY-72): nothing propagates a client's abort into
+      // here, so without one a page-walk outlives the browser that wanted it.
+      // A caller with its own tighter budget (the ancestry walk) keeps it.
+      signal:
+        init?.signal ??
+        (this.requestTimeoutMs ? AbortSignal.timeout(this.requestTimeoutMs) : undefined),
       headers: {
         Accept: "application/json",
         ...(init?.body ? { "Content-Type": "application/json" } : {}),
@@ -259,33 +294,77 @@ export class SwitchyardProvider implements TrackerProvider {
    */
   private async attachChildStats(rows: SwitchyardTicket[], out: Ticket[]): Promise<void> {
     const byKey = new Map(out.map((t) => [t.key, t]));
-    const epics = rows.filter((r) => isEpic(r.type) && r.id);
+    // Serve what's already counted before opening a single cursor chain
+    // (DRY-72). Per-epic here rather than the all-or-nothing the Jira provider
+    // uses, because each epic costs its own request — so one new epic on the
+    // board should cost one request, not a recount of every other epic's years
+    // of closed children.
+    const pending: SwitchyardTicket[] = [];
+    for (const row of rows) {
+      if (!isEpic(row.type) || !row.id) continue;
+      const ticket = byKey.get(row.key);
+      if (!ticket) continue;
+      const known = this.childStats.peek(row.key);
+      // `capped` is a hit too, and deliberately: it means we already walked this
+      // epic's whole cursor chain and threw it away, so re-walking it every 20s
+      // is the "maximum cost, zero value" case rather than a fix for it.
+      if (known === undefined) pending.push(row);
+      else if (known !== "capped") ticket.childStats = known;
+    }
+    if (!pending.length) return;
+
+    const capped: string[] = [];
     let cursor = 0;
     const worker = async (): Promise<void> => {
-      for (let i = cursor++; i < epics.length; i = cursor++) {
-        const row = epics[i]!;
-        const ticket = byKey.get(row.key);
-        if (!ticket) continue;
+      for (let i = cursor++; i < pending.length; i = cursor++) {
+        const row = pending[i]!;
+        const ticket = byKey.get(row.key)!;
         try {
           // No limit → follows cursors, so an epic with more children than one
           // page holds is counted in full.
           const kids = await this.fetchPages({}, undefined, undefined, row.id);
           // Same rule as the Jira provider: a capped count is a wrong number
           // wearing an authoritative badge, so drop it and let the shell fall
-          // back rather than render a false ratio.
-          if (kids.truncated) continue;
+          // back rather than render a false ratio. The VERDICT is cached even
+          // though the count isn't: "this epic can't be counted" is a fact about
+          // the epic, not an error, and remembering it is what stops the most
+          // expensive query in the system running on every list refresh.
+          if (kids.truncated) {
+            this.childStats.putCapped(row.key);
+            capped.push(row.key);
+            continue;
+          }
           const byCategory: Partial<Record<TicketCategory, number>> = {};
           for (const k of kids.rows) {
             const c = mapCategory(k.status?.category, k.status?.display_name);
             byCategory[c] = (byCategory[c] ?? 0) + 1;
           }
-          ticket.childStats = { total: kids.rows.length, byCategory };
+          const stats = { total: kids.rows.length, byCategory };
+          ticket.childStats = stats;
+          // By reference, which is safe because nothing mutates one after this:
+          // a later pull that misses builds fresh counts, one that hits reads.
+          this.childStats.put(row.key, stats);
+          this.cappedWarned.delete(row.key);
         } catch {
           /* leave childStats unset; the shell degrades to loaded children */
         }
       }
     };
-    await Promise.all(Array.from({ length: Math.min(CHILD_STATS_POOL, epics.length) }, worker));
+    await Promise.all(Array.from({ length: Math.min(CHILD_STATS_POOL, pending.length) }, worker));
+
+    // Said out loud since DRY-72, once per epic rather than once per pass: an
+    // epic whose count is abandoned used to cost a full cursor chain on every
+    // refresh and show only as a missing progress bar, so there was nothing to
+    // connect the cost to.
+    const fresh = capped.filter((k) => !this.cappedWarned.has(k));
+    if (fresh.length) {
+      for (const k of fresh) this.cappedWarned.add(k);
+      console.warn(
+        `[drydock] switchyard: ${fresh.length} epic(s) exceeded ${MAX_TICKETS} children ` +
+          `(${fresh.slice(0, 3).join(", ")}${fresh.length > 3 ? ", …" : ""}), so their progress ` +
+          `bars will count only loaded children.`,
+      );
+    }
   }
 
   /**

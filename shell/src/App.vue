@@ -26,7 +26,14 @@ import {
   type SessionRecord,
 } from "./lib/daemon.js";
 import type { PermissionMode } from "./lib/protocol.js";
-import { TICKET_POLL_MS, getTrackerInfo, listTickets, type Ticket } from "./lib/tracker.js";
+import {
+  TICKET_POLL_MAX_MS,
+  TICKET_POLL_MS,
+  getTrackerInfo,
+  listTickets,
+  type Ticket,
+  type TicketPull,
+} from "./lib/tracker.js";
 import type { SessionInfo } from "./lib/protocol.js";
 
 // Persist the workspace arrangement per daemon host (DRY-14) so a reload
@@ -153,8 +160,23 @@ const initialInputById = reactive<Record<string, string>>({});
 const now = ref(Date.now());
 
 let poll: ReturnType<typeof setInterval> | null = null;
-let ticketPoll: ReturnType<typeof setInterval> | null = null;
+let ticketPoll: ReturnType<typeof setTimeout> | null = null;
 const refreshingTickets = ref(false);
+
+/**
+ * Consecutive failed ticket pulls, which lengthen the interval (DRY-72).
+ *
+ * Only a pull that THREW counts — a daemon that isn't answering. A pull the
+ * daemon served from cache with `stale` set is a success here even though the
+ * tracker is down, because the daemon is already retrying on its own schedule
+ * and asking it again costs nothing; backing off would only delay noticing the
+ * recovery it's working towards.
+ */
+let ticketFailures = 0;
+/** The pull in flight, so nothing starts a second one alongside it — see runTicketPull. */
+let ticketInFlight: Promise<void> | null = null;
+/** Set at teardown so no promise callback can arm a timer nothing will clear. */
+let ticketPollStopped = false;
 
 /**
  * Why the last ticket pull failed, or null while they're working (DRY-55).
@@ -185,44 +207,163 @@ const trackerError = ref<string | null>(null);
 // Only the latest in-flight load may commit its result or clear the spinner
 // (the sidebar disables the scope controls while refreshing is true).
 let loadEpoch = 0;
-async function loadTickets() {
+async function loadTickets(force = false) {
   const epoch = ++loadEpoch;
   refreshingTickets.value = true;
   try {
-    const list = await listTickets(true, {
-      projects: [...scopeProjects.value, ...userProjects.value],
-      backlog: showBacklog.value,
-    });
+    const pull = await listTickets(
+      true,
+      {
+        projects: [...scopeProjects.value, ...userProjects.value],
+        backlog: showBacklog.value,
+      },
+      force,
+    );
     if (epoch === loadEpoch) {
-      tickets.value = list;
-      trackerError.value = null;
-      clearNotice("tracker");
+      tickets.value = pull.tickets;
+      ticketFailures = 0;
+      // The daemon answered, but with a list it could not refresh (DRY-72).
+      // That's the same CONDITION the catch below reports, so it goes through
+      // the same reporter and reads identically — a tracker outage used to
+      // arrive here as a thrown fetch and now mostly doesn't, and reporting it
+      // anywhere else (or nowhere) is exactly how the stale marker stops
+      // appearing while every poll returns a cheerful 200.
+      if (pull.stale) reportTrackerTrouble(staleDetail(pull.stale));
+      else {
+        trackerError.value = null;
+        clearNotice("tracker");
+      }
     }
   } catch (e) {
-    // Keep the last-good list, but SAY that's what's on screen (DRY-55). The
-    // two cases are worded apart on purpose: an empty sidebar is a claim to
-    // correct, whereas a populated one is real data that has merely stopped
-    // being current — and only the second is how somebody spawns an agent
-    // against a ticket that closed an hour ago.
-    //
     // Epoch-guarded like the success path, which the old bare `catch` didn't
     // need: a slow pull failing after a newer one succeeded must not raise an
     // outage over a list that just arrived.
     if (epoch === loadEpoch) {
-      trackerError.value = String(e);
-      // Never the optimistic default — see providerNamed.
-      const who = providerNamed.value ? providerName.value : "the tracker";
-      setNotice(
-        "tracker",
-        tickets.value.length
-          ? `Tickets aren't refreshing from ${who} — the sidebar is showing the last list it returned`
-          : `Tickets aren't loading from ${who} — the sidebar is empty because of that, not because nothing matched`,
-        String(e),
-      );
+      ticketFailures++;
+      reportTrackerTrouble(String(e));
     }
   } finally {
     if (epoch === loadEpoch) refreshingTickets.value = false;
   }
+}
+
+/**
+ * Run a pull, and never two at once (DRY-72).
+ *
+ * Overlapping pulls are how the epoch guard in `loadTickets` turns into a
+ * silence: the older one's outcome is discarded on arrival, so if it was the one
+ * that failed, nothing reports. That guard exists for scope changes, where
+ * discarding the stale answer is right; it is not a licence to start pulls
+ * whenever. Since a poll, a visibility wake and the Refresh button can all want
+ * one, they queue here instead — cheap, because the daemon coalesces anyway.
+ */
+function runTicketPull(force = false): Promise<void> {
+  const prior = ticketInFlight ?? Promise.resolve();
+  // `loadTickets` never rejects (it reports instead), so this chain can't break.
+  const mine = prior.then(() => loadTickets(force));
+  ticketInFlight = mine;
+  void mine.finally(() => {
+    if (ticketInFlight === mine) ticketInFlight = null;
+  });
+  return mine;
+}
+
+/**
+ * Arm the next ticket pull (DRY-72) — a self-scheduling timeout rather than a
+ * fixed `setInterval`, because two things now vary.
+ *
+ * **Backoff.** A daemon that isn't answering was polled 180 times an hour to be
+ * told so 180 times. The delay doubles per consecutive failure up to
+ * TICKET_POLL_MAX_MS and resets on the first success. It only ever LENGTHENS the
+ * interval, which is what keeps `LIST_TIMEOUT_MS < TICKET_POLL_MS` true — that
+ * pairing is load-bearing and a backoff that could shorten the gap would break
+ * it silently (see the comment on the budget).
+ *
+ * **Visibility.** A hidden tab doesn't pull at all. This is not about saving the
+ * browser a fetch — since DRY-72 that fetch is a memory read at the daemon —
+ * it's that a poll keeps the daemon's cache entry live, so a Drydock tab left
+ * open on a laptop overnight is otherwise a background refresh against a
+ * corporate Jira every 20 seconds until morning. Coming back pulls immediately;
+ * `onVisibility` owns that half.
+ *
+ * Every arming is driven from a SETTLED pull, never fired alongside one. Arming
+ * beside the pull it just started reads the failure count from before that pull
+ * landed, so the delay is always one cycle behind what it describes — and the
+ * visible half of that is recovery: the success that resets the count arrives
+ * after the timer was already set from the backed-off value, so the sidebar
+ * would go on waiting out a two-minute interval it had just earned its way out
+ * of.
+ */
+function scheduleTicketPoll(): void {
+  if (ticketPoll) clearTimeout(ticketPoll);
+  ticketPoll = null;
+  // Nothing re-arms after teardown. `forceLoadTickets` and the visibility wake
+  // both schedule from a promise callback, which can land after onBeforeUnmount
+  // has cleared the timer — and a timer armed then is a chain that re-arms
+  // itself forever with nothing left holding a handle to stop it.
+  if (ticketPollStopped) return;
+  const delay = Math.min(TICKET_POLL_MS * 2 ** ticketFailures, TICKET_POLL_MAX_MS);
+  ticketPoll = setTimeout(tickTickets, delay);
+}
+
+/** One scheduled poll: pull if anybody is looking, then arm the next from the result. */
+async function tickTickets(): Promise<void> {
+  if (document.visibilityState === "visible") await (ticketInFlight ?? runTicketPull());
+  scheduleTicketPoll();
+}
+
+/**
+ * The sidebar's Refresh button and its outage Retry — the two places somebody
+ * says "no, ask again NOW". They force past the daemon's cache (DRY-72); a poll
+ * never does, or the cache would buy nothing.
+ */
+function forceLoadTickets(): void {
+  void runTicketPull(true).then(scheduleTicketPoll);
+}
+
+/** Back at the desk — pull now, and reset the cadence around it. */
+function wakeTicketPoll(): void {
+  void (ticketInFlight ?? runTicketPull()).then(scheduleTicketPoll);
+}
+
+/**
+ * How stale, in words. The daemon sends the age of what it's serving and the
+ * marker is what somebody reads to decide whether to trust the row in front of
+ * them — "the last pull failed" and "the last pull failed and this is eleven
+ * minutes old" are different decisions.
+ */
+function staleDetail(stale: NonNullable<TicketPull["stale"]>): string {
+  const secs = Math.round(stale.ageMs / 1000);
+  const age = secs < 90 ? `${secs}s` : `${Math.round(secs / 60)}m`;
+  return `${stale.error} — the list on screen is ${age} old`;
+}
+
+/**
+ * Say that the ticket list has stopped being current, however we found out.
+ *
+ * Keep the last-good list, but SAY that's what's on screen (DRY-55). The two
+ * cases are worded apart on purpose: an empty sidebar is a claim to correct,
+ * whereas a populated one is real data that has merely stopped being current —
+ * and only the second is how somebody spawns an agent against a ticket that
+ * closed an hour ago.
+ *
+ * One function for both the thrown case and the daemon's `stale` (DRY-72)
+ * because they're one condition wearing two transports, and the sidebar keys
+ * its marker and its outage block off the single `pullError` either way. Two
+ * copies of this wording drifting apart would show up as an outage that reads
+ * differently depending on whether the daemon or the tracker was the one down.
+ */
+function reportTrackerTrouble(why: string): void {
+  trackerError.value = why;
+  // Never the optimistic default — see providerNamed.
+  const who = providerNamed.value ? providerName.value : "the tracker";
+  setNotice(
+    "tracker",
+    tickets.value.length
+      ? `Tickets aren't refreshing from ${who} — the sidebar is showing the last list it returned`
+      : `Tickets aren't loading from ${who} — the sidebar is empty because of that, not because nothing matched`,
+    why,
+  );
 }
 
 function basename(p: string): string {
@@ -545,7 +686,17 @@ async function announceSweepLoss(): Promise<void> {
  * countdown on the card is what covers the rest.
  */
 function onVisibility(): void {
-  if (document.visibilityState === "visible") return;
+  if (document.visibilityState === "visible") {
+    // Back at the desk: pull now (DRY-72). The poll skips while hidden, so
+    // without this the sidebar shows however old the list was when you left for
+    // up to a full interval — and after a run of failures that interval may
+    // have backed off to two minutes. Through wakeTicketPoll so it joins a pull
+    // already running rather than racing one: visibility can fire repeatedly and
+    // faster than LIST_TIMEOUT_MS, which is exactly how two pulls end up in
+    // flight and the older one's failure gets swallowed.
+    wakeTicketPoll();
+    return;
+  }
   for (const id of Object.keys(finishedSeenAt)) delete finishedSeenAt[id];
 }
 
@@ -1384,7 +1535,7 @@ onMounted(async () => {
     // rather than reading a missing field as "never sweep".
     if (c?.desk) clearFinishedAfterMs.value = c.desk.clearFinishedAfterMs;
   });
-  await loadTickets();
+  await runTicketPull();
   // Restore the saved arrangement before the first poll. reconcile() then keeps
   // restored windows whose sessions are still alive (at their saved geometry),
   // drops those whose session is gone, and cascade-adds any new ones. Rehydrate
@@ -1400,13 +1551,11 @@ onMounted(async () => {
 
   await refresh();
   poll = setInterval(refresh, 3000);
-  // Tickets change far less often than sessions and each fetch hits Switchyard
-  // live, so poll them on a slower cadence (DRY-17). The sidebar refresh button
-  // forces an immediate re-pull between ticks.
-  // The interval is imported rather than written here because the pull's own
-  // budget is chosen against it — see LIST_TIMEOUT_MS, where the two being
-  // equal silently disables the reporting this feature is.
-  ticketPoll = setInterval(loadTickets, TICKET_POLL_MS);
+  // Tickets change far less often than sessions, so they poll on a slower
+  // cadence (DRY-17) — one that now varies with visibility and failures, hence
+  // a self-scheduling timeout (DRY-72). The sidebar refresh button forces an
+  // immediate re-pull between ticks, past the daemon's cache.
+  scheduleTicketPoll();
 
   if (deskEl.value) {
     const r = deskEl.value.getBoundingClientRect();
@@ -1425,7 +1574,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (poll) clearInterval(poll);
-  if (ticketPoll) clearInterval(ticketPoll);
+  ticketPollStopped = true;
+  if (ticketPoll) clearTimeout(ticketPoll);
   stopGateStream();
   deskObs?.disconnect();
   window.removeEventListener("keydown", onKey, true);
@@ -1542,7 +1692,7 @@ onBeforeUnmount(() => {
         :user-projects="userProjects"
         :show-backlog="showBacklog"
         @launch="openTicket"
-        @refresh="loadTickets"
+        @refresh="forceLoadTickets"
         @add-project="addScopeProject"
         @remove-project="removeScopeProject"
         @toggle-backlog="toggleBacklog"

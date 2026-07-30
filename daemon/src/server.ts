@@ -18,6 +18,7 @@ import {
 import type { ClientMessage, EventMessage } from "./protocol.js";
 import { createTracker, trackerInfo } from "./tracker/index.js";
 import { ticketContext } from "./tracker/context.js";
+import { TicketListCache, ticketQueryKey } from "./tracker/cache.js";
 import { createStore } from "./state/index.js";
 import { runEndHandler } from "./runs.js";
 import { SessionHistoryRecorder } from "./history.js";
@@ -26,6 +27,10 @@ import { knownTranscripts } from "./transcripts.js";
 const manager = new SessionManager();
 const tracker = createTracker();
 const store = createStore();
+// The sidebar's pull, cached and coalesced (DRY-72). One per daemon, keyed by
+// query, so every browser tab on the same scope shares one fan-out at the
+// tracker instead of each paying for its own.
+const ticketCache = new TicketListCache(CONFIG.tracker.cache.ticketsMs);
 
 // An autonomous run that reaches a terminal state leaves a handoff document
 // and (capability permitting) a tracker comment behind (DRY-49). Subscribed
@@ -679,16 +684,32 @@ const server = http.createServer(async (req, res) => {
     };
 
     if (pathname === "/api/tracker/tickets" && req.method === "GET") {
+      const query = {
+        project: url.searchParams.get("project") ?? undefined,
+        projects: scopedProjects(),
+        open: url.searchParams.get("open") === "true",
+        // Backlog stays out of the pull unless asked for (DRY-30).
+        includeBacklog: url.searchParams.get("backlog") === "true",
+        text: url.searchParams.get("text") ?? undefined,
+      };
       try {
-        const tickets = await tracker.listTickets({
-          project: url.searchParams.get("project") ?? undefined,
-          projects: scopedProjects(),
-          open: url.searchParams.get("open") === "true",
-          // Backlog stays out of the pull unless asked for (DRY-30).
-          includeBacklog: url.searchParams.get("backlog") === "true",
-          text: url.searchParams.get("text") ?? undefined,
-        });
-        return send(res, 200, { tickets });
+        // Cached and coalesced (DRY-72) — see tracker/cache.ts. This is the
+        // sidebar's 20s poll, once per browser tab, and against a corporate Jira
+        // the underlying pull runs 5.7-6s; without this the daemon re-ran the
+        // whole fan-out for every tab on every tick, and the browser waited on
+        // it. Note what the cache does NOT do: it never answers with a failure,
+        // so `stale` rides along instead and the sidebar can still say the list
+        // has stopped moving (DRY-55). Only a cold cache can 502 here now.
+        const { tickets, stale } = await ticketCache.get(
+          ticketQueryKey(query),
+          () => tracker.listTickets(query),
+          // `fresh=true` is the sidebar's Refresh button (and its outage Retry)
+          // overruling the cadence. Without it that button would spin against
+          // the cache and change nothing — and the one moment somebody presses
+          // it is the moment they've stopped trusting what's on screen.
+          { force: url.searchParams.get("fresh") === "true" },
+        );
+        return send(res, 200, { tickets, ...(stale ? { stale } : {}) });
       } catch (err) {
         return send(res, 502, { error: `tracker: ${String(err)}` });
       }
