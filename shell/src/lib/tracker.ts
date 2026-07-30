@@ -59,6 +59,16 @@ export interface TicketDetail extends Ticket {
 export interface TrackerInfo {
   id: string;
   name: string;
+  /**
+   * What the provider can WRITE. `comment` is DRY-49 posting a run's outcome
+   * back to a ticket — not the `comments` thread above, which is DRY-53 reading
+   * one and is always available.
+   *
+   * Carried, not consumed: nothing in the shell reads either flag (DRY-73). It
+   * stays on the type because it is part of what `/api/tracker/info` returns and
+   * dropping it would make this mirror of the daemon's shape a lie — but don't
+   * write a comment here claiming the UI branches on it. It doesn't.
+   */
   capabilities: { comment: boolean; transition: boolean };
   /** Host-configured default project scope (DRY-30); empty = unscoped. */
   projects: string[];

@@ -56,6 +56,17 @@ function deny() {
   }
   emit("resolve", "deny", reason.value.trim() || undefined);
 }
+
+/**
+ * Back out of a denial without answering (DRY-73). Mirrors GatePanel's — see the note
+ * there. Unreachable while no host passes `allowReason`, and kept in step
+ * deliberately: these two are each other's reference, so a fix applied to one
+ * is how the other reintroduces the bug.
+ */
+function cancelDeny() {
+  denying.value = false;
+  reason.value = "";
+}
 </script>
 
 <template>
@@ -71,16 +82,26 @@ function deny() {
         v-model="reason"
         placeholder="Tell the agent why — it goes back as the tool result"
         @keydown.enter="deny"
+        @keydown.esc="cancelDeny"
       />
     </div>
 
+    <!-- Once the reason field is open the choice is send-or-back-out (DRY-73); Approve
+         beside it is the opposite answer sitting where the eye expects the
+         confirm button. -->
     <div class="permission-actions">
-      <button class="approve" :disabled="busy" @click="approve">
-        {{ busy ? "Sending…" : "Approve" }}
-      </button>
-      <button class="deny" :disabled="busy" @click="deny">
-        {{ allowReason && denying ? "Send denial" : "Deny" }}
-      </button>
+      <template v-if="allowReason && denying">
+        <button class="cancel" :disabled="busy" @click="cancelDeny">Cancel</button>
+        <button class="deny" :disabled="busy" @click="deny">
+          {{ busy ? "Sending…" : "Send denial" }}
+        </button>
+      </template>
+      <template v-else>
+        <button class="approve" :disabled="busy" @click="approve">
+          {{ busy ? "Sending…" : "Approve" }}
+        </button>
+        <button class="deny" :disabled="busy" @click="deny">Deny</button>
+      </template>
     </div>
   </div>
 </template>
@@ -156,5 +177,10 @@ function deny() {
 .deny {
   background: #5c2b2b;
   color: #f0c9c4;
+}
+/* Neutral, so the red one stays the only thing that answers the gate (DRY-73). */
+.cancel {
+  background: #23292f;
+  color: #b9c3cf;
 }
 </style>

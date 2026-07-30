@@ -12,7 +12,7 @@
 // the argument is already on screen above it. This one is what you get when
 // there is no terminal, so it has to show the argument itself, say honestly
 // what it truncated, and carry the run-scoped controls.
-import { computed, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import type { OpenGate } from "../composables/gateStore.js";
 
 const props = defineProps<{
@@ -83,16 +83,57 @@ function bytes(n: number): string {
   return n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`;
 }
 
+const reasonEl = ref<HTMLInputElement | null>(null);
+const denyBtn = ref<HTMLButtonElement | null>(null);
+
 // Deny opens a field rather than firing immediately: a bare denial usually just
 // makes the agent retry the identical call, so the reason is what turns "no"
 // into a redirect. It goes back as the tool result.
 function deny() {
   if (!denying.value) {
     denying.value = true;
+    // Focus is MOVED, not left to `autofocus` (DRY-73). Entering deny mode
+    // swaps the whole action row, which destroys the button that was just
+    // clicked — and a destroyed activeElement drops focus to <body>, stranding
+    // a keyboard user mid-decision with no way to reach Send denial. `autofocus`
+    // is unreliable on a dynamically inserted element, so it isn't relied on.
+    void nextTick(() => reasonEl.value?.focus());
     return;
   }
   emit("resolve", "deny", reason.value.trim() || undefined);
 }
+
+/**
+ * Back out of a denial without answering the gate (DRY-73).
+ *
+ * There was no way to do this: opening the field left the approve buttons up
+ * beside it, so the only exits from a denial you'd started were to send it or to
+ * approve — and approving out of a half-typed denial is not a way back, it's the
+ * opposite answer. The gate stays open and held either way; nothing here
+ * resolves it.
+ */
+function cancelDeny() {
+  denying.value = false;
+  reason.value = "";
+  // Same reason as above, in reverse: leaving deny mode destroys the button that
+  // was clicked, so focus is handed back to the control that opened the field.
+  void nextTick(() => denyBtn.value?.focus());
+}
+
+/**
+ * Escape, routed from App.vue via the rail rather than handled here (DRY-73).
+ *
+ * A local `@keydown.esc` fires on the bubble phase, and App.vue's Escape handler
+ * is on window/capture — so it runs FIRST and closes the ticket detail on the
+ * way to a keystroke the user meant for this field. One key, two layers, and the
+ * typed reason discarded as a side effect. Returns whether it consumed the key.
+ */
+function cancelDenialIfOpen(): boolean {
+  if (!denying.value) return false;
+  cancelDeny();
+  return true;
+}
+defineExpose({ cancelDenialIfOpen });
 </script>
 
 <template>
@@ -123,29 +164,44 @@ function deny() {
     <div class="where">in {{ cwd }}</div>
 
     <div v-if="denying" class="reason">
+      <!-- No `@keydown.esc` and no `autofocus`: both are handled in script, and
+           the comments on `cancelDenialIfOpen` / `deny` say why. -->
       <input
+        ref="reasonEl"
         v-model="reason"
-        autofocus
         placeholder="Tell the agent why — it goes back as a tool result"
         @keydown.enter="deny"
       />
     </div>
 
+    <!-- Asking for a reason changes what the panel is FOR, so it changes what it
+         offers (DRY-73). Leaving the approve buttons up beside the reason field
+         put three answers on screen for a decision already made, two of them the
+         opposite of the one being composed — and "Deny…" turning into "Send
+         denial" while "Approve ↵" stayed put made the primary button the one
+         that discards what you just typed. -->
     <div class="actions">
-      <!-- The escape hatch is a link, deliberately: it ends autonomy. -->
+      <!-- The escape hatch is a link, deliberately: it ends autonomy. It stays
+           in both modes — it's the way out of the decision, not an answer to it. -->
       <button class="link escape" @click="emit('terminal')">Open the terminal instead</button>
       <span class="spacer"></span>
-      <button class="ghost" :disabled="busy" @click="deny">
-        {{ denying ? "Send denial" : "Deny…" }}
-      </button>
-      <!-- Session-scoped AND tool-scoped, and the button says which tool rather
-           than "Always" — it never persists past this run. -->
-      <button class="ghost" :disabled="busy" @click="emit('resolve', 'allow', undefined, true)">
-        Always allow {{ gate.tool }}
-      </button>
-      <button class="approve" :disabled="busy" @click="emit('resolve', 'allow')">
-        {{ busy ? "Sending…" : "Approve ↵" }}
-      </button>
+      <template v-if="denying">
+        <button class="ghost" :disabled="busy" @click="cancelDeny">Cancel</button>
+        <button class="danger" :disabled="busy" @click="deny">
+          {{ busy ? "Sending…" : "Send denial" }}
+        </button>
+      </template>
+      <template v-else>
+        <button ref="denyBtn" class="ghost" :disabled="busy" @click="deny">Deny…</button>
+        <!-- Session-scoped AND tool-scoped, and the button says which tool rather
+             than "Always" — it never persists past this run. -->
+        <button class="ghost" :disabled="busy" @click="emit('resolve', 'allow', undefined, true)">
+          Always allow {{ gate.tool }}
+        </button>
+        <button class="approve" :disabled="busy" @click="emit('resolve', 'allow')">
+          {{ busy ? "Sending…" : "Approve ↵" }}
+        </button>
+      </template>
     </div>
   </div>
 </template>
@@ -316,6 +372,23 @@ function deny() {
 }
 .ghost:hover:not(:disabled) {
   background: #1a1f26;
+}
+/* Send denial is the commit button while the reason field is open (DRY-73), so it carries
+   .approve's weight rather than sitting there as a third ghost — a row where
+   nothing is primary reads as though no decision has been reached. Red because
+   it is the one button here that answers "no". */
+.danger {
+  padding: 7px 14px;
+  border-radius: 7px;
+  border: none;
+  background: #a33a30;
+  color: #fdeceb;
+  font-size: 12.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.danger:hover:not(:disabled) {
+  background: #b8443a;
 }
 /* Approve is the only filled button on the panel. */
 .approve {

@@ -166,7 +166,26 @@ export interface TicketQuery {
   limit?: number;
 }
 
-/** Optional, capability-gated writes. The UI hides what a provider can't do. */
+/**
+ * Optional, capability-gated writes.
+ *
+ * `comment` here is the WRITE, and it belongs to DRY-49 — posting an autonomous
+ * run's outcome back to its ticket. It is not the comment thread the rest of
+ * this file is full of: that is DRY-53 READING an existing ticket to brief an
+ * agent, it needs no capability (a provider with no thread to give just omits
+ * it), and it flows the opposite way. Only the write can be unavailable, which
+ * is why only the write is gated — the fixture provider advertises
+ * `comment: false` so the zero-config default proves a run's record stands up
+ * without a tracker at all.
+ *
+ * The reader is `runs.ts`, and only `runs.ts`. This used to say "the UI hides
+ * what a provider can't do", which was never true of `comment` and is not true
+ * of `transition` either: the flags are shipped to the browser on
+ * `/api/tracker/info` and the shell reads neither. Nothing renders differently
+ * for a provider that can't comment — which is defensible, since the surface
+ * that would (the rail's terminal state) is required to stand alone anyway
+ * (DRY-73).
+ */
 export interface TrackerCapabilities {
   comment: boolean;
   transition: boolean;
@@ -175,6 +194,10 @@ export interface TrackerCapabilities {
 /**
  * One issue tracker. The shell depends on this, not on Switchyard or Jira.
  * `comment` / `transition` are optional and advertised via `capabilities`.
+ *
+ * Mind the direction of travel, since comments appear on both sides of this
+ * interface: `getTicket({ thread: true })` reads a thread INTO a spawning agent
+ * (DRY-53), `comment()` writes what that agent did back OUT (DRY-49).
  */
 export interface TrackerProvider {
   readonly id: string; // 'switchyard' | 'jira' | 'fixture'
@@ -186,6 +209,15 @@ export interface TrackerProvider {
   searchTickets(text: string, projects?: string[]): Promise<Ticket[]>; // Ctrl+K palette / search endpoint
   getTicket(key: string, opts?: TicketDetailOptions): Promise<TicketDetail>;
 
+  /**
+   * Post to a ticket's thread — in practice an autonomous run's outcome
+   * (DRY-49, `runs.ts`), which is the only caller.
+   *
+   * Best-effort by contract, not by accident: the caller fires this without
+   * awaiting it and swallows the rejection, because the durable record of a run
+   * is the handoff document on disk and this is a pointer to it. Never make
+   * anything depend on it having landed.
+   */
   comment?(key: string, body: string): Promise<void>;
   transition?(key: string, to: string): Promise<void>;
 }

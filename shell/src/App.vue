@@ -1425,6 +1425,9 @@ const focusedRepo = computed(() => {
 
 const layouts: LayoutMode[] = ["float", "tile", "focus"];
 
+/** The rail, for the Escape chain in onKey. See the Escape branch for why. */
+const rail = ref<{ handleEscape: () => boolean } | null>(null);
+
 // --- desktop sizing ---
 const deskEl = ref<HTMLDivElement | null>(null);
 let deskObs: ResizeObserver | null = null;
@@ -1500,6 +1503,18 @@ function onKey(e: KeyboardEvent) {
   // before one keystroke collapses both layers and discards a typed prompt.
   if (e.key === "Escape") {
     if (quickOpen.value) return;
+    // The rail's own transient layers — the run chooser, and a gate panel with
+    // its deny-reason field open — are consulted HERE rather than owning a
+    // listener of their own (DRY-73). Two listeners on window/capture cannot
+    // order themselves: `stopPropagation` does nothing between siblings on one
+    // target, and `stopImmediatePropagation` would let the rail outrank the
+    // palette above it. One handler that knows every layer is the only version
+    // of this that can be read and checked.
+    if (rail.value?.handleEscape()) {
+      e.preventDefault();
+      e.stopPropagation();
+      return;
+    }
     if (selectedTicket.value) selectedTicket.value = null;
   }
 }
@@ -1768,6 +1783,7 @@ onBeforeUnmount(() => {
              answer a gate no pane is showing (DRY-49, absorbing DRY-50's
              tray and the dock). -->
         <RunRail
+          ref="rail"
           :runs="autonomousRuns"
           :sessions="sessionList"
           :docked="dockItems"
