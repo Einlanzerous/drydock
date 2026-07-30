@@ -1,5 +1,6 @@
 import { CONFIG } from "../config.js";
 import { log } from "../log.js";
+import { ChildStatsCache } from "./cache.js";
 import { FixtureProvider } from "./fixture.js";
 import { JiraProvider } from "./jira.js";
 import { SwitchyardProvider } from "./switchyard.js";
@@ -15,6 +16,15 @@ export type { Ticket, TicketDetail, Project, TicketQuery, TrackerProvider } from
  */
 export function createTracker(): TrackerProvider {
   const kind = CONFIG.tracker.kind;
+  // Built here and handed to whichever provider is selected (DRY-72). One
+  // instance because what it caches — "what the tracker says about this epic" —
+  // is a property of the tracker rather than of the code asking, and because the
+  // two providers must not drift on how long that stays good for. Injected
+  // rather than reached for as a module singleton so a provider stays
+  // constructible in isolation, same rule as `repoOverrides`.
+  const childStats = new ChildStatsCache(CONFIG.tracker.cache.childStatsMs);
+  // 0 means "no deadline" (see config.ts); the providers read absent that way.
+  const requestTimeoutMs = CONFIG.tracker.requestTimeoutMs || undefined;
 
   if (kind === "switchyard") {
     const { url, token } = CONFIG.tracker.switchyard;
@@ -24,11 +34,7 @@ export function createTracker(): TrackerProvider {
       );
       return new FixtureProvider();
     }
-    return new SwitchyardProvider({
-      baseUrl: url,
-      token,
-      requestTimeoutMs: CONFIG.tracker.requestTimeoutMs,
-    });
+    return new SwitchyardProvider({ baseUrl: url, token, requestTimeoutMs, childStats });
   }
 
   if (kind === "jira") {
@@ -46,7 +52,8 @@ export function createTracker(): TrackerProvider {
       // For multi-component tickets: prefer the component this host has an
       // explicit repo path for (DRY-31).
       repoOverrides: Object.keys(CONFIG.repos.overrides),
-      requestTimeoutMs: CONFIG.tracker.requestTimeoutMs,
+      requestTimeoutMs,
+      childStats,
     });
   }
 

@@ -32,6 +32,7 @@ import {
   getTrackerInfo,
   listTickets,
   type Ticket,
+  type TicketPull,
 } from "./lib/tracker.js";
 import type { SessionInfo } from "./lib/protocol.js";
 
@@ -172,6 +173,10 @@ const refreshingTickets = ref(false);
  * recovery it's working towards.
  */
 let ticketFailures = 0;
+/** The pull in flight, so nothing starts a second one alongside it — see runTicketPull. */
+let ticketInFlight: Promise<void> | null = null;
+/** Set at teardown so no promise callback can arm a timer nothing will clear. */
+let ticketPollStopped = false;
 
 /**
  * Why the last ticket pull failed, or null while they're working (DRY-55).
@@ -223,7 +228,7 @@ async function loadTickets(force = false) {
       // arrive here as a thrown fetch and now mostly doesn't, and reporting it
       // anywhere else (or nowhere) is exactly how the stale marker stops
       // appearing while every poll returns a cheerful 200.
-      if (pull.stale) reportTrackerTrouble(pull.stale.error);
+      if (pull.stale) reportTrackerTrouble(staleDetail(pull.stale));
       else {
         trackerError.value = null;
         clearNotice("tracker");
@@ -243,20 +248,26 @@ async function loadTickets(force = false) {
 }
 
 /**
- * Say that the ticket list has stopped being current, however we found out.
+ * Run a pull, and never two at once (DRY-72).
  *
- * Keep the last-good list, but SAY that's what's on screen (DRY-55). The two
- * cases are worded apart on purpose: an empty sidebar is a claim to correct,
- * whereas a populated one is real data that has merely stopped being current —
- * and only the second is how somebody spawns an agent against a ticket that
- * closed an hour ago.
- *
- * One function for both the thrown case and the daemon's `stale` (DRY-72)
- * because they're one condition wearing two transports, and the sidebar keys
- * its marker and its outage block off the single `pullError` either way. Two
- * copies of this wording drifting apart would show up as an outage that reads
- * differently depending on whether the daemon or the tracker was the one down.
+ * Overlapping pulls are how the epoch guard in `loadTickets` turns into a
+ * silence: the older one's outcome is discarded on arrival, so if it was the one
+ * that failed, nothing reports. That guard exists for scope changes, where
+ * discarding the stale answer is right; it is not a licence to start pulls
+ * whenever. Since a poll, a visibility wake and the Refresh button can all want
+ * one, they queue here instead — cheap, because the daemon coalesces anyway.
  */
+function runTicketPull(force = false): Promise<void> {
+  const prior = ticketInFlight ?? Promise.resolve();
+  // `loadTickets` never rejects (it reports instead), so this chain can't break.
+  const mine = prior.then(() => loadTickets(force));
+  ticketInFlight = mine;
+  void mine.finally(() => {
+    if (ticketInFlight === mine) ticketInFlight = null;
+  });
+  return mine;
+}
+
 /**
  * Arm the next ticket pull (DRY-72) — a self-scheduling timeout rather than a
  * fixed `setInterval`, because two things now vary.
@@ -274,14 +285,31 @@ async function loadTickets(force = false) {
  * open on a laptop overnight is otherwise a background refresh against a
  * corporate Jira every 20 seconds until morning. Coming back pulls immediately;
  * `onVisibility` owns that half.
+ *
+ * Every arming is driven from a SETTLED pull, never fired alongside one. Arming
+ * beside the pull it just started reads the failure count from before that pull
+ * landed, so the delay is always one cycle behind what it describes — and the
+ * visible half of that is recovery: the success that resets the count arrives
+ * after the timer was already set from the backed-off value, so the sidebar
+ * would go on waiting out a two-minute interval it had just earned its way out
+ * of.
  */
 function scheduleTicketPoll(): void {
   if (ticketPoll) clearTimeout(ticketPoll);
+  ticketPoll = null;
+  // Nothing re-arms after teardown. `forceLoadTickets` and the visibility wake
+  // both schedule from a promise callback, which can land after onBeforeUnmount
+  // has cleared the timer — and a timer armed then is a chain that re-arms
+  // itself forever with nothing left holding a handle to stop it.
+  if (ticketPollStopped) return;
   const delay = Math.min(TICKET_POLL_MS * 2 ** ticketFailures, TICKET_POLL_MAX_MS);
-  ticketPoll = setTimeout(() => {
-    if (document.visibilityState === "visible") void loadTickets();
-    scheduleTicketPoll();
-  }, delay);
+  ticketPoll = setTimeout(tickTickets, delay);
+}
+
+/** One scheduled poll: pull if anybody is looking, then arm the next from the result. */
+async function tickTickets(): Promise<void> {
+  if (document.visibilityState === "visible") await (ticketInFlight ?? runTicketPull());
+  scheduleTicketPoll();
 }
 
 /**
@@ -290,9 +318,41 @@ function scheduleTicketPoll(): void {
  * never does, or the cache would buy nothing.
  */
 function forceLoadTickets(): void {
-  void loadTickets(true).finally(scheduleTicketPoll);
+  void runTicketPull(true).then(scheduleTicketPoll);
 }
 
+/** Back at the desk — pull now, and reset the cadence around it. */
+function wakeTicketPoll(): void {
+  void (ticketInFlight ?? runTicketPull()).then(scheduleTicketPoll);
+}
+
+/**
+ * How stale, in words. The daemon sends the age of what it's serving and the
+ * marker is what somebody reads to decide whether to trust the row in front of
+ * them — "the last pull failed" and "the last pull failed and this is eleven
+ * minutes old" are different decisions.
+ */
+function staleDetail(stale: NonNullable<TicketPull["stale"]>): string {
+  const secs = Math.round(stale.ageMs / 1000);
+  const age = secs < 90 ? `${secs}s` : `${Math.round(secs / 60)}m`;
+  return `${stale.error} — the list on screen is ${age} old`;
+}
+
+/**
+ * Say that the ticket list has stopped being current, however we found out.
+ *
+ * Keep the last-good list, but SAY that's what's on screen (DRY-55). The two
+ * cases are worded apart on purpose: an empty sidebar is a claim to correct,
+ * whereas a populated one is real data that has merely stopped being current —
+ * and only the second is how somebody spawns an agent against a ticket that
+ * closed an hour ago.
+ *
+ * One function for both the thrown case and the daemon's `stale` (DRY-72)
+ * because they're one condition wearing two transports, and the sidebar keys
+ * its marker and its outage block off the single `pullError` either way. Two
+ * copies of this wording drifting apart would show up as an outage that reads
+ * differently depending on whether the daemon or the tracker was the one down.
+ */
 function reportTrackerTrouble(why: string): void {
   trackerError.value = why;
   // Never the optimistic default — see providerNamed.
@@ -630,9 +690,11 @@ function onVisibility(): void {
     // Back at the desk: pull now (DRY-72). The poll skips while hidden, so
     // without this the sidebar shows however old the list was when you left for
     // up to a full interval — and after a run of failures that interval may
-    // have backed off to two minutes.
-    void loadTickets();
-    scheduleTicketPoll();
+    // have backed off to two minutes. Through wakeTicketPoll so it joins a pull
+    // already running rather than racing one: visibility can fire repeatedly and
+    // faster than LIST_TIMEOUT_MS, which is exactly how two pulls end up in
+    // flight and the older one's failure gets swallowed.
+    wakeTicketPoll();
     return;
   }
   for (const id of Object.keys(finishedSeenAt)) delete finishedSeenAt[id];
@@ -1473,7 +1535,7 @@ onMounted(async () => {
     // rather than reading a missing field as "never sweep".
     if (c?.desk) clearFinishedAfterMs.value = c.desk.clearFinishedAfterMs;
   });
-  await loadTickets();
+  await runTicketPull();
   // Restore the saved arrangement before the first poll. reconcile() then keeps
   // restored windows whose sessions are still alive (at their saved geometry),
   // drops those whose session is gone, and cascade-adds any new ones. Rehydrate
@@ -1512,6 +1574,7 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   if (poll) clearInterval(poll);
+  ticketPollStopped = true;
   if (ticketPoll) clearTimeout(ticketPoll);
   stopGateStream();
   deskObs?.disconnect();

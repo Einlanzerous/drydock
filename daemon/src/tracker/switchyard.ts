@@ -1,4 +1,4 @@
-import { childStatsCache } from "./cache.js";
+import { ChildStatsCache } from "./cache.js";
 import type {
   Project,
   Ticket,
@@ -25,6 +25,12 @@ export interface SwitchyardConfig {
    * Omitted = no deadline, which is what shipped before.
    */
   requestTimeoutMs?: number;
+  /**
+   * Where epic child counts are remembered between pulls (DRY-72). Injected, and
+   * shared with whatever other provider a host might construct, because it caches
+   * a property of the TRACKER rather than of this class. Omitted = no caching.
+   */
+  childStats?: ChildStatsCache;
 }
 
 // Shape returned by the Switchyard API (subset we consume).
@@ -183,16 +189,25 @@ export class SwitchyardProvider implements TrackerProvider {
   private readonly baseUrl: string;
   private readonly token?: string;
   private readonly requestTimeoutMs?: number;
+  /** DRY-72. A disabled instance when the host injected none, so no `?.` below. */
+  private readonly childStats: ChildStatsCache;
   /**
-   * Latched while epics are exceeding MAX_TICKETS, so the warning is one line
-   * per onset rather than one per sidebar poll (DRY-72).
+   * Epics already reported as uncountable, so the warning is one line per onset
+   * rather than one per sidebar poll (DRY-72).
+   *
+   * A SET of keys and not a boolean, because a boolean is wrong HERE in a way it
+   * isn't in the Jira provider: `listTickets` fans out one nested call per
+   * project, each running its own child-stats pass, so a project with no capped
+   * epics would clear the flag a previous project had just set and the "one line
+   * per onset" warning would print on essentially every refresh.
    */
-  private childStatsCapped = false;
+  private readonly cappedWarned = new Set<string>();
 
   constructor(cfg: SwitchyardConfig) {
     this.baseUrl = cfg.baseUrl.replace(/\/$/, "");
     this.token = cfg.token;
     this.requestTimeoutMs = cfg.requestTimeoutMs;
+    this.childStats = cfg.childStats ?? new ChildStatsCache(0);
   }
 
   private async req(path: string, init?: RequestInit): Promise<any> {
@@ -289,9 +304,12 @@ export class SwitchyardProvider implements TrackerProvider {
       if (!isEpic(row.type) || !row.id) continue;
       const ticket = byKey.get(row.key);
       if (!ticket) continue;
-      const cached = childStatsCache.get(row.key);
-      if (cached) ticket.childStats = cached;
-      else pending.push(row);
+      const known = this.childStats.peek(row.key);
+      // `capped` is a hit too, and deliberately: it means we already walked this
+      // epic's whole cursor chain and threw it away, so re-walking it every 20s
+      // is the "maximum cost, zero value" case rather than a fix for it.
+      if (known === undefined) pending.push(row);
+      else if (known !== "capped") ticket.childStats = known;
     }
     if (!pending.length) return;
 
@@ -307,9 +325,12 @@ export class SwitchyardProvider implements TrackerProvider {
           const kids = await this.fetchPages({}, undefined, undefined, row.id);
           // Same rule as the Jira provider: a capped count is a wrong number
           // wearing an authoritative badge, so drop it and let the shell fall
-          // back rather than render a false ratio. Not cached either — there's
-          // nothing here worth keeping.
+          // back rather than render a false ratio. The VERDICT is cached even
+          // though the count isn't: "this epic can't be counted" is a fact about
+          // the epic, not an error, and remembering it is what stops the most
+          // expensive query in the system running on every list refresh.
           if (kids.truncated) {
+            this.childStats.putCapped(row.key);
             capped.push(row.key);
             continue;
           }
@@ -322,7 +343,8 @@ export class SwitchyardProvider implements TrackerProvider {
           ticket.childStats = stats;
           // By reference, which is safe because nothing mutates one after this:
           // a later pull that misses builds fresh counts, one that hits reads.
-          childStatsCache.put(row.key, stats);
+          this.childStats.put(row.key, stats);
+          this.cappedWarned.delete(row.key);
         } catch {
           /* leave childStats unset; the shell degrades to loaded children */
         }
@@ -330,18 +352,18 @@ export class SwitchyardProvider implements TrackerProvider {
     };
     await Promise.all(Array.from({ length: Math.min(CHILD_STATS_POOL, pending.length) }, worker));
 
-    // Said out loud since DRY-72, latched: an epic whose count is abandoned
-    // costs a full cursor chain on every refresh and shows only as a missing
-    // progress bar, so there was nothing to connect the cost to.
-    if (capped.length && !this.childStatsCapped) {
-      this.childStatsCapped = true;
+    // Said out loud since DRY-72, once per epic rather than once per pass: an
+    // epic whose count is abandoned used to cost a full cursor chain on every
+    // refresh and show only as a missing progress bar, so there was nothing to
+    // connect the cost to.
+    const fresh = capped.filter((k) => !this.cappedWarned.has(k));
+    if (fresh.length) {
+      for (const k of fresh) this.cappedWarned.add(k);
       console.warn(
-        `[drydock] switchyard: ${capped.length} epic(s) exceeded ${MAX_TICKETS} children ` +
-          `(${capped.slice(0, 3).join(", ")}${capped.length > 3 ? ", …" : ""}), so their progress ` +
+        `[drydock] switchyard: ${fresh.length} epic(s) exceeded ${MAX_TICKETS} children ` +
+          `(${fresh.slice(0, 3).join(", ")}${fresh.length > 3 ? ", …" : ""}), so their progress ` +
           `bars will count only loaded children.`,
       );
-    } else if (!capped.length) {
-      this.childStatsCapped = false;
     }
   }
 

@@ -24,7 +24,9 @@ Nothing here runs in CI or on install. Three groups:
   `daemon/src/tracker/cache.ts`, either provider's `attachChildStats`, or the
   ticket poll's scheduling in `App.vue`. **Run `sidebar.mjs` too** — the two
   overlap on who reports a tracker outage, and DRY-72 moved that decision from
-  the browser to the daemon.
+  the browser to the daemon. There is also an
+  [in-process suite](#the-caches-own-semantics-in-process) for the cache's
+  ordering and timing, which needs neither daemon nor browser and takes a second.
 - **The tombstone's resume button (DRY-62)** —
   [its own section](#the-tombstones-resume-button-dry-62). A browser and a
   throwaway Postgres, about a minute. Run it when touching
@@ -137,6 +139,35 @@ claims live. Different position, different question, different file.
 Sections (e), (g) and (j) are **guards, not discriminators**: they pass against
 an uncached daemon too, because the contract they check is supposed to hold in
 both worlds. Don't read their green as evidence the cache works.
+
+### The cache's own semantics (in-process)
+
+```sh
+(cd daemon && node --import tsx ../scripts/verify/tracker-cache-unit.mts)
+```
+
+No daemon, no browser, about a second. It covers what the end-to-end run is a
+poor instrument for — ordering and timing inside one class: that a forced refresh
+returns data taken *after* the call rather than joining a flight that predates
+it, that an un-refreshed list is eventually called stale with nothing having
+failed, that a flight throwing synchronously doesn't wedge its key forever.
+Through HTTP those are minute-long waits and races; here they're a stub fetch and
+TTLs in tens of milliseconds.
+
+To confirm IT discriminates, revert a fix and watch the matching section fail:
+
+| revert | expect |
+|---|---|
+| in `refresh`, replace the `e.refreshing` block with a bare `return e.refreshing` | (c) `calls=2`, (d) `+0` — Refresh silently returns a pre-click snapshot |
+| in `start`, go back to `e.refreshing ??= (async () => { … finally { e.refreshing = undefined } })()` with `fetch()` called **directly inside** that IIFE | (h) `GEN-0` — the key never refreshes again |
+
+**The second one has a trap in it, and it caught me.** Wrapping the *existing*
+`this.run(...)` in a try/finally does NOT reproduce the bug and section (h) passes
+cleanly against it: `run` is an `async` method, so calling it never throws
+synchronously, and the `finally` therefore always lands in a microtask. The bug
+needs `fetch()` invoked directly in the IIFE body, where a synchronous throw runs
+the `catch` and `finally` before the caller has assigned the handle. A revert that
+keeps the async indirection is a revert that isn't one.
 
 ### Making sure this one still discriminates
 

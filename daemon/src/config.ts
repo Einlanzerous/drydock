@@ -404,8 +404,19 @@ export const CONFIG = {
      * these off the request path, blowing this costs a background refresh, not a
      * sidebar. A caller with its own tighter budget (the SessionStart brief's
      * extras) keeps it.
+     *
+     * Through `msOrOff`, not `num()`: zero means "no deadline" — the behaviour
+     * that shipped before DRY-72 — and that is a real posture somebody might
+     * want back while chasing a tracker that is merely very slow. `num()`
+     * rejects 0, so the off switch would silently restore the 20s default
+     * instead: DRY-60's trap 9, which the sibling TTLs above already avoid.
+     *
+     * NB this bounds ONE request, not a whole pull. A page-walk of N pages can
+     * still take N × this, bounded by MAX_TICKETS (~20 pages) rather than by a
+     * clock. That is why the list cache reports staleness by AGE as well as by
+     * failure — see `staleAfterMs` in tracker/cache.ts.
      */
-    requestTimeoutMs: num(process.env.DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS, 20_000),
+    requestTimeoutMs: msOrOff(process.env.DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS, 20_000),
     switchyard: {
       url: process.env.DRYDOCK_SWITCHYARD_URL,
       token: process.env.DRYDOCK_SWITCHYARD_TOKEN,

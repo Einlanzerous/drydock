@@ -693,7 +693,25 @@ outage. The traps:
    somebody presses when they've stopped trusting the screen is a no-op that
    still spins. A forced pull WAITS; a poll never forces, or the cache buys
    nothing. A forced refresh that fails still answers from last-good rather than
-   throwing away a working list.
+   throwing away a working list. **And forcing must not merely JOIN the flight
+   already running** — that flight may have queried the tracker before the change
+   you pressed Refresh to see, and at a ~6s fan-out against a 20s poll that's
+   about a third of clicks. It queues one behind instead, at most one deep.
+3a. **Staleness is reported by AGE as well as by failure**, because the cache
+   removed a signal that used to be free. A tracker that is slow rather than
+   broken — every request succeeding, the whole page-walk taking minutes — used
+   to trip the browser's 12s budget and report. Now the browser is answered
+   instantly and nothing fails, so without an age test the sidebar presents an
+   arbitrarily old list as live. The per-request deadline does not help: it
+   bounds one request, so N pages cost N × it.
+3b. **Overlapping pulls in the SHELL are how the epoch guard becomes a silence.**
+   A poll, a visibility wake and Refresh can all want one; two in flight means
+   the older one's outcome is discarded on arrival, so if it was the one that
+   failed, nothing reports. They queue through one entry point. Related: arm the
+   next poll from a SETTLED pull, never alongside the pull it just started, or
+   the delay reflects the failure count from before that pull landed — which
+   shows up on recovery as a sidebar waiting out a two-minute interval it had
+   just earned its way out of.
 4. **Never cache a failure, and a cold key must still 502.** Serving last-good
    is right; inventing one is not. That's DRY-55's empty case one layer down.
 5. **The child-stats query is the unbounded half.** It spans every status, so it
@@ -703,6 +721,15 @@ outage. The traps:
    silent. Both providers log it once per onset. The cache is shared rather than
    per-provider because the two ask differently (Jira: one query for every epic,
    so all-or-nothing; Switchyard: one per epic, so per-epic).
+   - **Cache the "capped" verdict, not just the counts.** Skipping it leaves the
+     most expensive query in the system running on every refresh — the pathology
+     reduced in frequency rather than removed. It is not caching an error: it's a
+     fact about the epic, and it expires like anything else.
+   - **A boolean "already warned" latch is wrong in the Switchyard provider**,
+     because `listTickets` fans out one nested call per project and each runs its
+     own child-stats pass: a project with no capped epics clears the flag the
+     previous project just set, and the once-per-onset line prints every refresh.
+     Track the epic KEYS.
 6. **The TTLs go through `msOrOff`, not `num()`** — DRY-60's trap 9. Zero means
    "no cache" for reproducing a tracker bug the cache would mask, and through
    `num()` a deliberate 0 silently restores the default.
@@ -726,11 +753,43 @@ outage. The traps:
    the child-stats TTL deliberately outlives a run, so its assertion is "at most
    one query", not "exactly one" — pinning it exact makes the file pass only on
    the first run after a daemon start.
+12. **Clear the single-flight handle from a `.finally` attached by the CALLER, not
+   from inside the flight.** A `finally` in the flight body runs synchronously
+   when the body throws synchronously — before the caller has assigned the handle
+   — which latches it on an already-settled promise: that key then never
+   refreshes again AND is never evicted, since eviction skips anything in flight.
+   Today the flight is an `async` method and cannot throw synchronously, so the
+   obvious form is *accidentally* safe. Don't leave a correctness argument resting
+   on that.
+13. **The cache key must be exhaustive over `TicketQuery`, provably.** The route
+   builds the query in a variable, so TypeScript's excess-property check cannot
+   see a field left out — and a missing field doesn't degrade, it makes two
+   genuinely different queries share one entry. It's typed as a total map over
+   `keyof Required<TicketQuery>` so adding a field there fails the build in
+   `ticketQueryKey`.
+14. **A paging loop that can't make progress is now a wedged cache entry, not
+   just a hot loop.** Jira Cloud's branch trusted `nextPageToken` while the DC
+   branch stopped on an empty page, so a deployment returning an empty page WITH
+   a token span forever — `out.length` never grows, so neither `MAX_TICKETS` nor
+   the loop condition can end it. Before the cache each poll merely leaked
+   another runaway loop; with it, the flight never settles, so the handle is never
+   cleared and the entry is never reclaimed. Both branches guard on an empty page
+   now. Any new paging loop needs the same.
 
 ## Verifying a tracker provider (Switchyard / Jira)
 
 The tracker is host config; the browser only ever sees `/api/tracker/*`.
-Checklist, using the second-instance pattern above with the provider's env:
+Checklist, using the second-instance pattern above with the provider's env.
+
+**Turn the caches OFF for all of it** (DRY-72) — add
+`DRYDOCK_TRACKER_CACHE_MS=0 DRYDOCK_TRACKER_CHILD_STATS_CACHE_MS=0` to the env
+below. This checklist tests the PROVIDER, and every curl in it now goes through
+a cache that will happily answer the second one from the first. Steps 2-4 and 6
+vary only the query params, so each is a distinct cache key and the first run of
+each is honest — but re-run one inside the TTL and you are timing the cache.
+Step 8 is the one that silently stops meaning anything: its whole assertion is
+that `childStats` moves when the tracker moves, and against a five-minute child
+TTL it won't for five minutes. That off switch exists for exactly this.
 
 ```sh
 # Jira Cloud: email + API token → Basic auth
