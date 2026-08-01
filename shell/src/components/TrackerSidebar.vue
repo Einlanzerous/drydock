@@ -230,17 +230,33 @@ function toggleEpic(repo: string, key: string): void {
   epicExpanded[epicNodeId(repo, key)] = !isEpicOpen(repo, key);
 }
 /**
- * Clicking the epic row opens its ticket and expands it, the way clicking any
- * other row opens a ticket. An epic that was never pulled has no ticket to
- * open — only a key and a title — so there it just expands.
+ * Clicking an epic row expands or collapses it (DRY-75). Sessions are opened
+ * against tickets and an epic is a heading, so expanding is the common action
+ * and it gets the big target; launching moved to `.epic-play` beside it.
+ *
+ * What this replaced did two things wrong at once. It opened the spawn panel,
+ * so the row's default gesture was the rare one — the tooltip admitted as much,
+ * telling you to use the chevron if you only wanted the epic's children. And it
+ * assigned `= true` rather than toggling, so an expanded epic could not be
+ * collapsed by the same click that expanded it. Only the ghost branch, which
+ * had no ticket to open, was already right.
+ *
+ * An epic with no children in the pull has nothing to expand — the chevron
+ * isn't rendered for one either — so its row is inert rather than toggling
+ * state that changes nothing on screen.
  */
 function onEpicRow(repo: string, node: EpicNode): void {
-  if (node.ticket) {
-    epicExpanded[epicNodeId(repo, node.key)] = true;
-    emit("launch", node.ticket);
-  } else {
-    toggleEpic(repo, node.key);
-  }
+  if (node.children.length) toggleEpic(repo, node.key);
+}
+
+/**
+ * The row's own tooltip, which since DRY-75 only ever describes expanding.
+ * Launching has its own button and its own title; naming both here is how the
+ * old copy ended up apologising for the row's default action.
+ */
+function epicRowTitle(repo: string, node: EpicNode): string {
+  if (!node.children.length) return `${node.key} — no children in this pull`;
+  return isEpicOpen(repo, node.key) ? `Collapse ${node.key}` : `Expand ${node.key}`;
 }
 function clearFilters(): void {
   search.value = "";
@@ -388,10 +404,8 @@ function clearFilters(): void {
             <div
               v-if="row.kind === 'epic'"
               class="row epic"
-              :class="{ ghost: !row.node.ticket }"
-              :title="row.node.ticket
-                ? `Open ${row.node.key} — use the chevron to expand without opening it`
-                : `${row.node.key} isn't in this pull; the chevron expands its children`"
+              :class="{ ghost: !row.node.ticket, inert: !row.node.children.length }"
+              :title="epicRowTitle(grp.repo, row.node)"
               @click="onEpicRow(grp.repo, row.node)"
             >
               <button
@@ -447,6 +461,22 @@ function clearFilters(): void {
                   </span>
                 </div>
               </div>
+              <!-- Launching an epic, now that the row itself expands (DRY-75).
+                   A real <button>, unlike the ticket row's `.play`, because
+                   there the whole row is the target and the chip is only a
+                   label for it. Same glyph so "spawn" reads the same
+                   everywhere; the chip is unlit until you point at it, which
+                   is what says the row won't do this for you. A ghost epic has
+                   no ticket to open and keeps the column with a blank. -->
+              <button
+                v-if="row.node.ticket"
+                class="epic-play"
+                :title="`Open ${row.node.key} — spawn an agent on this epic`"
+                @click.stop="emit('launch', row.node.ticket)"
+              >
+                <svg width="11" height="11" viewBox="0 0 12 12" fill="currentColor"><path d="M3 2l6 4-6 4z" /></svg>
+              </button>
+              <span v-else class="epic-play blank"></span>
             </div>
 
             <!-- ticket row: an epic's child, or a ticket that hangs off none -->
@@ -942,6 +972,43 @@ function clearFilters(): void {
 .epic-chev.empty {
   cursor: default;
 }
+/* The epic's spawn button (DRY-75). Deliberately the same size and position as
+   a ticket row's `.play` so the right-hand column lines up, and deliberately
+   NOT the same weight: `.play` is lit at rest because its row spawns on click,
+   this one is a hollow chip until hover because its row doesn't. Two rows that
+   answer the same gesture differently have to look different, and this is the
+   pixel that says so. Bordered at rest all the same — a bare glyph here could
+   be taken for a second chevron. */
+.epic-play {
+  margin-top: 1px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 1px solid #ffffff14;
+  color: #6b7682;
+  cursor: pointer;
+  flex: 0 0 auto;
+}
+.epic-play:hover {
+  background: #16314a;
+  border-color: #2a557d;
+  color: #9cc6ec;
+}
+.epic-play:focus-visible {
+  outline: 1px solid #3d6fa6;
+  outline-offset: 1px;
+}
+/* Ghost epics have nothing to open; the column stays so their titles wrap on
+   the same measure as every other epic's. */
+.epic-play.blank {
+  border-color: transparent;
+  cursor: default;
+}
 .epic-badge {
   font-family: "JetBrains Mono", monospace;
   font-size: 8.5px;
@@ -953,6 +1020,19 @@ function clearFilters(): void {
   padding: 0 4px;
   line-height: 1.7;
   flex: 0 0 auto;
+}
+/* An epic whose children are all outside the pull (or all done — it excludes
+   them) renders with no chevron, so there is nothing for a row click to do.
+   Saying so with the cursor beats a row that silently ignores you; the spawn
+   button keeps its own pointer. (DRY-75) */
+.row.epic.inert {
+  cursor: default;
+}
+.row.epic.inert:hover {
+  background: none;
+}
+.row.epic.inert .epic-play {
+  cursor: pointer;
 }
 /* An epic named only by its children: no status of its own to show, so the row
    stays visibly lighter than a real ticket instead of implying one. */
