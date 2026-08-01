@@ -330,42 +330,54 @@ async function resetWorktree(): Promise<void> {
       @keydown.ctrl.enter="send"
     ></textarea>
 
+    <!-- Two stacked rows, not one (DRY-74). The single row this replaced held
+         seven items with everything but the hint pinned `flex: 0 0 auto` and no
+         `flex-wrap`, so it overran the panel by 50px at EVERY width — Spawn
+         Agent, being last, was the part that left. Splitting the hint off buys
+         back the width, and grouping the settings apart from the buttons stops
+         Cancel sitting between the Auto toggle and the two run actions. -->
     <div class="actions">
       <span class="hint">The ticket body is attached as context via the SessionStart hook.</span>
-      <span class="grow"></span>
-      <label class="autotoggle" title="Start the agent in auto (hands-off) permission mode — tools run without approval prompts">
-        <input type="checkbox" v-model="auto" />
-        Auto
-      </label>
-      <button class="cancel" @click="emit('close')">Cancel</button>
-      <!-- What an unattended run may do without asking (DRY-49). Separate from
-           the supervised Auto toggle above on purpose: different question. -->
-      <select
-        v-model="runMode"
-        class="runmode"
-        :title="`Unattended runs will ${modeSummary}`"
-      >
-        <option value="">Host default</option>
-        <option value="manual">Ask about everything</option>
-        <option value="acceptEdits">Edit freely, ask to run</option>
-        <option value="auto">Never ask</option>
-      </select>
-      <button
-        class="auto-run"
-        :title="`Run unattended: no window, a card on the rail. Always isolated in a worktree. Will ${modeSummary}.`"
-        :disabled="!prompt.trim() || !cwd.trim()"
-        @click="sendAutonomous"
-      >
-        Run autonomously
-      </button>
-      <button
-        class="send"
-        title="Open a workspace: agent + this ticket in a drawer + a co-located zsh shell (both minimized)"
-        :disabled="!prompt.trim() || !cwd.trim()"
-        @click="send"
-      >
-        Spawn Agent
-      </button>
+      <div class="actrow">
+        <div class="opts">
+          <label class="autotoggle" title="Start the agent in auto (hands-off) permission mode — tools run without approval prompts">
+            <input type="checkbox" v-model="auto" />
+            Auto
+          </label>
+          <!-- What an unattended run may do without asking (DRY-49). Separate
+               from the supervised Auto toggle beside it on purpose: different
+               question. -->
+          <select
+            v-model="runMode"
+            class="runmode"
+            :title="`Unattended runs will ${modeSummary}`"
+          >
+            <option value="">Host default</option>
+            <option value="manual">Ask about everything</option>
+            <option value="acceptEdits">Edit freely, ask to run</option>
+            <option value="auto">Never ask</option>
+          </select>
+        </div>
+        <div class="btns">
+          <button class="cancel" @click="emit('close')">Cancel</button>
+          <button
+            class="auto-run"
+            :title="`Run unattended: no window, a card on the rail. Always isolated in a worktree. Will ${modeSummary}.`"
+            :disabled="!prompt.trim() || !cwd.trim()"
+            @click="sendAutonomous"
+          >
+            Run autonomously
+          </button>
+          <button
+            class="send"
+            title="Open a workspace: agent + this ticket in a drawer + a co-located zsh shell (both minimized)"
+            :disabled="!prompt.trim() || !cwd.trim()"
+            @click="send"
+          >
+            Spawn Agent
+          </button>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -383,11 +395,22 @@ async function resetWorktree(): Promise<void> {
   max-height: 82vh;
   display: flex;
   flex-direction: column;
+  /* The second axis of DRY-74. `.desc` is the designated flexible region, but
+     it floors at `min-height: 80px` and everything below it is fixed, so under
+     ~480px of viewport the sum exceeds 82vh — and with no `overflow` here that
+     surplus rendered below the panel's own bottom edge, off-screen, taking
+     Spawn Agent with it. Scrolling the panel is the backstop for a viewport
+     too short to hold it however the row is arranged. */
+  overflow-y: auto;
   background: #11151a;
   border: 1px solid #2a3744;
   border-radius: 12px;
   box-shadow: 0 24px 60px #000000bb;
-  padding: 16px 18px;
+  /* No bottom padding: `.actions` is sticky and carries its own, so its opaque
+     background covers the full strip down to the border. Left here, the panel's
+     own padding would be a 16px band below the sticky row that scrolling
+     content shows through (padding is inside the scrollport). */
+  padding: 16px 18px 0;
 }
 .phead {
   display: flex;
@@ -613,11 +636,51 @@ async function resetWorktree(): Promise<void> {
 .prompt:focus {
   border-color: #3d6fa6;
 }
+/* Pinned to the bottom of the scrollport (DRY-74, the vertical axis). Letting
+   the panel scroll alone already makes Spawn Agent reachable, but only after
+   you scroll to it — on a short viewport the primary action opens below the
+   fold with nothing saying it's there, which is the same complaint one step
+   removed. Sticky costs nothing when the panel fits, because then it never
+   scrolls. */
 .actions {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  background: #11151a;
   display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin-top: 12px;
+  padding-bottom: 16px;
+}
+/* Every one of these wraps (DRY-74). The controls are pinned `flex: 0 0 auto`
+   and set `white-space: nowrap` individually — correct, since a button reading
+   "Run auto\nnomously" is worse than a second line of buttons — which means
+   wrapping is the ONLY way the row can give up width. Without it the row's
+   overflow leaves the panel, and `.panel` has no `overflow` to clip it. */
+.actrow {
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 10px;
-  margin-top: 12px;
+}
+.opts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+/* `margin-left: auto` rather than `justify-content: space-between` on .actrow:
+   auto margins are resolved per LINE, so the buttons stay right-aligned when
+   they wrap onto one of their own. space-between would park them at the left
+   edge in exactly that case. */
+.btns {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-left: auto;
 }
 .hint {
   font-size: 10.5px;
