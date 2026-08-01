@@ -195,13 +195,37 @@ const groups = computed(() => groupTickets(filtered.value, props.tickets));
  * that hang off nothing.
  */
 type Row =
-  | { kind: "epic"; id: string; node: EpicNode; roll: Rollup }
+  | {
+      kind: "epic";
+      id: string;
+      node: EpicNode;
+      roll: Rollup;
+      /**
+       * Is there anything a click could reveal? Carried on the row rather than
+       * re-derived, because the chevron, the row's cursor, its tooltip and its
+       * click handler all have to agree, and four independent copies of the
+       * predicate is how they stop agreeing (DRY-75).
+       */
+      expandable: boolean;
+      title: string;
+    }
   | { kind: "ticket"; id: string; t: Ticket; child: boolean };
 
 function rowsOf(g: RepoGroup): Row[] {
   const out: Row[] = [];
   for (const node of g.epics) {
-    out.push({ kind: "epic", id: epicNodeId(g.repo, node.key), node, roll: epicRollup(node) });
+    // `shown`, NOT `children`: what expanding renders is the filtered set, and
+    // an epic that matched a filter on its own with every child filtered out
+    // has children it cannot show. Off a filter the two are the same list.
+    const expandable = node.shown.length > 0;
+    out.push({
+      kind: "epic",
+      id: epicNodeId(g.repo, node.key),
+      node,
+      roll: epicRollup(node),
+      expandable,
+      title: epicRowTitle(node, expandable),
+    });
     if (isEpicOpen(g.repo, node.key)) {
       for (const t of node.shown) out.push({ kind: "ticket", id: t.key, t, child: true });
     }
@@ -226,8 +250,17 @@ function toggle(repo: string): void {
 function isEpicOpen(repo: string, key: string): boolean {
   return filtering.value || !!epicExpanded[epicNodeId(repo, key)];
 }
+/**
+ * Reads the MAP, not `isEpicOpen`. A filter forces every epic open, so deriving
+ * the new value from `isEpicOpen` writes `false` on every click while one is
+ * active: nothing moves on screen, and the expand state you set before
+ * filtering is silently discarded on the way past. `toggle()` above has always
+ * had this right for repo groups — this line hadn't, and DRY-75 made it far
+ * easier to hit by promoting the whole row to be the target.
+ */
 function toggleEpic(repo: string, key: string): void {
-  epicExpanded[epicNodeId(repo, key)] = !isEpicOpen(repo, key);
+  const id = epicNodeId(repo, key);
+  epicExpanded[id] = !epicExpanded[id];
 }
 /**
  * Clicking an epic row expands or collapses it (DRY-75). Sessions are opened
@@ -241,22 +274,41 @@ function toggleEpic(repo: string, key: string): void {
  * collapsed by the same click that expanded it. Only the ghost branch, which
  * had no ticket to open, was already right.
  *
- * An epic with no children in the pull has nothing to expand — the chevron
- * isn't rendered for one either — so its row is inert rather than toggling
- * state that changes nothing on screen.
+ * An epic with nothing to show has nothing to expand — the chevron isn't
+ * rendered for one either — so its row is inert rather than toggling state that
+ * changes nothing on screen.
  */
-function onEpicRow(repo: string, node: EpicNode): void {
-  if (node.children.length) toggleEpic(repo, node.key);
+function onEpicRow(repo: string, key: string, expandable: boolean): void {
+  if (expandable) toggleEpic(repo, key);
 }
 
 /**
- * The row's own tooltip, which since DRY-75 only ever describes expanding.
- * Launching has its own button and its own title; naming both here is how the
- * old copy ended up apologising for the row's default action.
+ * The tooltip for the row AND its chevron, which since DRY-75 do the same
+ * thing and so should not describe it twice — they had already drifted to
+ * "Collapse epic" against "Collapse DRY-1".
+ *
+ * Deliberately does NOT name the current state. A `title` is painted once when
+ * the pointer arrives and does not repaint when a click under it changes what
+ * it describes, so "Expand" is wrong the instant it's acted on and stays wrong
+ * until the pointer leaves. The chevron's rotation and the rows appearing say
+ * which way it is; this only has to say what the gesture does.
  */
-function epicRowTitle(repo: string, node: EpicNode): string {
-  if (!node.children.length) return `${node.key} — no children in this pull`;
-  return isEpicOpen(repo, node.key) ? `Collapse ${node.key}` : `Expand ${node.key}`;
+function epicRowTitle(node: EpicNode, expandable: boolean): string {
+  // Restores what the old row tooltip said about a ghost. The `not pulled`
+  // chip carries the full explanation, but that's a much smaller target than
+  // the row, and losing the hint entirely was a regression.
+  const unpulled = node.ticket ? "" : " — not in this pull";
+  // Not "no children in this pull": `childStats` counts children the pull
+  // deliberately excludes, so an epic can read "40/40 done" two lines below a
+  // tooltip flatly denying it has any.
+  if (!expandable) return `${node.key} — no children to expand here${unpulled}`;
+  // A filter force-opens every epic, so a click here records what you want but
+  // moves nothing until the filter clears — same as the repo group above it.
+  // Worth saying, because otherwise the row reads as broken.
+  if (filtering.value) {
+    return `Expand or collapse ${node.key} — the filter holds it open for now${unpulled}`;
+  }
+  return `Expand or collapse ${node.key}${unpulled}`;
 }
 function clearFilters(): void {
   search.value = "";
@@ -404,15 +456,15 @@ function clearFilters(): void {
             <div
               v-if="row.kind === 'epic'"
               class="row epic"
-              :class="{ ghost: !row.node.ticket, inert: !row.node.children.length }"
-              :title="epicRowTitle(grp.repo, row.node)"
-              @click="onEpicRow(grp.repo, row.node)"
+              :class="{ ghost: !row.node.ticket, inert: !row.expandable }"
+              :title="row.title"
+              @click="onEpicRow(grp.repo, row.node.key, row.expandable)"
             >
               <button
-                v-if="row.node.children.length"
+                v-if="row.expandable"
                 class="epic-chev"
                 :class="{ open: isEpicOpen(grp.repo, row.node.key) }"
-                :title="isEpicOpen(grp.repo, row.node.key) ? 'Collapse epic' : 'Expand epic'"
+                :title="row.title"
                 @click.stop="toggleEpic(grp.repo, row.node.key)"
               >▸</button>
               <span v-else class="epic-chev empty"></span>
@@ -994,7 +1046,12 @@ function clearFilters(): void {
   cursor: pointer;
   flex: 0 0 auto;
 }
-.epic-play:hover {
+/* `:not(.blank)` is load-bearing. `.blank` is a placeholder span holding the
+   column open on a ghost epic, and it can be hovered like anything else — it
+   only overrode `border-color` and `cursor`, so a plain `.epic-play:hover`
+   (same specificity, declared first) still painted the background and lit a
+   button that does nothing on a row with nothing to open. */
+.epic-play:not(.blank):hover {
   background: #16314a;
   border-color: #2a557d;
   color: #9cc6ec;
@@ -1021,18 +1078,17 @@ function clearFilters(): void {
   line-height: 1.7;
   flex: 0 0 auto;
 }
-/* An epic whose children are all outside the pull (or all done — it excludes
-   them) renders with no chevron, so there is nothing for a row click to do.
-   Saying so with the cursor beats a row that silently ignores you; the spawn
-   button keeps its own pointer. (DRY-75) */
+/* An epic with nothing to show — children all outside the pull (or all done,
+   which it excludes), or all filtered out — renders no chevron, so there is
+   nothing for a row click to do. Saying so with the cursor beats a row that
+   silently ignores you. The spawn button needs no counter-rule: it declares its
+   own `cursor`, which beats inheriting this one whatever the parent's
+   specificity. (DRY-75) */
 .row.epic.inert {
   cursor: default;
 }
 .row.epic.inert:hover {
   background: none;
-}
-.row.epic.inert .epic-play {
-  cursor: pointer;
 }
 /* An epic named only by its children: no status of its own to show, so the row
    stays visibly lighter than a real ticket instead of implying one. */
