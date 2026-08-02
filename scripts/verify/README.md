@@ -37,6 +37,11 @@ Nothing here runs in CI or on install. Three groups:
   minutes. Run it when touching `sweepFinished` / `mayClear` / `clearSession` in
   `App.vue`, `isFinished` in `runState.ts`, or anything that changes when a
   window is removed.
+- **The permission gate's action row (DRY-78)** —
+  [its own section](#the-permission-gates-action-row-dry-78). A browser, about a
+  minute; no daemon config beyond a spare port. Run it when touching
+  `GatePanel.vue`, or the rail's `measureGateRoom` / anything that changes the
+  panel's width, height or anchoring.
 
 ## The ticket brief (DRY-53)
 
@@ -294,6 +299,69 @@ Two sessions per shape, deliberately: `sleep 1` ends cleanly, `exit 3` ends with
 a `failure` set, `while :; do sleep 1; done` never ends. No `claude`, no tokens,
 no tracker — the sweep cannot tell what was running inside a PTY and shouldn't
 be tested as though it could.
+
+## The permission gate's action row (DRY-78)
+
+The gate BLOCKS — an autonomous run is parked on a `PreToolUse` hook waiting for
+the answer — so a control that can't be reached is a run that can't proceed.
+Needs no tracker, no database and no `claude`: the row is driven by posting a
+hook payload with whatever `tool_name` you like.
+
+```sh
+npm i playwright --prefix scripts/verify     # ad-hoc; not a repo dependency
+
+(cd daemon && DRYDOCK_PORT=4399 DRYDOCK_HOST=127.0.0.1 DRYDOCK_SESSIONS_DIR=/tmp/dry78 \
+   DRYDOCK_STATE_FILE=/tmp/dry78-state.json DRYDOCK_TRACKER=fixture \
+   node --import tsx src/index.ts &)
+(cd shell && VITE_DAEMON_URL=http://127.0.0.1:4399 bunx vite --port 5399 --strictPort &)
+
+node scripts/verify/gate-actions.mjs         # from the repo root
+```
+
+| harness | what it holds down |
+|---|---|
+| `gate-actions.mjs` | Every control in the gate's action row is inside the panel, inside the viewport, and lands its own hit test — across five viewports, both modes (the answers and the deny row are different controls at different widths), and three arguments. Plus the two things the row's width and height cost elsewhere: the line naming the tool in full must not be cut, and the panel must not be pushed off the top of the desk. |
+
+**Drive it with a long MCP tool name, not `Bash`.** One button's width is data —
+`Always allow {{ gate.tool }}` — and an MCP name is a single unbreakable token
+(`mcp__switchyard__transition_ticket_by_category`, 44 characters), so the row's
+width depends on which tool the agent happened to call. Every gate you meet by
+hand while testing is a short builtin, and those fit; that is how it shipped.
+`Bash` is in the table as the control, not for coverage.
+
+Three assertions per control, because each catches a different width, and the
+first two disagree about which viewports are interesting:
+
+- **inside panel** — at 1600px the spill renders outside the panel but still
+  inside the window, so this is the only one that sees it.
+- **inside viewport** — at 560px the panel itself was off-screen, so this is the
+  only one that sees *that*.
+- **hittable** — `elementFromPoint` at the rect's centre. A rect is healthy
+  whether or not anything can reach it (DRY-74's lesson). Note the rail is
+  `pointer-events: none` and draws a scrim over the desk's bottom 98px, so a
+  hit-test failure here can be a missing `pointer-events: auto` rather than a
+  layout overflow.
+
+**Measuring against the panel is what makes the wide viewports worth running**,
+and it is the same discipline as DRY-60's lane: `getClientRects()` is non-empty
+for an element an ancestor clips, and a viewport bound is no bound at all when
+the container is 604px inside a 1600px window.
+
+The `mcp+blob` row is the vertical axis, and it exists because the fix for the
+horizontal one created it. Wrapping the row buys reachability with height, and
+this panel spends height UPWARD into a desk that is `overflow: hidden` — so a
+wrapped row plus a fully expanded argument put the panel's top 10px past the
+edge, cutting the header off a decision. It clicks **Show all** deliberately:
+the clamped blob is 104px and never the problem.
+
+Two of the assertions do not discriminate against `main`, and that is
+information rather than a defect — `main` had a *worse* bug masking each. The
+panel's `max-width` was measured against `100vw` while the panel hangs off the
+rail, which starts after the 266px sidebar, so on `main` the panel was 520px
+wide and simply hung off the screen: its action row never overflowed it, and its
+`.ask` line had width to spare. Point the harness at the tree with only
+`overflow-wrap: anywhere` removed to see the tool-name check bite (82px), and at
+`main` for the other 46.
 
 ## Workspace store: why a proxy and not `docker stop`
 

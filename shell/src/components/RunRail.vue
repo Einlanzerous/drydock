@@ -509,6 +509,59 @@ watch(laneEl, (el) => {
 });
 
 /**
+ * How much room the gate panel has above the rail (DRY-78).
+ *
+ * It grows UPWARD out of the rail into `.desk`, which is `overflow: hidden`, so
+ * height it cannot afford is CLIPPED off its top edge — taking the header and
+ * the argument being decided, with no scrollbar anywhere to bring them back.
+ * That is a worse loss than the one this ticket is about: an unreachable button
+ * is visibly missing, whereas a clipped panel looks whole and is simply missing
+ * the command you are approving.
+ *
+ * Measured rather than declared because both CSS expressions of it are wrong.
+ * `100%` resolves against the panel's containing block, which is the 98px rail.
+ * A `100vh` calc has to subtract the topbar AND whichever of App.vue's notices
+ * are in the flex column above the desk at the time — they are in the flow and
+ * push it down, so the figure changes with a tracker outage. Same error the
+ * panel's own `max-width: calc(100vw - 40px)` made on the other axis.
+ */
+const gateRoom = ref<number | null>(null);
+function measureGateRoom(): void {
+  const rail = railEl.value;
+  const desk = rail?.parentElement;
+  // Keep the last good figure rather than dropping the cap: unsetting it while
+  // the panel is up would let it grow into the clip this exists to prevent.
+  if (!rail || !desk) return;
+  const railTop = rail.getBoundingClientRect().top;
+  const deskTop = desk.getBoundingClientRect().top;
+  // 8px is the panel's own gap above the rail (its `bottom: calc(100% + 8px)`);
+  // LIFT_MARGIN keeps it off the desk's top edge, as it does for the chooser.
+  // The floor means a desk too short for the panel yields a scrollable argument
+  // rather than a max-height of zero.
+  gateRoom.value = Math.max(160, railTop - deskTop - 8 - LIFT_MARGIN);
+}
+
+/**
+ * The desk, not the window: `resize` misses the two things that most often
+ * change the desk's height — a notice appearing above it, and the rail's own
+ * height changing when the docked lane mounts.
+ */
+let deskObs: ResizeObserver | null = null;
+watch(
+  railEl,
+  (el) => {
+    deskObs?.disconnect();
+    deskObs = null;
+    const desk = el?.parentElement;
+    if (!desk) return;
+    deskObs = new ResizeObserver(() => measureGateRoom());
+    deskObs.observe(desk);
+    measureGateRoom();
+  },
+  { immediate: true },
+);
+
+/**
  * A chooser must not outlive the card it points at.
  *
  * `v-if="chooser"` only ever tested that the ref was SET, so every way a run
@@ -567,6 +620,7 @@ onMounted(() => document.addEventListener("click", onDocClick));
 onBeforeUnmount(() => {
   document.removeEventListener("click", onDocClick);
   laneObs?.disconnect();
+  deskObs?.disconnect();
 });
 
 function onCardClick(card: Card): void {
@@ -601,6 +655,7 @@ function onCardClick(card: Card): void {
     <GatePanel
       v-if="activeGate"
       ref="gateEl"
+      :style="gateRoom ? { '--gate-room': `${gateRoom}px` } : undefined"
       :gate="activeGate"
       :index="panelIndex"
       :total="panelGates.length"
