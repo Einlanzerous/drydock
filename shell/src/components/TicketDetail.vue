@@ -70,11 +70,22 @@ function onHeaderDown(e: MouseEvent): void {
   window.addEventListener("mouseup", onDragUp);
   e.preventDefault();
 }
+/**
+ * Clamped to the viewport on both axes (DRY-74). `Math.max(0, …)` alone only
+ * held the top-left corner, so the panel could be dragged down until its footer
+ * — and Spawn Agent with it — sat below the fold, where `.app { overflow:
+ * hidden }` clips it and nothing scrolls it back: the ticket's own symptom by a
+ * different route. The panel is capped at `82vh`/`92vw`, so the lower bound is
+ * always above the upper one and the clamp can't invert.
+ */
 function onDragMove(e: MouseEvent): void {
   if (!drag) return;
+  const el = panelEl.value;
+  const maxX = Math.max(0, window.innerWidth - (el?.offsetWidth ?? 0));
+  const maxY = Math.max(0, window.innerHeight - (el?.offsetHeight ?? 0));
   pos.value = {
-    x: Math.max(0, drag.ox + (e.clientX - drag.sx)),
-    y: Math.max(0, drag.oy + (e.clientY - drag.sy)),
+    x: Math.min(Math.max(0, drag.ox + (e.clientX - drag.sx)), maxX),
+    y: Math.min(Math.max(0, drag.oy + (e.clientY - drag.sy)), maxY),
   };
 }
 function onDragUp(): void {
@@ -163,6 +174,10 @@ watch(
     worktreeExists.value = false;
     auto.value = true;
     pos.value = null; // re-center each freshly opened ticket
+    // The panel is a scroll container since DRY-74, and it isn't re-created
+    // between tickets (no `:key` on it in App.vue), so without this a new
+    // ticket opens at whatever offset the last one was left at.
+    if (panelEl.value) panelEl.value.scrollTop = 0;
     // Resolve the spawn cwd + worktree in parallel with the description fetch.
     void previewTarget(t);
     try {
@@ -336,8 +351,11 @@ async function resetWorktree(): Promise<void> {
          Agent, being last, was the part that left. Splitting the hint off buys
          back the width, and grouping the settings apart from the buttons stops
          Cancel sitting between the Auto toggle and the two run actions. -->
+    <!-- Outside `.actions` on purpose: the pinned bar should be as short as it
+         can be, and a static explanation is the one thing here that has no
+         claim on permanent screen space. -->
+    <span class="hint">The ticket body is attached as context via the SessionStart hook.</span>
     <div class="actions">
-      <span class="hint">The ticket body is attached as context via the SessionStart hook.</span>
       <div class="actrow">
         <div class="opts">
           <label class="autotoggle" title="Start the agent in auto (hands-off) permission mode — tools run without approval prompts">
@@ -400,22 +418,48 @@ async function resetWorktree(): Promise<void> {
      ~480px of viewport the sum exceeds 82vh — and with no `overflow` here that
      surplus rendered below the panel's own bottom edge, off-screen, taking
      Spawn Agent with it. Scrolling the panel is the backstop for a viewport
-     too short to hold it however the row is arranged. */
-  overflow-y: auto;
+     too short to hold it however the row is arranged.
+
+     `hidden` on the inline axis rather than letting it compute: a lone
+     `overflow-y` makes `overflow-x` compute from `visible` to `auto`, and
+     `position: sticky; bottom: 0` pins only the block axis — so a stray
+     horizontal scrollbar would slide the pinned bar sideways out of view. */
+  overflow: hidden auto;
   background: #11151a;
   border: 1px solid #2a3744;
   border-radius: 12px;
   box-shadow: 0 24px 60px #000000bb;
-  /* No bottom padding: `.actions` is sticky and carries its own, so its opaque
-     background covers the full strip down to the border. Left here, the panel's
-     own padding would be a 16px band below the sticky row that scrolling
-     content shows through (padding is inside the scrollport). */
-  padding: 16px 18px 0;
+  /* No block padding: `.phead` and `.actions` are pinned and carry their own,
+     so their opaque backgrounds cover the full strip to each edge. Left here,
+     the panel's own padding would be a 16px band above and below the pinned
+     rows that scrolling content shows through — padding is inside the
+     scrollport, and content scrolls across it. */
+  padding: 0 18px;
+  --panel-bg: #11151a;
+  background: var(--panel-bg);
 }
+/* Only `.desc` may give way. Every other region is a control or a label at its
+   natural size, and flex's default `flex-shrink: 1` let them absorb the deficit
+   instead — measured, the 2-row prompt textarea collapsed from 56px to 20px
+   before the panel's own scrollbar had done anything. The scroll backstop has
+   to engage BEFORE the form is crushed, not after. (DRY-74) */
+.panel > *:not(.desc) {
+  flex-shrink: 0;
+}
+/* Pinned alongside `.actions` (DRY-74). A scroll container that lets its header
+   leave takes the drag handle and the ✕ with it, on precisely the short
+   viewports that made it scroll — so the panel becomes one you can neither move
+   nor close by pointer. Carries the panel's top padding for the same reason
+   `.actions` carries the bottom. */
 .phead {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--panel-bg);
   display: flex;
   align-items: center;
   gap: 9px;
+  padding-top: 16px;
   cursor: grab;
   user-select: none;
 }
@@ -645,26 +689,28 @@ async function resetWorktree(): Promise<void> {
 .actions {
   position: sticky;
   bottom: 0;
-  z-index: 1;
-  background: #11151a;
+  z-index: 2;
+  background: var(--panel-bg);
   display: flex;
   flex-direction: column;
   gap: 9px;
-  margin-top: 12px;
-  padding-bottom: 16px;
+  margin-top: 10px;
+  padding: 9px 0 16px;
+  /* Without a rule, content passing under an opaque bar of the SAME colour as
+     the panel just stops, at a seam that reads as the panel's own bottom edge —
+     so a scrollable panel looks like a clipped one. */
+  border-top: 1px solid #ffffff0d;
 }
-/* Every one of these wraps (DRY-74). The controls are pinned `flex: 0 0 auto`
-   and set `white-space: nowrap` individually — correct, since a button reading
-   "Run auto\nnomously" is worse than a second line of buttons — which means
-   wrapping is the ONLY way the row can give up width. Without it the row's
-   overflow leaves the panel, and `.panel` has no `overflow` to clip it. */
-.actrow {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-}
-.opts {
+/* All three wrap (DRY-74). The controls are pinned `flex: 0 0 auto` and set
+   `white-space: nowrap` individually — correct, since a button reading
+   "Run auto\nnomously" is worse than a second line of buttons — which leaves
+   wrapping as the ONLY way this row can give up width. Don't remove it on the
+   grounds that the panel now clips: `overflow-x` is `hidden` there, so an
+   unwrapped row wouldn't spill into view, it would be silently cut off, which
+   is the same button unreachable with no symptom to notice. */
+.actrow,
+.opts,
+.btns {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -675,14 +721,13 @@ async function resetWorktree(): Promise<void> {
    they wrap onto one of their own. space-between would park them at the left
    edge in exactly that case. */
 .btns {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
   justify-content: flex-end;
-  gap: 10px;
   margin-left: auto;
 }
 .hint {
+  /* Its own top margin now that it sits between the prompt and `.actions`
+     rather than inside the latter (DRY-74). */
+  margin-top: 10px;
   font-size: 10.5px;
   color: #5a636f;
 }
