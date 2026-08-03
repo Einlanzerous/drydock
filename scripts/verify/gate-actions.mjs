@@ -1,8 +1,7 @@
 /**
  * DRY-78 — the permission gate's action row must stay inside its panel.
  *
- * The row holds an escape link, up to three buttons, and no `flex-wrap`, and
- * `.panel` has no `overflow` to clip what spills. One button's width is
+ * The row holds an escape link and up to three buttons. One of those buttons is
  * DATA-DRIVEN — `Always allow {{ gate.tool }}` — and an MCP tool name is a
  * single unbreakable token (`mcp__switchyard__transition_ticket_by_category`
  * is 44 characters), so the row's width depends on which tool the agent
@@ -13,13 +12,18 @@
  * a PreToolUse hook waiting for the answer, and `Approve ↵` is last in the row,
  * so it is the first thing to leave.
  *
- * Three assertions per control, because each catches a different width:
+ * Three assertions per control, because each catches a different failure:
  *
- *   inPanel   — the rect lies inside `.panel`'s rect. The one that works at a
- *               wide viewport, where the spill renders outside the panel but
- *               still inside the window, so the two below pass over the bug.
+ *   inPanel   — the rect lies inside `.panel`'s rect, on all FOUR edges. The
+ *               horizontal pair is the wide-viewport case, where the spill
+ *               leaves the panel but not the window so the two below pass over
+ *               it. The vertical pair is the short-desk case: the panel is
+ *               anchored by its bottom and capped in height, so without an
+ *               `overflow` backstop the surplus renders past that edge and
+ *               under the rail instead of clipping — and the panel's own rect
+ *               can't show that, since it stays the size of the cap.
  *   inView    — the rect lies inside the viewport. The narrow-viewport case,
- *               where the spill leaves the screen entirely.
+ *               where the panel itself left the screen.
  *   hittable  — `elementFromPoint` at the rect's centre lands on the control.
  *               DRY-74's lesson: `getBoundingClientRect()` is healthy whether
  *               or not anything can reach the element.
@@ -27,10 +31,18 @@
  * Rig: see README. Usage:
  *   node scripts/verify/gate-actions.mjs [shellUrl] [daemonUrl]
  */
-import { chromium } from "./node_modules/playwright/index.mjs";
+import { chromium } from "playwright";
 
-const SHELL = process.argv[2] ?? "http://127.0.0.1:5399";
-const DAEMON = process.argv[3] ?? "http://127.0.0.1:4399";
+const SHELL = process.argv[2] ?? "http://127.0.0.1:5378";
+const DAEMON = process.argv[3] ?? "http://127.0.0.1:4378";
+
+/**
+ * The gate panel, and NOT `.panel` — `TicketDetail.vue` and `MarkdownPane.vue`
+ * both use that as their root class, so the bare selector picks whichever the
+ * desk happens to hold. RunRail's own code reaches this element through the
+ * component instance for the same reason.
+ */
+const PANEL = ".rail > .panel";
 
 /**
  * The tool names the row is measured against.
@@ -58,11 +70,11 @@ const TOOLS = [
 ];
 
 /**
- * `.panel` is `width: 604px; max-width: calc(100vw - 40px)` anchored at
- * `left: 12px`, so it is NOT centred and the spill is asymmetric — the widths
- * below straddle the point where max-width takes over (644px) for that reason.
- * The heights straddle the desk's own room: the panel grows UPWARD out of a
- * 98px rail, so a taller row costs headroom rather than reach.
+ * The panel is `width: 604px` anchored at `left: 12px`, so it is NOT centred
+ * and the spill is asymmetric — the widths below straddle the point where its
+ * max-width takes over for that reason. The heights straddle the desk's own
+ * room: the panel grows UPWARD out of a 98px rail, so a taller row costs
+ * headroom rather than reach.
  */
 const VIEWPORTS = [
   { w: 1600, h: 900 },
@@ -70,6 +82,13 @@ const VIEWPORTS = [
   { w: 900, h: 700 },
   { w: 700, h: 620 },
   { w: 560, h: 560 },
+  // Short enough that the panel CANNOT fit however the row is arranged, which
+  // is the only place the height cap's `overflow` backstop is load-bearing.
+  // Without one the surplus doesn't clip — the panel is anchored by its bottom,
+  // so the action row renders past that edge and under the rail. Nothing above
+  // 500px of viewport reaches this: at 560 the panel still fits with room over.
+  { w: 900, h: 430 },
+  { w: 640, h: 380 },
 ];
 
 const results = [];
@@ -113,10 +132,17 @@ function raiseGate(sessionId, tool, command) {
  * a layout overflow.
  */
 async function measureRow(page) {
-  return page.evaluate(() => {
-    const panel = document.querySelector(".panel");
-    if (!panel) return { error: "no .panel" };
+  return page.evaluate((sel) => {
+    const panel = document.querySelector(sel);
+    if (!panel) return { error: `no ${sel}` };
     const p = panel.getBoundingClientRect();
+    // The DESK's rect, not the viewport's. `.desk` is what clips — it starts
+    // below a 54px topbar plus whatever notices are in the flex column above it
+    // — so a panel whose top is at y=20 is comfortably on screen and entirely
+    // cut off. Measuring the clip against the window is the same error the
+    // panel's own `max-width: calc(100vw - 40px)` made on the other axis.
+    const deskEl = document.querySelector(".desk");
+    const desk = deskEl ? deskEl.getBoundingClientRect() : null;
     // The line naming the tool in full. It is measured because it is what makes
     // truncating the button honest — if this is cut too, the panel never says
     // what is being approved.
@@ -142,9 +168,10 @@ async function measureRow(page) {
       // while the unbreakable token inside it hangs out over the edge.
       ask: ask && { overflow: askEl.scrollWidth - askEl.clientWidth },
       controls,
+      desk: desk && { top: desk.top, bottom: desk.bottom },
       viewport: { w: window.innerWidth, h: window.innerHeight },
     };
-  });
+  }, PANEL);
 }
 
 function assertRow(tag, m) {
@@ -156,14 +183,18 @@ function assertRow(tag, m) {
   // with. 1px of slack keeps that from reading as a 159px overflow.
   const EPS = 1;
   for (const c of m.controls) {
-    const overflowRight = c.rect.right - m.panel.right;
-    const overflowLeft = m.panel.left - c.rect.left;
-    const inPanel = overflowRight <= EPS && overflowLeft <= EPS;
-    check(
-      `${tag} · "${c.label}" inside panel`,
-      inPanel,
-      inPanel ? "" : `spills ${Math.max(overflowRight, overflowLeft).toFixed(0)}px`,
-    );
+    // All four edges. The vertical pair is not symmetry for its own sake: the
+    // panel is anchored by its BOTTOM and capped in height, so a cap without an
+    // `overflow` backstop doesn't clip the surplus — the action row renders past
+    // the panel's bottom edge and under the rail's lanes, unreachable again by a
+    // different route. The panel's own rect can't show that, because it stays
+    // the size of the cap while its content leaves; only the controls can.
+    const spillRight = c.rect.right - m.panel.right;
+    const spillLeft = m.panel.left - c.rect.left;
+    const spillBelow = c.rect.bottom - m.panel.bottom;
+    const spillAbove = m.panel.top - c.rect.top;
+    const worst = Math.max(spillRight, spillLeft, spillBelow, spillAbove);
+    check(`${tag} · "${c.label}" inside panel`, worst <= EPS, worst <= EPS ? "" : `spills ${worst.toFixed(0)}px`);
 
     const inView =
       c.rect.left >= -EPS &&
@@ -191,12 +222,19 @@ function assertRow(tag, m) {
   // `overflow: hidden`, so every row the fix adds is headroom spent. A clipped
   // top takes the header and the argument blob — you'd be approving a command
   // you can no longer read, which is worse than a button you can't reach.
-  const topVisible = m.panel.top >= -EPS;
-  check(
-    `${tag} · panel top not clipped`,
-    topVisible,
-    topVisible ? "" : `top ${m.panel.top.toFixed(0)}px, height ${m.panel.height.toFixed(0)}px`,
-  );
+  //
+  // Against the DESK's top, not the viewport's: the desk starts 54px down and
+  // lower still with a notice up, so `top >= 0` passes for a panel with its
+  // header already cut. The first version of this check made exactly that
+  // mistake and would have passed against the bug it was written for.
+  if (m.desk) {
+    const over = m.desk.top - m.panel.top;
+    check(
+      `${tag} · panel top not clipped`,
+      over <= EPS,
+      over <= EPS ? "" : `${over.toFixed(0)}px above the desk, panel ${m.panel.height.toFixed(0)}px`,
+    );
+  }
 }
 
 const browser = await chromium.launch();
@@ -230,8 +268,8 @@ try {
     await page.setViewportSize({ width: vp.w, height: vp.h });
     for (const tool of TOOLS) {
       const flight = raiseGate(sessionId, tool.name, tool.command);
-      await page.waitForSelector(".panel .actions button", { timeout: 15000 });
-      if (tool.expand) await page.click('.panel .truncation button:has-text("Show all")');
+      await page.waitForSelector(`${PANEL} .actions button`, { timeout: 15000 });
+      if (tool.expand) await page.click(`${PANEL} .truncation button:has-text("Show all")`);
       // The panel's own transition, plus the rail's post-flush re-measure.
       await page.waitForTimeout(350);
 
@@ -241,19 +279,64 @@ try {
       // Deny mode swaps the whole row for [Cancel, Send denial] (DRY-73) — a
       // different set of controls at a different width, so it is measured
       // rather than assumed to be narrower.
-      await page.click('.panel .actions button:has-text("Deny…")');
-      await page.waitForSelector(".panel .reason input");
+      await page.click(`${PANEL} .actions button:has-text("Deny…")`);
+      await page.waitForSelector(`${PANEL} .reason input`);
       assertRow(`${tag} denying`, await measureRow(page));
-      await page.click('.panel .actions button:has-text("Cancel")');
+      await page.click(`${PANEL} .actions button:has-text("Cancel")`);
       await page.waitForTimeout(100);
 
       // Answer it so the next scenario starts from a clean panel; the held hook
       // connection settles here.
-      await page.click('.panel .actions button:has-text("Approve")');
-      await page.waitForSelector(".panel", { state: "detached", timeout: 15000 });
+      await page.click(`${PANEL} .actions button:has-text("Approve")`);
+      await page.waitForSelector(PANEL, { state: "detached", timeout: 15000 });
       await flight;
     }
   }
+
+  // --- the desk's height changing WITHOUT the viewport's --------------------
+  // The height cap is derived from the desk, and App.vue's notices are in the
+  // flex column above it — they push it down. That is the case a `100vh` calc
+  // would have got wrong, and the only one that separates "reads the desk" from
+  // "reads the window", so every viewport above passes either way.
+  //
+  // A real tracker outage raises it, via the path App.vue actually uses. (The
+  // sidebar is deliberately NOT varied: `sidebarOpen` is a `ref(true)` nothing
+  // toggles, so the app cannot vary it either — and the fix made the panel's
+  // width relative to the rail, which is why the sidebar stopped mattering.)
+  await page.route("**/api/tracker/tickets*", (r) => r.fulfill({ status: 502, body: "{}" }));
+  await page.setViewportSize({ width: 900, height: 560 });
+  await page.waitForFunction(() => !!document.querySelector(".notice"), null, { timeout: 40000 });
+  await page.waitForTimeout(400);
+  // Asserted geometrically rather than as a before/after delta: a notice raised
+  // earlier in the run (the poll fails on its own schedule) makes "before"
+  // already-shortened, and the round then reports itself unarmed while being
+  // perfectly armed. That the desk's top meets the notice's bottom is the
+  // property either way — it is what makes the desk shorter than the window.
+  const armed = await page.evaluate(() => {
+    const n = [...document.querySelectorAll(".notice")].pop();
+    const d = document.querySelector(".desk");
+    if (!n || !d) return null;
+    const nb = n.getBoundingClientRect(), db = d.getBoundingClientRect();
+    return {
+      gap: Math.abs(db.top - nb.bottom),
+      pushed: db.top - 55, // .topbar is 54px + 1px border
+      text: (n.textContent ?? "").trim().slice(0, 60),
+    };
+  });
+  check(
+    "notice sits above the desk and shortens it",
+    !!armed && armed.gap <= 1 && armed.pushed > 0,
+    armed ? `desk pushed ${armed.pushed.toFixed(0)}px below the topbar — "${armed.text}"` : "no notice",
+  );
+
+  const noticeFlight = raiseGate(sessionId, TOOLS[2].name, TOOLS[2].command);
+  await page.waitForSelector(`${PANEL} .actions button`, { timeout: 15000 });
+  await page.click(`${PANEL} .truncation button:has-text("Show all")`);
+  await page.waitForTimeout(350);
+  assertRow("900x560 notice-up mcp+blob", await measureRow(page));
+  await page.click(`${PANEL} .actions button:has-text("Approve")`);
+  await page.waitForSelector(PANEL, { state: "detached", timeout: 15000 });
+  await noticeFlight;
 } finally {
   if (sessionId) {
     await api(`/api/sessions/${sessionId}/kill`, { method: "POST" }).catch(() => {});

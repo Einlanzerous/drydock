@@ -1782,6 +1782,9 @@ onBeforeUnmount(() => {
              minimized windows on the right, and the only surface that can
              answer a gate no pane is showing (DRY-49, absorbing DRY-50's
              tray and the dock). -->
+        <!-- `desk-height` is already observed here for the window manager
+             (DRY-78): the gate panel's height cap needs the same number, and a
+             second observer for it would be a second answer free to disagree. -->
         <RunRail
           ref="rail"
           :runs="autonomousRuns"
@@ -1790,6 +1793,7 @@ onBeforeUnmount(() => {
           :watched-ids="watchedIds"
           :sweep-at="sweepAt"
           :sweep-after-ms="clearFinishedAfterMs"
+          :desk-height="wm.desk.h"
           @watch="watchRun"
           @take-over="takeOver"
           @dismiss="dismissRun"

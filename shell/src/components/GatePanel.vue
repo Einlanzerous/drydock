@@ -45,8 +45,16 @@ watch(
     denying.value = false;
     reason.value = "";
     expanded.value = false;
+    // The panel is NOT re-created between gates — `v-if="activeGate"` keeps one
+    // instance and swaps the prop — so a gate answered half-scrolled would hand
+    // the next one a panel already scrolled past its own header (DRY-74 hit
+    // this on the ticket panel, which is reused between tickets the same way).
+    if (panelEl.value) panelEl.value.scrollTop = 0;
   },
 );
+
+/** The scrollport, for the reset above. */
+const panelEl = ref<HTMLElement | null>(null);
 
 /**
  * The argument, as text. Bash is the only tool the daemon gates today, so its
@@ -137,7 +145,7 @@ defineExpose({ cancelDenialIfOpen });
 </script>
 
 <template>
-  <div class="panel">
+  <div ref="panelEl" class="panel">
     <div class="head">
       <span class="bang">!</span>
       <span class="title">PERMISSION NEEDED</span>
@@ -244,14 +252,23 @@ defineExpose({ cancelDenialIfOpen });
      height, and this panel spends height UPWARD into a desk that clips — so at
      a 560px viewport a wrapped row plus a fully expanded argument put the
      panel's top 10px past the desk's edge, cutting the header off a decision.
-     The room is measured by RunRail, which is the only place that can see it;
-     see the comment on `measureGateRoom`. The fallback is `none` because an
-     unmeasured cap must not be a guessed one — worst case it renders exactly as
-     it did before this rule existed. */
+     The room comes from RunRail, which is the only place that can see it; see
+     the comment on `gateRoom`. The fallback is `none` because an unmeasured cap
+     must not be a guessed one — worst case it renders as it did before. */
   max-height: var(--gate-room, none);
-  display: flex;
-  flex-direction: column;
-  padding: 12px 14px 13px;
+  /* A cap without this is not a fix, it is the same overflow pointed downward:
+     the panel is anchored by its BOTTOM, so surplus content renders past that
+     edge and under the rail's lanes, putting `Approve ↵` right back out of
+     reach. `hidden auto` rather than `overflow-y`, because `overflow-y: auto`
+     computes `overflow-x` to `auto` too, and a stray horizontal scrollbar would
+     slide the sticky row below sideways (both lessons are DRY-74's — this panel
+     took the cap from that fix without the backstop that makes it safe). */
+  overflow: hidden auto;
+  /* No bottom padding: `.actions` is sticky and carries its own, so its opaque
+     background covers the strip down to the border. Left here, this would be a
+     13px band below the sticky row that scrolling content shows through —
+     padding is inside the scrollport. */
+  padding: 12px 14px 0;
   border-radius: 12px;
   /* The rail is pointer-events:none so it doesn't swallow clicks in the bottom
      of the desk; anything that must be clickable takes them back. */
@@ -260,12 +277,6 @@ defineExpose({ cancelDenialIfOpen });
   border: 1px solid #33506e;
   box-shadow: 0 16px 40px #000000aa;
   backdrop-filter: blur(14px);
-}
-/* Pinned, so the cap above is paid for out of the argument alone. `:not(.blob)`
-   rather than an override on `.blob`, because the two selectors would otherwise
-   tie on specificity and the winner would be whichever came last in the file. */
-.panel > :not(.blob) {
-  flex: 0 0 auto;
 }
 .head {
   display: flex;
@@ -337,16 +348,14 @@ defineExpose({ cancelDenialIfOpen });
   font-size: 12px;
   color: #e0a33c;
 }
-/* The argument is the ONLY region that gives way when the cap bites (DRY-78) —
-   everything else is pinned by the rule above. DRY-74's crushed textarea is the
-   lesson: a flex column with nothing pinned distributes the deficit across the
-   fixed regions first, which here would squeeze the action row this ticket just
-   finished making reachable. `min-height: 0` because a flex item's automatic
-   minimum is its content, which for a 40-line command is the whole thing. */
-.panel > .blob {
-  flex: 0 1 auto;
-  min-height: 46px;
-}
+/* Note the argument does NOT shrink to absorb the cap, though making it the
+   panel's one flexible region is the obvious move and was the first attempt
+   here (DRY-78). It squeezes silently: `.blob.clamped` is `overflow: hidden`
+   with a fade, so the box loses lines with no scrollbar and no signal, while
+   the footer below goes on reporting "+N more lines" counted from the 5-line
+   clamp — an undercount, on the one element whose entire job is to say exactly
+   what is being hidden. Measured at a 420px viewport: 101px of content in an
+   81px box. The panel scrolls instead. */
 .blob {
   margin: 7px 0 0;
   padding: 9px 10px;
@@ -415,11 +424,26 @@ defineExpose({ cancelDenialIfOpen });
    deep, and `Always allow …` went to two lines. A row of word-columns is not a
    row that fits; it is the same overflow spent on height instead. */
 .actions {
+  /* Pinned to the bottom of the scrollport (DRY-74's other half). Letting the
+     panel scroll alone already keeps the answers reachable, but only after you
+     scroll to them — on a short desk the decision would open below the fold
+     with nothing saying it was there, which is this ticket's complaint one step
+     removed. Sticky costs nothing when the panel fits, because then it never
+     scrolls. Opaque, and the panel's own translucency is deliberately not
+     inherited: content passing UNDER a see-through bar is worse than content
+     hidden by it. */
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  background: #141b22;
+  /* So content doesn't stop at a seam that reads as the panel's bottom edge. */
+  border-top: 1px solid #ffffff0d;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin-top: 11px;
+  padding: 9px 0 13px;
 }
 /* `margin-left: auto` rather than `justify-content: space-between` on .actions:
    auto margins resolve per LINE, so the answers stay right-aligned when they
