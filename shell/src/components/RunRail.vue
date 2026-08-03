@@ -67,6 +67,12 @@ const props = defineProps<{
   sweepAt: Record<string, number>;
   /** The host's full sweep delay, so the hairline can drain as a proportion. */
   sweepAfterMs: number;
+  /**
+   * The desk's height in px, for the gate panel's headroom (DRY-78). Taken as a
+   * prop because App.vue already observes the desk for the window manager; see
+   * `gateRoom`.
+   */
+  deskHeight: number;
 }>();
 
 const emit = defineEmits<{
@@ -347,9 +353,18 @@ const chooser = ref<string | null>(null);
 const CHOOSER_W = 320;
 
 /**
- * Enough of a gap above the desk that a lifted panel is never flush with the
- * viewport edge. `.desk` is `overflow: hidden`, so anything past this is CLIPPED,
- * not merely ugly — see the lift fallback in measure().
+ * Enough of a gap that a lifted panel is never flush with the edge it would be
+ * clipped at. `.desk` is `overflow: hidden`, so anything past that edge is
+ * CLIPPED, not merely ugly — see the lift fallback in measure().
+ *
+ * Note the two readers disagree about which edge, and only `gateRoom` has it
+ * right. The chooser's lift test in measure() compares a VIEWPORT coordinate
+ * against this, so it treats the window's top as the limit when the real one is
+ * the desk's — 54px of topbar lower, plus any notice in the flex column above
+ * it. The chooser can therefore still be lifted into a band the desk clips.
+ * That predates DRY-78 and is left alone deliberately: it is the chooser's
+ * anchoring (DRY-73's surface), nothing here covers it, and correcting it
+ * quietly at the end of a review pass is how an untested regression ships.
  */
 const LIFT_MARGIN = 8;
 
@@ -360,6 +375,67 @@ const chooserEl = ref<HTMLElement | null>(null);
  *  denial-cancel it exposes for the Escape chain. */
 const gateEl = ref<{ $el?: unknown; cancelDenialIfOpen?: () => boolean } | null>(null);
 const cardEls = new Map<string, HTMLElement>();
+
+/**
+ * How much room the gate panel has above the rail (DRY-78).
+ *
+ * It grows UPWARD out of the rail into `.desk`, which is `overflow: hidden`, so
+ * height it cannot afford is CLIPPED off its top edge — taking the header and
+ * the argument being decided, with no scrollbar anywhere to bring them back.
+ * That is a worse loss than the one this ticket is about: an unreachable button
+ * is visibly missing, whereas a clipped panel looks whole and is simply missing
+ * the command you are approving.
+ *
+ * A number rather than a CSS length because neither expression of it is right:
+ * `100%` resolves against the panel's containing block, which is this 98px
+ * rail, and a `100vh` calc would have to subtract the topbar AND whichever of
+ * App.vue's notices are in the flex column above the desk at the time — they
+ * are in the flow and push it down, so the figure moves with a tracker outage.
+ * Same error the panel's own `max-width: calc(100vw - 40px)` made on the other
+ * axis.
+ *
+ * Derived from `deskHeight` rather than measured here: App.vue already observes
+ * the desk and publishes its size to the window manager, so a second observer
+ * would be a second answer to a question already answered — free to disagree,
+ * and reaching the desk through `railEl.parentElement` to do it, which is an
+ * untyped assumption about a template this component doesn't own.
+ */
+const gateRoom = computed(() =>
+  // The rail sits at the desk's bottom, so the headroom is everything above it,
+  // less the panel's own 8px gap (its `bottom: calc(100% + 8px)`) and a margin
+  // off the desk's top edge. No floor: a desk too short for the panel must
+  // yield a SCROLLING panel, and flooring the cap above the room available is
+  // precisely how the surplus gets rendered outside it instead.
+  Math.max(0, props.deskHeight - RAIL_HEIGHT - 8 - LIFT_MARGIN),
+);
+
+/**
+ * The gate panel's rendered height, so the offline banner can stack above it
+ * rather than across it (DRY-78 — see the banner's comment in the template).
+ *
+ * Observed rather than derived: `gateRoom` is the panel's CAP, not its height,
+ * and an ordinary gate is far shorter than the cap — anchoring the banner to
+ * the cap would leave it floating hundreds of px above the panel it is meant to
+ * sit on. Unlike the desk, this element is RunRail's own child and nothing else
+ * publishes its size.
+ */
+const gatePanelH = ref(0);
+let gateObs: ResizeObserver | null = null;
+watch(
+  gateEl,
+  (inst) => {
+    gateObs?.disconnect();
+    gateObs = null;
+    gatePanelH.value = 0;
+    const el = (inst as { $el?: unknown } | null)?.$el;
+    if (!(el instanceof HTMLElement)) return;
+    gateObs = new ResizeObserver(() => {
+      gatePanelH.value = el.getBoundingClientRect().height;
+    });
+    gateObs.observe(el);
+  },
+  { flush: "post" },
+);
 
 /** Template ref per card, so the chooser can be anchored over one. */
 function setCardEl(id: string, el: unknown): void {
@@ -488,9 +564,17 @@ const chooserStyle = computed(() => ({
 const cardLayoutKey = computed(() =>
   cards.value.map((c) => `${c.session.id}:${densityFor(c)}`).join(),
 );
-watch(() => [chooser.value, cardLayoutKey.value, tier.value], () => measure(), {
-  flush: "post",
-});
+// `gateRoom` is in the list because the chooser's collision arithmetic reads the
+// gate panel's HEIGHT, and since DRY-78 that height is a function of the desk's.
+// The lane observer below doesn't cover it: the lane's height is fixed by the
+// rail, so a desk that changes height only — a notice appearing, a window
+// resized vertically — resizes the panel without resizing the lane, leaving the
+// chooser lifted for a panel that is no longer that tall.
+watch(
+  () => [chooser.value, cardLayoutKey.value, tier.value, gateRoom.value],
+  () => measure(),
+  { flush: "post" },
+);
 
 /**
  * Everything else that moves the lane rather than the cards in it: the docked
@@ -507,6 +591,7 @@ watch(laneEl, (el) => {
   laneObs = new ResizeObserver(() => measure());
   laneObs.observe(el);
 });
+
 
 /**
  * A chooser must not outlive the card it points at.
@@ -567,6 +652,7 @@ onMounted(() => document.addEventListener("click", onDocClick));
 onBeforeUnmount(() => {
   document.removeEventListener("click", onDocClick);
   laneObs?.disconnect();
+  gateObs?.disconnect();
 });
 
 function onCardClick(card: Card): void {
@@ -601,6 +687,7 @@ function onCardClick(card: Card): void {
     <GatePanel
       v-if="activeGate"
       ref="gateEl"
+      :style="{ '--gate-room': `${gateRoom}px` }"
       :gate="activeGate"
       :index="panelIndex"
       :total="panelGates.length"
@@ -656,7 +743,22 @@ function onCardClick(card: Card): void {
 
     <!-- The stream is how a gate arrives at all; while it's down, what's on
          screen is a snapshot of the past and no new gate will appear (DRY-50). -->
-    <p v-if="!gatesConnected && (runs.length || docked.length)" class="offline">
+    <!-- Stacked ABOVE the gate panel, not over it (DRY-78). Both are anchored
+         `left: 12px` at the rail's top edge, and a dropped stream does not clear
+         the gates it already delivered (`gateStore`'s `onerror` sets `connected`
+         and nothing else) — so precisely when this appears, there can be a gate
+         panel underneath it. Reproduced by SIGKILLing the daemon with a gate up:
+         the banner rendered across the bottom of the action row, and being later
+         in the DOM and `pointer-events: auto` it took that strip's clicks with
+         it. Which is the worst possible pairing: the line saying the daemon is
+         unreachable, sitting on top of the buttons for the decision that is
+         blocking a run. -->
+    <p
+      v-if="!gatesConnected && (runs.length || docked.length)"
+      class="offline"
+      :class="{ 'above-gate': !!activeGate }"
+      :style="{ '--gate-h': `${gatePanelH}px` }"
+    >
       Disconnected from the daemon — reconnecting. The rail may be out of date.
     </p>
 
@@ -798,12 +900,20 @@ function onCardClick(card: Card): void {
   left: 12px;
   bottom: 100%;
   margin: 0 0 8px;
+  /* Never wider than the panel it stacks with, so the pair reads as one column
+     rather than two things that happen to be near each other. */
+  max-width: calc(100% - 24px);
   padding: 6px 10px;
   border-radius: 8px;
   background: #3a2a1acc;
   border: 1px solid #6b4a2a;
   color: #e0c08a;
   font-size: 11.5px;
+}
+/* Clears the gate panel by its measured height plus the 8px gap the panel
+   already keeps above the rail (DRY-78). */
+.offline.above-gate {
+  bottom: calc(100% + 8px + var(--gate-h, 0px));
 }
 .lanes {
   display: flex;
