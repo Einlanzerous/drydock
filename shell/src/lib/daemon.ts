@@ -1,33 +1,11 @@
-import type { PermissionMode, SessionInfo } from "./protocol.js";
+import type { PermissionMode, SessionInfo, SessionVisibility } from "./protocol.js";
+import { authFetch, withStreamToken } from "./auth.js";
 
-// The daemon runs on the same host that served this shell, on the fixed daemon
-// port — so the shell works whether it's loaded from localhost or over the
-// LAN/Tailscale, with no hardcoded IP. Set VITE_DAEMON_URL to override (e.g. to
-// point at a different host's daemon; a per-host switcher belongs here later).
-//
-// Prod (DRY-19): /config.js sets window.__DRYDOCK__ before this bundle loads,
-// so one GHCR image can target any daemon at container start. daemonUrl (full
-// URL) beats daemonPort (same host as the page, non-dev port) beats build-time
-// VITE_DAEMON_URL beats the dev default :4317.
-interface RuntimeConfig {
-  daemonUrl?: string;
-  daemonPort?: string | number;
-}
-const runtime: RuntimeConfig =
-  (typeof window !== "undefined" &&
-    (window as unknown as { __DRYDOCK__?: RuntimeConfig }).__DRYDOCK__) ||
-  {};
-const DAEMON_PORT = Number(runtime.daemonPort ?? 4317);
-const override = runtime.daemonUrl ?? (import.meta.env.VITE_DAEMON_URL as string | undefined);
-const host =
-  typeof window !== "undefined" ? window.location.hostname || "127.0.0.1" : "127.0.0.1";
-const wsProto =
-  typeof window !== "undefined" && window.location.protocol === "https:" ? "wss" : "ws";
-
-export const DAEMON_HTTP = override ?? `http://${host}:${DAEMON_PORT}`;
-export const DAEMON_WS = override
-  ? override.replace(/^http/, "ws")
-  : `${wsProto}://${host}:${DAEMON_PORT}`;
+// Where the daemon is now lives in ./daemonUrl.ts — see the note there for why
+// it had to move out (lib/auth.ts needs it at module scope, and this module
+// needs lib/auth.ts). Re-exported so every existing importer is unaffected.
+export { DAEMON_HTTP, DAEMON_WS } from "./daemonUrl.js";
+import { DAEMON_HTTP, DAEMON_WS } from "./daemonUrl.js";
 
 /**
  * Every daemon response the shell parses goes through here, because the failure
@@ -46,7 +24,7 @@ export const DAEMON_WS = override
  * answers 502 with an error body.
  */
 export async function getJson<T>(url: string, init?: RequestInit): Promise<T> {
-  return unwrap<T>(await fetch(url, init));
+  return unwrap<T>(await authFetch(url, init));
 }
 
 /**
@@ -152,7 +130,7 @@ export async function fetchSessionHistory(): Promise<SessionRecord[] | null> {
   // Budgeted, like fetchWorkspace's. This runs behind the session poll, and a
   // partitioned Postgres costs the daemon its full query deadline — without a
   // ceiling here that becomes the shell's deadline too (DRY-58).
-  const res = await fetch(`${DAEMON_HTTP}/api/sessions/history`, {
+  const res = await authFetch(`${DAEMON_HTTP}/api/sessions/history`, {
     signal: AbortSignal.timeout(5_000),
   });
   // 501 is the tier speaking, not a fault — checked before the body is read so
@@ -183,6 +161,12 @@ export async function createSession(opts: {
   autonomous?: boolean;
   /** Who started it. Only the browser sends spawns today, so only "you". */
   origin?: "you" | "agent";
+  /**
+   * Who else may watch this run (DRY-27). Omit for `private`, which is every
+   * run on a single-account daemon. `public` is the deliberate "start it where
+   * the team can see it" case — they can watch and cannot type.
+   */
+  visibility?: SessionVisibility;
   /**
    * How much this run may do without asking. Omit to take the host's policy —
    * which for an autonomous run is DRYDOCK_AUTONOMOUS_PERMISSION_MODE, not
@@ -218,8 +202,19 @@ export async function killSession(id: string): Promise<void> {
   await getJson(`${DAEMON_HTTP}/api/sessions/${encodeURIComponent(id)}/kill`, { method: "POST" });
 }
 
-export function attachUrl(id: string): string {
-  return `${DAEMON_WS}/api/sessions/${id}/attach`;
+/**
+ * Where to attach a pane's terminal.
+ *
+ * Async since DRY-27, and it has to be: a browser's `WebSocket` constructor
+ * cannot set an Authorization header, so the credential goes in the query
+ * string — and it is a freshly minted, one-minute `stream` token rather than
+ * the real one, because a URL is the one place a credential reliably ends up in
+ * somebody's proxy log. Minted per connection, so a reconnect gets its own.
+ *
+ * Returns the bare URL when auth is off, which is every existing deployment.
+ */
+export function attachUrl(id: string): Promise<string> {
+  return withStreamToken(`${DAEMON_WS}/api/sessions/${id}/attach`);
 }
 
 // --- Permission gates, independent of any pane (DRY-50) ---
@@ -243,7 +238,7 @@ export interface DaemonConfig {
  */
 export async function fetchConfig(): Promise<DaemonConfig | null> {
   try {
-    const res = await fetch(`${DAEMON_HTTP}/api/config`, { signal: AbortSignal.timeout(3000) });
+    const res = await authFetch(`${DAEMON_HTTP}/api/config`, { signal: AbortSignal.timeout(3000) });
     if (!res.ok) return null;
     const body = await res.json();
     return body?.autonomous?.permissionMode ? (body as DaemonConfig) : null;
@@ -252,9 +247,15 @@ export async function fetchConfig(): Promise<DaemonConfig | null> {
   }
 }
 
-/** The shell-wide event stream. One per tab, not one per session. */
-export function eventsUrl(): string {
-  return `${DAEMON_HTTP}/api/events`;
+/**
+ * The shell-wide event stream. One per tab, not one per session.
+ *
+ * Async for the same reason as `attachUrl` — `EventSource` has no API for a
+ * header at all — and minting per connection matters more here, because this
+ * stream reconnects on its own schedule after every daemon restart.
+ */
+export function eventsUrl(): Promise<string> {
+  return withStreamToken(`${DAEMON_HTTP}/api/events`);
 }
 
 /**
@@ -278,7 +279,7 @@ export async function answerGate(
   /** Stop gating this tool for the rest of the run ("Always allow Bash", DRY-49). */
   always?: boolean,
 ): Promise<void> {
-  const res = await fetch(
+  const res = await authFetch(
     `${DAEMON_HTTP}/api/sessions/${encodeURIComponent(sessionId)}/permission`,
     {
       method: "POST",
@@ -298,7 +299,7 @@ export async function answerGate(
  * there's no parameter to get wrong here.
  */
 export async function takeOverRun(sessionId: string): Promise<void> {
-  const res = await fetch(
+  const res = await authFetch(
     `${DAEMON_HTTP}/api/sessions/${encodeURIComponent(sessionId)}/autonomy`,
     {
       method: "POST",
@@ -368,7 +369,7 @@ export async function fetchWorkspace(): Promise<WorkspaceEnvelope | null> {
 const WRITE_TIMEOUT_MS = 12_000;
 
 export async function putWorkspace(data: WorkspaceEnvelope): Promise<void> {
-  const res = await fetch(`${DAEMON_HTTP}/api/workspace`, {
+  const res = await authFetch(`${DAEMON_HTTP}/api/workspace`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(data),
@@ -378,7 +379,7 @@ export async function putWorkspace(data: WorkspaceEnvelope): Promise<void> {
 }
 
 export async function deleteWorkspace(): Promise<void> {
-  const res = await fetch(`${DAEMON_HTTP}/api/workspace`, {
+  const res = await authFetch(`${DAEMON_HTTP}/api/workspace`, {
     method: "DELETE",
     signal: AbortSignal.timeout(WRITE_TIMEOUT_MS),
   });
@@ -415,7 +416,7 @@ export async function resolveRepoCwd(repo: string, ticket?: string): Promise<Rep
 
 /** Prune a ticket's worktree on demand (DRY-15). Kept on close, removed here. */
 export async function removeWorktree(opts: { repo: string; worktree: string }): Promise<void> {
-  const res = await fetch(`${DAEMON_HTTP}/api/worktrees/remove`, {
+  const res = await authFetch(`${DAEMON_HTTP}/api/worktrees/remove`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(opts),

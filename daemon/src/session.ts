@@ -18,6 +18,7 @@ import type {
   ServerMessage,
   SessionInfo,
   SessionStatus,
+  SessionVisibility,
 } from "./protocol.js";
 
 export interface SpawnOptions {
@@ -52,6 +53,16 @@ export interface SpawnOptions {
   /** How much it may do without asking. Defaults to `manual` (gate everything). */
   permissionMode?: PermissionMode;
   /**
+   * The account this session belongs to (DRY-27). Taken from the authenticated
+   * caller by the route — never from the request body, which would let anyone
+   * spawn a session in somebody else's name.
+   */
+  owner?: string;
+  /** Display name of that account, cached on the session for the desk to label. */
+  ownerName?: string;
+  /** Who else may see it. Defaults to `private`; see SessionVisibility. */
+  visibility?: SessionVisibility;
+  /**
    * First prompt, typed into the PTY by the DAEMON once the CLI has settled.
    *
    * Load-bearing for autonomous runs specifically. A supervised spawn's prompt
@@ -70,6 +81,23 @@ export interface SpawnOptions {
  * process that actually exited zero.
  */
 export type RunEndReason = "finished" | "ended-turn" | "failed" | "stopped";
+
+/**
+ * Does "whose session is this" mean anything on this daemon? (DRY-27)
+ *
+ * Only under multi-user. Everywhere else there is exactly one identity, so an
+ * ownership check can only ever produce a wrong answer — and it did, in the
+ * direction nobody tests: turn multi-user OFF again and every session spawned
+ * while it was on carries a uuid owner, while the viewer is now the
+ * `DRYDOCK_OWNER` constant. Owned, not yours, not public: invisible and
+ * unkillable, on a daemon with no accounts to explain it.
+ *
+ * Read at call time rather than captured, because the mode is host config and a
+ * session outlives the process that spawned it.
+ */
+function ownershipApplies(): boolean {
+  return CONFIG.auth.mode === "multi";
+}
 
 export type RunEndNotifier = (session: PtySession, reason: RunEndReason) => void;
 
@@ -230,6 +258,21 @@ export class PtySession {
   readonly branch?: string;
   readonly origin: RunOrigin;
   readonly permissionMode: PermissionMode;
+  /**
+   * The account this session belongs to (DRY-27), and who else may see it.
+   *
+   * Undefined on a session spawned before accounts existed — read through
+   * `ownedBy`/`visibleTo` rather than directly, so the "nobody recorded one"
+   * case is answered in one place instead of at every call site.
+   */
+  /**
+   * Not readonly, for one reason: the first account created on a daemon that
+   * was running `off` or `single` adopts the sessions spawned under it. See
+   * `adoptOwner` and SessionManager.adoptSessions.
+   */
+  owner?: string;
+  ownerName?: string;
+  readonly visibility: SessionVisibility;
   title: string;
   /**
    * Not readonly: Take-over turns a run into an ordinary supervised session.
@@ -321,6 +364,11 @@ export class PtySession {
     this.autonomous = meta.autonomous;
     this.origin = meta.origin;
     this.permissionMode = meta.permissionMode;
+    this.owner = meta.owner;
+    this.ownerName = meta.ownerName;
+    // Defaulted at the boundary, not at every reader: a session from before
+    // DRY-27 is private, which is the only safe reading of "nobody said".
+    this.visibility = meta.visibility ?? "private";
     this.title = meta.title;
     this.cols = meta.cols;
     this.rows = meta.rows;
@@ -347,10 +395,57 @@ export class PtySession {
       autonomous: this.autonomous,
       origin: this.origin,
       permissionMode: this.permissionMode,
+      owner: this.owner,
+      ownerName: this.ownerName,
+      visibility: this.visibility,
       env: this.env,
       handoff: this.handoff,
       killedAt: this.killedAt,
     };
+  }
+
+  /**
+   * Is this session `viewer`'s to see and drive?
+   *
+   * One predicate, consulted by the list, the attach, the kill, the gate answer
+   * and the file read — because ownership checks that are written out at each
+   * call site are ownership checks that get forgotten at one of them, and the
+   * one that gets forgotten is the interesting one.
+   *
+   * A session with NO recorded owner belongs to whoever is asking. That is not a
+   * hole: it can only happen on a daemon that spawned it before accounts
+   * existed, and the alternative — hiding it — orphans a live agent behind a
+   * feature switch, with no surface left that could stop it.
+   */
+  visibleTo(viewer: string): boolean {
+    if (!ownershipApplies()) return true;
+    return !this.owner || this.owner === viewer || this.visibility === "public";
+  }
+
+  /**
+   * Stricter than `visibleTo`: may `viewer` END this, or change what it is?
+   *
+   * A public run is somebody else's work being shown to you. Watching it is the
+   * point; stopping it is not, and a bulk "clear finished" that reached across
+   * accounts would be the worst possible way to discover the difference.
+   */
+  ownedBy(viewer: string): boolean {
+    if (!ownershipApplies()) return true;
+    return !this.owner || this.owner === viewer;
+  }
+
+  /**
+   * Hand this session to the first account, at bootstrap (DRY-27).
+   *
+   * Persisted immediately, not just held in memory: the index file is what a
+   * restart rebuilds this session from, so an un-persisted change would survive
+   * exactly until the next `--watch` save and then put the session back where
+   * nobody can reach it.
+   */
+  adoptOwner(owner: string, ownerName?: string): void {
+    this.owner = owner;
+    if (ownerName) this.ownerName = ownerName;
+    this.persist();
   }
 
   /**
@@ -404,6 +499,9 @@ export class PtySession {
       autonomous,
       origin: opts.origin ?? "you",
       permissionMode,
+      owner: opts.owner,
+      ownerName: opts.ownerName,
+      visibility: opts.visibility ?? "private",
       env: {
         ...opts.env,
         // Lets the PreToolUse hook tell the daemon which session it belongs to.
@@ -414,6 +512,20 @@ export class PtySession {
         // on its own — but it is why DRYDOCK_SESSIONS_DIR exists.
         DRYDOCK_SESSION_ID: id,
         DRYDOCK_DAEMON_URL: `http://${CONFIG.host}:${CONFIG.port}`,
+        // What this session's hooks prove themselves with (DRY-27). Per session
+        // and minted here, which is the point: the wrapped CLI needs to reach
+        // `/hook/*` on a daemon that now refuses anonymous requests, and handing
+        // it the USER's token would give every agent the ability to spawn
+        // sessions, read anyone's desk, and — the one that matters — answer its
+        // own permission gates. This key opens the hook endpoints for this
+        // session and nothing else.
+        //
+        // It lives in the agent's own environment, so the agent can read it.
+        // That is fine and unavoidable: it is a credential for saying "I am the
+        // process you started", which the process is. The boundary that has to
+        // hold is the one above — and it holds because /api/* does not accept
+        // this key at all.
+        DRYDOCK_SESSION_KEY: randomUUID(),
         TERM: "xterm-256color",
       },
     };
@@ -1069,10 +1181,27 @@ export class PtySession {
       autonomous: this.autonomous,
       origin: this.origin,
       permissionMode: this.permissionMode,
+      owner: this.owner,
+      ownerName: this.ownerName,
+      visibility: this.visibility,
       activity: this.activity,
       failure: this.failure,
       handoff: this.handoff,
     };
+  }
+
+  /**
+   * The secret a spawned CLI's hooks authenticate with (DRY-27).
+   *
+   * Read off the env the daemon injected rather than stored separately, so
+   * there is exactly one copy and it survives a restart with the rest of the
+   * index. Undefined for a session spawned before this existed — the hook
+   * routes treat that as "this session has no key" and let it through, which is
+   * self-healing (every new session has one) and is not a bypass anyone can
+   * claim: the key is looked up FROM the session, not taken from the request.
+   */
+  get hookKey(): string | undefined {
+    return this.env.DRYDOCK_SESSION_KEY;
   }
 
   /** Cheap check for the run-end subscribers, which run outside this class. */

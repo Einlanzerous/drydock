@@ -4,10 +4,18 @@
 // them to its own .claude/settings.json — they now work in *any* cwd, including
 // repo-less projects that fall back to $HOME.
 //
-// `$DRYDOCK_DAEMON_URL` / `$DRYDOCK_SESSION_ID` stay as literal text in the
-// command strings; they're expanded by the shell when the hook runs, from the
-// session env the daemon injects (session.ts). We write the files once at
-// startup and hand claude the path that matches the kind of session.
+// `$DRYDOCK_DAEMON_URL` / `$DRYDOCK_SESSION_ID` / `$DRYDOCK_SESSION_KEY` stay as
+// literal text in the command strings; they're expanded by the shell when the
+// hook runs, from the session env the daemon injects (session.ts). We write the
+// files once at startup and hand claude the path that matches the kind of
+// session.
+//
+// That third variable is why these files can stay generic on a daemon that now
+// refuses anonymous requests (DRY-27): the credential is per session and lives
+// in the session's own environment, so ONE settings file still works for every
+// session, and no user's token is ever handed to an agent. It is deliberately
+// only good for `/hook/*` — an agent cannot use it to answer its own permission
+// gate, which is the thing it would most like to do.
 import * as os from "node:os";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -119,7 +127,7 @@ function withRetry(
 
 const GATE_CURL =
   'curl -s -m 590 -X POST "$DRYDOCK_DAEMON_URL/hook/pretooluse" ' +
-  '-H "Content-Type: application/json" -H "X-Drydock-Session: $DRYDOCK_SESSION_ID" --data-binary @-';
+  '-H "Content-Type: application/json" -H "X-Drydock-Session: $DRYDOCK_SESSION_ID" -H "X-Drydock-Key: $DRYDOCK_SESSION_KEY" --data-binary @-';
 
 const gate = {
   matcher: GATED_TOOLS,
@@ -146,7 +154,7 @@ const report = {
       type: "command",
       timeout: 5,
       command:
-        'curl -s -m 3 -X POST "$DRYDOCK_DAEMON_URL/hook/activity" -H "Content-Type: application/json" -H "X-Drydock-Session: $DRYDOCK_SESSION_ID" --data-binary @- >/dev/null 2>&1 || true',
+        'curl -s -m 3 -X POST "$DRYDOCK_DAEMON_URL/hook/activity" -H "Content-Type: application/json" -H "X-Drydock-Session: $DRYDOCK_SESSION_ID" -H "X-Drydock-Key: $DRYDOCK_SESSION_KEY" --data-binary @- >/dev/null 2>&1 || true',
     },
   ],
 };
@@ -166,7 +174,7 @@ const common = {
           // its handoff document. Still fire-and-forget: it never blocks the
           // agent from stopping, and gives up quietly if the daemon stays away.
           timeout: 45,
-          command: `${withRetry('curl -s -m 8 -X POST "$DRYDOCK_DAEMON_URL/hook/stop" -H "X-Drydock-Session: $DRYDOCK_SESSION_ID"', { quiet: true })}; true`,
+          command: `${withRetry('curl -s -m 8 -X POST "$DRYDOCK_DAEMON_URL/hook/stop" -H "X-Drydock-Session: $DRYDOCK_SESSION_ID" -H "X-Drydock-Key: $DRYDOCK_SESSION_KEY"', { quiet: true })}; true`,
         },
       ],
     },
@@ -186,7 +194,7 @@ const common = {
           // daemon still answers GET so a session spawned by an older daemon
           // (whose settings file it already read) keeps getting its context.
           command:
-            'curl -s -m 25 -X POST "$DRYDOCK_DAEMON_URL/hook/sessionstart" -H "Content-Type: application/json" -H "X-Drydock-Session: $DRYDOCK_SESSION_ID" --data-binary @-',
+            'curl -s -m 25 -X POST "$DRYDOCK_DAEMON_URL/hook/sessionstart" -H "Content-Type: application/json" -H "X-Drydock-Session: $DRYDOCK_SESSION_ID" -H "X-Drydock-Key: $DRYDOCK_SESSION_KEY" --data-binary @-',
         },
       ],
     },

@@ -79,19 +79,175 @@ function msOrOff(raw: string | undefined, fallback: number): number {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
+/**
+ * Configuration that cannot mean what it says. Collected rather than thrown,
+ * because this module is imported by every other one and a throw here produces
+ * a stack trace where a sentence belongs — `index.ts` prints these and exits
+ * before anything binds a port.
+ */
+export const CONFIG_ERRORS: string[] = [];
+
+/**
+ * Boolean knob, and an UNRECOGNISED value is an error rather than a false.
+ *
+ * `raw === "true"` was the obvious spelling and it is exactly the bug this
+ * whole area is about: `DRYDOCK_MULTI_USER=True` would read as false and boot a
+ * single-user daemon in silence — the precise silent downgrade the boot check
+ * in index.ts exists to refuse, walked straight past by the parse. So the
+ * affirmatives and the negatives are both enumerated, and anything else stops
+ * the daemon rather than being guessed at.
+ */
+function flag(name: string, raw: string | undefined): boolean {
+  const value = (raw ?? "").trim().toLowerCase();
+  if (value === "" ) return false;
+  if (["1", "true", "yes", "on"].includes(value)) return true;
+  if (["0", "false", "no", "off"].includes(value)) return false;
+  CONFIG_ERRORS.push(
+    `${name}=${raw} is not a yes/no value. Use 1/true/yes/on or 0/false/no/off, ` +
+      `or leave it unset — it will NOT be guessed at, because guessing wrong here ` +
+      `silently weakens the daemon's security posture.`,
+  );
+  return false;
+}
+
 /** Read once: the default log path is per-port so concurrent daemons don't share a file. */
 const PORT = Number(process.env.DRYDOCK_PORT ?? 4317);
+
+/**
+ * How this daemon decides who is asking (DRY-27).
+ *
+ *   off    no credential is configured, so there is nothing to log in as and
+ *          every request is the single local owner. What shipped before DRY-27,
+ *          and still the default: a fresh clone, `bun run up`, and the isolated
+ *          single-host profile all have to work with no setup at all.
+ *   single one account, its credential in host config. Closes the
+ *          "unauthenticated on 0.0.0.0" hole — the daemon spawns arbitrary
+ *          commands, so a reachable port is remote code execution by design —
+ *          without needing a database.
+ *   multi  accounts in Postgres, each with their own desk and their own
+ *          sessions. Requires BOTH a database and DRYDOCK_MULTI_USER, because
+ *          each answers a different question: the database is where accounts can
+ *          live at all, and the flag is somebody saying they want more than one.
+ *
+ * Deriving it here rather than at each call site means no route can be written
+ * against a posture that isn't the one in force.
+ */
+export type AuthMode = "off" | "single" | "multi";
+
+/**
+ * Shortest password this daemon will accept ANYWHERE — the configured one and
+ * the ones typed into the accounts panel.
+ *
+ * Enforced on host config too, not just on the API, because the two were
+ * inconsistent in a way that mattered: `createUser` refused seven characters
+ * while `DRYDOCK_AUTH_PASSWORD=x` was accepted silently, on the tier that is
+ * most likely to be the only thing between a LAN and a shell.
+ */
+export const MIN_PASSWORD = 8;
+
+const AUTH_PASSWORD = process.env.DRYDOCK_AUTH_PASSWORD || undefined;
+const AUTH_PASSWORD_HASH = process.env.DRYDOCK_AUTH_PASSWORD_HASH || undefined;
+const MULTI_USER = flag("DRYDOCK_MULTI_USER", process.env.DRYDOCK_MULTI_USER);
+
+if (AUTH_PASSWORD && AUTH_PASSWORD.length < MIN_PASSWORD) {
+  CONFIG_ERRORS.push(
+    `DRYDOCK_AUTH_PASSWORD is ${AUTH_PASSWORD.length} characters; the minimum is ${MIN_PASSWORD}. ` +
+      `This is the whole credential for a daemon that runs commands as you.`,
+  );
+}
+// A hash that isn't one can only ever answer "wrong password", for every
+// attempt, forever — indistinguishable from a forgotten password and impossible
+// to debug from the browser. Caught here rather than at the first login.
+if (AUTH_PASSWORD_HASH && !AUTH_PASSWORD_HASH.startsWith("scrypt$")) {
+  CONFIG_ERRORS.push(
+    `DRYDOCK_AUTH_PASSWORD_HASH is not a Drydock password hash (it must start with "scrypt$"). ` +
+      `Generate one with: node --import tsx scripts/hash-password.mts`,
+  );
+}
+const AUTH_MODE: AuthMode = MULTI_USER
+  ? "multi"
+  : AUTH_PASSWORD || AUTH_PASSWORD_HASH
+    ? "single"
+    : "off";
 
 export const CONFIG = {
   /**
    * Bind address. Defaults to 0.0.0.0 so the daemon is reachable over the
-   * LAN/Tailscale (PoC posture — matches the shell's `host: true`). It's
-   * UNAUTHENTICATED: anyone who can reach the port can spawn/attach to shells.
-   * Fine for a trusted LAN + Tailscale; set DRYDOCK_HOST=127.0.0.1 to lock it
-   * back to localhost. Real auth is the first thing to add past PoC.
+   * LAN/Tailscale (PoC posture — matches the shell's `host: true`).
+   *
+   * Whether that is safe is now a question with an answer rather than a warning:
+   * with `auth.mode: "off"` this port is UNAUTHENTICATED and anyone who can
+   * reach it can spawn and attach to shells, so it wants a trusted LAN, a
+   * Tailscale interface, or DRYDOCK_HOST=127.0.0.1. Set a credential (see
+   * `auth` below) and it stops being a question — which is what DRY-70 needs
+   * before this can sit on a public hostname.
    */
   host: process.env.DRYDOCK_HOST ?? "0.0.0.0",
   port: PORT,
+
+  /**
+   * Who may talk to this daemon (DRY-27). See AuthMode above for the three
+   * postures and why the third takes two knobs to reach.
+   */
+  auth: {
+    mode: AUTH_MODE,
+    /** Convenience for the many call sites that only care whether to check. */
+    enabled: AUTH_MODE !== "off",
+    /**
+     * The account host config seeds. In `single` it is the ONLY account; in
+     * `multi` it is the first one, and everything else is created from the
+     * shell (or POST /api/users) by somebody already logged in.
+     *
+     * Seeding from env rather than a first-run claim screen is deliberate: this
+     * port is reachable from the LAN by default, and a "claim this Drydock"
+     * form on an unclaimed instance is a race whoever finds it first wins.
+     */
+    user: process.env.DRYDOCK_AUTH_USER ?? "owner",
+    /**
+     * The seeded account's password, in plaintext. The low-ceremony way to turn
+     * auth on: one line in a gitignored `.env`, no tooling.
+     *
+     * `DRYDOCK_AUTH_PASSWORD_HASH` beside it takes precedence and is the better
+     * answer wherever the env is less private than the host is — a systemd unit
+     * file, a compose file, a shell history. Generate one with
+     * `node --import tsx scripts/hash-password.mts`.
+     */
+    password: AUTH_PASSWORD,
+    passwordHash: AUTH_PASSWORD_HASH,
+    /**
+     * Signing key for session tokens. Unset (the normal case) generates one and
+     * persists it to `keyFile`, so a restart doesn't sign everybody out —
+     * which matters because restarts are routine here (`node --watch` in dev,
+     * Restart=always in prod).
+     *
+     * Set it explicitly to share one identity across daemons, or to keep the
+     * key somewhere other than the host's disk. Changing it invalidates every
+     * token that was issued, which is the blunt instrument for "log everyone
+     * out everywhere".
+     */
+    secret: process.env.DRYDOCK_AUTH_SECRET || undefined,
+    /** Per-port like the log and the state file, and for the same reason. */
+    keyFile: process.env.DRYDOCK_AUTH_KEY_FILE ?? `~/.drydock/auth-key-${PORT}`,
+    /**
+     * How long a login lasts. Thirty days because the thing being protected is
+     * reached from a browser somebody keeps open for weeks, and a desk that
+     * demands a password every morning is a desk whose password ends up in a
+     * text file. Revocation doesn't wait for it (see the token epoch in
+     * auth/tokens.ts).
+     */
+    sessionTtlMs: num(process.env.DRYDOCK_AUTH_SESSION_TTL_MS, 30 * 24 * 60 * 60 * 1000),
+    /**
+     * More than one account, which needs somewhere to keep them.
+     *
+     * A hard requirement rather than a soft one: without a database this would
+     * have to invent a users file, and a second store with its own durability
+     * story is exactly what DRY-28 argued against. So no database means no
+     * multi-user, and asking for it anyway is a boot error rather than a silent
+     * downgrade — a security posture that quietly isn't the one you configured
+     * is worse than one that refuses to start.
+     */
+    multiUser: MULTI_USER,
+  },
 
   /** Scrollback ring-buffer cap per session, in bytes (~1 MiB). */
   scrollbackBytes: num(process.env.DRYDOCK_SCROLLBACK_BYTES, 1_048_576),
@@ -163,14 +319,15 @@ export const CONFIG = {
      */
     file: process.env.DRYDOCK_STATE_FILE ?? `~/.drydock/state-${PORT}.json`,
     /**
-     * Who saved state belongs to. A constant until DRY-27 brings accounts.
+     * Who saved state belongs to when nobody has logged in.
      *
-     * It is read from host config and NEVER from the request — a client can't
-     * name an owner — but that still doesn't make it a security boundary: the
-     * daemon has no authentication, so anyone who can reach the port reads and
-     * writes this owner's workspace. It exists so the schema doesn't have to
-     * change when real identities arrive, and so two people sharing one host
-     * daemon can at least keep separate desks.
+     * Still read from host config and NEVER from the request — a client cannot
+     * name an owner — and in `auth.mode: "off"` and `"single"` it is the owner
+     * of everything, exactly as it was before DRY-27. What changed is that it is
+     * no longer the ONLY possible answer: under `multi` each request's owner is
+     * the authenticated user's id, and this value is what the first account
+     * ADOPTS at bootstrap, so turning multi-user on doesn't make the desk you
+     * already had disappear.
      */
     owner: process.env.DRYDOCK_OWNER ?? "local",
     /**

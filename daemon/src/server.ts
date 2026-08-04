@@ -1,3 +1,4 @@
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as path from "node:path";
@@ -5,7 +6,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { CONFIG, PERMISSION_MODES, type PermissionMode } from "./config.js";
 import { describe, log, type LogFields } from "./log.js";
 import { SessionManager } from "./manager.js";
-import type { SpawnOptions } from "./session.js";
+import type { PtySession, SpawnOptions } from "./session.js";
 import { expandHome, resolveRepoCwd } from "./repos.js";
 import { sessionsDir } from "./sessions-dir.js";
 import {
@@ -15,7 +16,8 @@ import {
   removeWorktree,
   worktreeExists,
 } from "./worktree.js";
-import type { ClientMessage, EventMessage } from "./protocol.js";
+import type { ClientMessage, EventMessage, SessionVisibility } from "./protocol.js";
+import { Auth, BadRequest, NotSupported, type Identity } from "./auth/index.js";
 import { createTracker, trackerInfo } from "./tracker/index.js";
 import { ticketContext } from "./tracker/context.js";
 import { TicketListCache, ticketQueryKey } from "./tracker/cache.js";
@@ -27,6 +29,19 @@ import { knownTranscripts } from "./transcripts.js";
 const manager = new SessionManager();
 const tracker = createTracker();
 const store = createStore();
+// Who may talk to this daemon (DRY-27). Constructed with the store because
+// accounts live in it — and absent from it on the file tier, which is precisely
+// what makes multi-user impossible there rather than merely discouraged.
+const auth = new Auth(store);
+// What Auth needs to know about live PTYs, injected rather than imported so it
+// stays a thing that decides who somebody is (DRY-27). Two questions: whether an
+// account still has agents running (removing it would strand them with nothing
+// able to reach them), and where the pre-accounts sessions go when the first
+// account is seeded.
+auth.useSessions({
+  liveSessionsFor: (owner) => manager.liveSessionsFor(owner),
+  adoptSessions: (from, to, toName) => manager.adoptSessions(from, to, toName),
+});
 // The sidebar's pull, cached and coalesced (DRY-72). One per daemon, keyed by
 // query, so every browser tab on the same scope shares one fan-out at the
 // tracker instead of each paying for its own.
@@ -62,6 +77,42 @@ const HANDS_OFF_MODES = new Set(["bypassPermissions", "auto", "dontAsk"]);
 const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
 
 /**
+ * How many password checks may run at once (DRY-27).
+ *
+ * scrypt is memory-hard on purpose — ~16 MiB and ~50ms per attempt — which is
+ * the property that makes it worth using and also a lever anybody who can reach
+ * the port can pull, since `/api/auth/login` is by definition answered before
+ * anyone has proved anything. Four is past any human's concurrency and far
+ * short of a machine's.
+ *
+ * Deliberately not a per-IP lockout: those are evaded by using more sources and
+ * are a way to lock a real person out of a daemon holding their live agents.
+ */
+const MAX_CONCURRENT_LOGINS = 4;
+let loginsInFlight = 0;
+
+/**
+ * Consecutive failed sign-ins, and the delay they buy.
+ *
+ * The concurrency cap above bounds how much work arrives at once; it does not
+ * bound how many GUESSES an attacker gets, because a patient one simply sends
+ * them four at a time. This does: each failure adds a delay to the ANSWER, so
+ * the millionth guess costs a second and a half whether or not anybody is in a
+ * hurry.
+ *
+ * Delay rather than lockout, deliberately. A lockout on a daemon holding
+ * somebody's live agents is a denial of service anybody can trigger from
+ * outside — the owner is locked out of their own running work by a stranger
+ * typing the wrong password. A delay costs an attacker everything and costs the
+ * owner one slow login, once, before their correct password resets it.
+ */
+const FAILED_LOGIN_DELAY_MS = 250;
+const FAILED_LOGIN_DELAY_CAP_MS = 1_500;
+let failedLogins = 0;
+
+const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
  * Learn what a hook payload can tell us about a session (DRY-56).
  *
  * Two things ride on every Claude Code hook body, and both are free here:
@@ -78,23 +129,116 @@ const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
  * The activity stamp is debounced inside the recorder; this path is the rail's
  * hot one and must stay free of round trips.
  */
-function noteFromHook(sessionId: string, body: unknown): void {
+function noteFromHook(session: PtySession | undefined, body: unknown): void {
+  if (!session) return;
   const agentId = (body as { session_id?: unknown } | null | undefined)?.session_id;
   if (typeof agentId === "string" && agentId) {
-    history.noteAgentSessionId(sessionId, agentId);
+    history.noteAgentSessionId(session, agentId);
   }
-  const session = manager.get(sessionId);
-  if (session) history.active(session);
+  history.active(session);
+}
+
+/**
+ * Let a spawned CLI's hooks prove they are that session (DRY-27).
+ *
+ * The key is looked up FROM the session and compared to what arrived, so a
+ * caller cannot assert their way in by presenting a key for a session id they
+ * guessed — they would have to present the right key for the right id, which is
+ * the whole point.
+ *
+ * A session with no key recorded is let through, and that is a deliberate,
+ * self-closing gap: it can only be a session spawned by a daemon from before
+ * this existed, and every session spawned since has one. Refusing them instead
+ * would mean an upgrade silently breaks every live agent's gates — the
+ * permission prompt just stops arriving — which is the worst failure this
+ * daemon has, delivered by the feature meant to secure it.
+ */
+function hookAuthorized(session: PtySession, req: http.IncomingMessage): boolean {
+  if (!auth.enabled) return true;
+  const expected = session.hookKey;
+  if (!expected) return true;
+  const presented = req.headers["x-drydock-key"];
+  return typeof presented === "string" && timingSafeEqualStrings(presented, expected);
+}
+
+/** Constant-time string compare that tolerates a length mismatch. */
+function timingSafeEqualStrings(a: string, b: string): boolean {
+  const x = crypto.createHash("sha256").update(a, "utf8").digest();
+  const y = crypto.createHash("sha256").update(b, "utf8").digest();
+  return crypto.timingSafeEqual(x, y);
+}
+
+/**
+ * Resolve the caller, or answer them and return null.
+ *
+ * Returning null-after-answering rather than throwing keeps every route a
+ * single `if` — and it makes the DEFAULT for a new route "you forgot to call
+ * this and it doesn't compile", because `who.id` is what the route needs to do
+ * anything at all.
+ *
+ * The two failure codes are not interchangeable. 401 means "prove who you are";
+ * 503 means the daemon could not FIND OUT, because the accounts store is
+ * unreachable — and a shell that treats the second as the first would throw
+ * away a working token and demand a password nobody can verify, turning a
+ * database blip into a locked desk (DRY-58's lesson, one layer up).
+ */
+async function identify(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  opts: { streamToken?: string } = {},
+): Promise<Identity | null> {
+  const result = await auth.identify(req.headers.authorization, opts);
+  if (result.ok) return result.identity;
+  if (result.reason === "unavailable") {
+    send(res, 503, { error: "accounts are unreachable — try again shortly", degraded: true });
+    return null;
+  }
+  send(res, 401, {
+    error: result.reason === "anonymous" ? "sign in to use this Drydock" : "sign in again",
+    authRequired: true,
+  });
+  return null;
+}
+
+/**
+ * The session `id` names, if the caller is allowed to know it exists.
+ *
+ * 404 for "not yours", not 403, and the two arms answer identically on purpose:
+ * a daemon that says "forbidden" for one id and "unknown" for another has told
+ * an unauthorized caller which session ids are real.
+ *
+ * `need` is the difference between watching and driving. A `public` run is
+ * somebody else's work put on display — seeing it is the point, stopping it or
+ * typing into it is not — so every route that CHANGES a session asks for
+ * "own" while the ones that only read ask for "see".
+ */
+function sessionFor(
+  id: string,
+  viewer: string,
+  need: "see" | "own",
+  res: http.ServerResponse,
+): PtySession | null {
+  const session = manager.get(id);
+  const allowed = session && (need === "own" ? session.ownedBy(viewer) : session.visibleTo(viewer));
+  if (!allowed) {
+    send(res, 404, { error: `unknown session ${id}` });
+    return null;
+  }
+  return session;
 }
 
 function send(res: http.ServerResponse, status: number, body: unknown): void {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
     "Content-Type": "application/json",
-    // Dev shell runs on a different origin (Vite). Localhost-only daemon, so
-    // a permissive CORS policy is fine here.
+    // Dev shell runs on a different origin (Vite), and a deployed one may be a
+    // different host entirely (docs/deploy.md). `*` stays correct now that
+    // there is auth (DRY-27) precisely BECAUSE the credential is a bearer
+    // token rather than a cookie: `*` forbids credentialed requests, so a
+    // hostile page can send this daemon a request and cannot attach the
+    // token — where a cookie would have ridden along on its own.
     "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type, X-Drydock-Session",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Drydock-Session, X-Drydock-Key",
     // PUT/DELETE are here for /api/workspace (DRY-28). Without them the
     // browser's preflight rejects the save and the shell silently degrades to
     // its local cache — which looks exactly like "the daemon isn't storing my
@@ -115,20 +259,42 @@ async function readJson(req: http.IncomingMessage): Promise<any> {
 class PayloadTooLarge extends Error {}
 
 /**
+ * Translate an account-management failure into a status and a body.
+ *
+ * Three outcomes with three meanings: the request was wrong (400), this tier
+ * cannot keep accounts at all (501 — the same answer session history gives on
+ * the file store, and for the same reason: a client has to tell "not supported
+ * here" from "you asked wrong"), or the store is unreachable (503, which will
+ * pass).
+ */
+function accountsError(err: unknown): [number, { error: string }] {
+  if (err instanceof BadRequest) return [400, { error: err.message }];
+  if (err instanceof NotSupported) return [501, { error: err.message }];
+  return [503, { error: `accounts unavailable: ${String(err)}` }];
+}
+
+/**
  * readJson with a hard ceiling (DRY-28). The control-API payloads are a few
  * hundred bytes, so readJson buffering whatever it's handed has never mattered;
  * /api/workspace is the first endpoint whose whole job is to accept a blob, and
  * it sits on a port with no authentication (see CONFIG.host). Stop at the cap
  * while reading rather than after allocating the whole thing.
  */
-async function readJsonCapped(req: http.IncomingMessage, maxBytes: number): Promise<any> {
+async function readJsonCapped(
+  req: http.IncomingMessage,
+  maxBytes: number,
+  what = "body",
+): Promise<any> {
   const chunks: Buffer[] = [];
   let total = 0;
   for await (const chunk of req) {
     const buf = chunk as Buffer;
     total += buf.byteLength;
     if (total > maxBytes) {
-      throw new PayloadTooLarge(`workspace exceeds the ${maxBytes} byte cap`);
+      // Named by the caller since DRY-27 gave this a second one. "workspace
+      // exceeds the 4096 byte cap" on the LOGIN route is a sentence that sends
+      // whoever reads it to the wrong knob entirely.
+      throw new PayloadTooLarge(`${what} exceeds the ${maxBytes} byte cap`);
     }
     chunks.push(buf);
   }
@@ -140,6 +306,8 @@ const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
     const { pathname } = url;
+    /** The authenticated caller. Filled in by the gate below; see `me()`. */
+    let who: Identity | undefined;
 
     if (req.method === "OPTIONS") return send(res, 204, {});
     if (pathname === "/healthz") {
@@ -175,6 +343,163 @@ const server = http.createServer(async (req, res) => {
           capabilities: { sessionHistory: Boolean(store.history) },
         },
       });
+    }
+
+    // --- Identity (DRY-27) -------------------------------------------------
+    // The only two routes below that answer without a credential, because they
+    // are what a client asks BEFORE it has one: what kind of door is this, and
+    // here is the key. Everything else on /api goes through `identify`.
+
+    // What the shell needs in order to draw the right thing. Unauthenticated on
+    // purpose and deliberately thin: the posture and whether a second account is
+    // possible, never a user list — "who has an account here" is not a question
+    // an anonymous caller gets to ask.
+    if (pathname === "/api/auth/info" && req.method === "GET") {
+      return send(res, 200, await auth.info());
+    }
+
+    if (pathname === "/api/auth/login" && req.method === "POST") {
+      // Bounded, unlike the routes behind the gate. This is the one endpoint
+      // that must accept a body from somebody who has proved nothing, and
+      // `readJson` buffers whatever it is handed — a cap here is the difference
+      // between an unauthenticated write and an unauthenticated allocation.
+      // A name and a password are hundreds of bytes.
+      let body: any;
+      try {
+        body = await readJsonCapped(req, 4096, "login");
+      } catch (err) {
+        if (err instanceof PayloadTooLarge) return send(res, 413, { error: err.message });
+        return send(res, 400, { error: `invalid JSON body: ${String(err)}` });
+      }
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return send(res, 400, { error: "body must be a JSON object" });
+      }
+      // Password hashing is deliberately expensive — scrypt at ~16 MiB and
+      // ~50ms a go — which on a public endpoint is a lever somebody else can
+      // pull. Bounding how many run AT ONCE bounds both without a lockout: a
+      // real person never sees it, and there is no per-source bookkeeping to
+      // get wrong or to be evaded by using more sources.
+      if (loginsInFlight >= MAX_CONCURRENT_LOGINS) {
+        log.warn("login refused — too many at once", { inFlight: loginsInFlight });
+        return send(res, 429, { error: "too many sign-ins at once — try again in a moment" });
+      }
+      loginsInFlight += 1;
+      let outcome;
+      try {
+        outcome = await auth.login(body.name, body.password);
+      } finally {
+        // In a `finally`, because a rejection here would otherwise leak a slot
+        // permanently and the fourth failure would close the door for good.
+        loginsInFlight -= 1;
+      }
+      if (!outcome.ok) {
+        // A 503 is the store being unreachable, not a wrong password — counting
+        // it would let a database outage throttle the owner's real login the
+        // moment it came back.
+        if (outcome.status !== 503) {
+          failedLogins += 1;
+          await wait(Math.min(failedLogins * FAILED_LOGIN_DELAY_MS, FAILED_LOGIN_DELAY_CAP_MS));
+        }
+        // Logged because a login that keeps failing is either somebody locked
+        // out or somebody trying, and the daemon log is the only place either
+        // is visible — the browser only ever sees its own attempt.
+        log.warn("login refused", {
+          name: String(body.name ?? ""),
+          reason: outcome.error,
+          consecutiveFailures: failedLogins || undefined,
+        });
+        return send(res, outcome.status ?? 401, { error: outcome.error });
+      }
+      failedLogins = 0;
+      log.info("signed in", { user: outcome.identity?.name });
+      return send(res, 200, {
+        token: outcome.token,
+        user: { id: outcome.identity!.id, name: outcome.identity!.name },
+        expiresInMs: CONFIG.auth.sessionTtlMs,
+      });
+    }
+
+    // Everything past here needs to know who is asking. `/hook/*` is the one
+    // exception and authenticates differently (per-session key, see below), so
+    // it is routed around this rather than through it.
+    if (!pathname.startsWith("/hook/")) {
+      const gate = await identify(req, res, {
+        // The stream token is accepted for the SSE route ALONE, and only from
+        // the query string, because `EventSource` cannot send a header. See
+        // Audience in auth/tokens.ts for why that is a separate, minute-long
+        // credential instead of the real one.
+        streamToken:
+          pathname === "/api/events" ? (url.searchParams.get("token") ?? undefined) : undefined,
+      });
+      if (!gate) return;
+      who = gate;
+    }
+
+    // Who this request is, once past the gate. Non-null for every route below
+    // except the hooks, which never read it.
+    const me = (): Identity => who!;
+
+    /** A short-lived credential for the transports that can't carry a header. */
+    if (pathname === "/api/auth/stream-token" && req.method === "POST") {
+      return send(res, 200, { token: auth.streamToken(me()), expiresInMs: 60_000 });
+    }
+
+    /** Who the caller currently is, for a shell restoring a stored token. */
+    if (pathname === "/api/auth/me" && req.method === "GET") {
+      return send(res, 200, { user: { id: me().id, name: me().name }, mode: auth.mode });
+    }
+
+    // --- Accounts (DRY-27, multi-user only) --------------------------------
+    // 501 rather than 404 on the single-account tiers, matching how session
+    // history answers on the file store: the route exists, this Drydock just
+    // cannot do it, and the shell has to tell that apart from being newer than
+    // its daemon.
+    if (pathname === "/api/users") {
+      try {
+        if (req.method === "GET") return send(res, 200, { users: await auth.listUsers() });
+        if (req.method === "POST") {
+          const body = await readJson(req).catch(() => null);
+          if (!body || typeof body !== "object" || Array.isArray(body)) {
+            return send(res, 400, { error: "body must be a JSON object" });
+          }
+          const created = await auth.createUser(body.name, body.password);
+          return send(res, 201, { user: created });
+        }
+      } catch (err) {
+        return send(res, ...accountsError(err));
+      }
+    }
+
+    const userMatch = pathname.match(/^\/api\/users\/([^/]+)$/);
+    if (userMatch && req.method === "DELETE") {
+      try {
+        await auth.removeUser(decodeURIComponent(userMatch[1]), me());
+        return send(res, 200, { ok: true });
+      } catch (err) {
+        return send(res, ...accountsError(err));
+      }
+    }
+
+    const passwordMatch = pathname.match(/^\/api\/users\/([^/]+)\/password$/);
+    if (passwordMatch && req.method === "PUT") {
+      const id = decodeURIComponent(passwordMatch[1]);
+      try {
+        const body = await readJsonCapped(req, 4096, "password change").catch(() => null);
+        if (!body || typeof body !== "object" || Array.isArray(body)) {
+          return send(res, 400, { error: "body must be a JSON object" });
+        }
+        // Own account only, current password required — see Auth.setPassword.
+        // Both rules live there rather than here so there is one place to read
+        // for "can this become account takeover", instead of a route that
+        // enforces half of it and a method that trusts the route.
+        await auth.setPassword(id, body.current, body.password, me());
+        // The caller has just invalidated their own token — the epoch moved.
+        // Say so in the response rather than letting the next poll 401 out of
+        // nowhere.
+        return send(res, 200, { ok: true, signedOut: true });
+      } catch (err) {
+        return send(res, ...accountsError(err));
+      }
     }
 
     // --- Shell-wide event stream (DRY-50) ---
@@ -220,14 +545,43 @@ const server = http.createServer(async (req, res) => {
       write({
         type: "gate-snapshot",
         serverNow: Date.now(),
+        // OWNED, not merely visible. A gate is a question addressed to whoever
+        // is responsible for the run — only they can answer it (the answer
+        // route requires ownership) — so streaming one to a spectator on a
+        // public run would render a panel whose buttons return 404, carrying
+        // the tool's input along with it. Watching somebody's run is not
+        // supervising it.
         gates: manager
-          .list()
+          .listFor(me().id)
+          .filter((session) => session.ownedBy(me().id))
           .flatMap((session) =>
             session.pendingGates().map((gate) => ({ sessionId: session.id, gate })),
           ),
       });
 
-      const unsubscribe = manager.onGate(write);
+      // Scoped to this viewer (DRY-27). The manager broadcasts every gate to
+      // every subscriber — it has to, since a subscriber is a browser tab and
+      // not an account — so the filter is here, at the point where a stream
+      // belongs to somebody. Without it, the one surface built to outlive a
+      // pane would be the one that leaks a colleague's tool calls, tool INPUT
+      // included.
+      const viewer = me().id;
+      const unsubscribe = manager.onGate((event) => {
+        // A RESOLUTION goes to everyone, deliberately. It carries no detail —
+        // a requestId and a decision — so it can only ever retract a row this
+        // client was already sent, and the alternative is worse in a way that
+        // is easy to miss: a session killed mid-gate is dropped from the
+        // registry before its dangling gates are announced, so there would be
+        // nothing left to check visibility against and the row would sit in the
+        // tray forever with its held-time climbing. Exactly the strand
+        // gate-snapshot exists to repair, reintroduced by the filter meant to
+        // secure it.
+        if (event.type === "gate-resolved") return write(event);
+        // An OPENING carries the tool and its input, and only its owner can
+        // answer it — see the snapshot above.
+        const session = manager.get(event.sessionId);
+        if (session?.ownedBy(viewer)) write(event);
+      });
       // Load-bearing, same class as the pg pool listener in DRY-28 and the
       // socket handlers in DRY-45: an unhandled 'error' on this response throws,
       // and this process is the lifetime of every live PTY.
@@ -267,8 +621,11 @@ const server = http.createServer(async (req, res) => {
     }
 
     // --- Session control API ---
+    // Scoped to the caller since DRY-27: your own sessions, plus any run
+    // somebody deliberately made public. On a daemon with auth off this is
+    // every session, because there is one identity and everything is its own.
     if (pathname === "/api/sessions" && req.method === "GET") {
-      return send(res, 200, { sessions: manager.list().map((s) => s.info()) });
+      return send(res, 200, { sessions: manager.listFor(me().id).map((s) => s.info()) });
     }
 
     // --- Session history (DRY-56) ---
@@ -291,7 +648,10 @@ const server = http.createServer(async (req, res) => {
       const asked = Number(url.searchParams.get("limit"));
       const limit = Number.isFinite(asked) && asked > 0 ? Math.min(asked, 200) : 50;
       try {
-        const records = (await history.recent(limit)) ?? [];
+        // The caller's own history. Not filtered after the fact — asked for by
+        // owner in SQL, so a busy colleague's runs can't consume the limit and
+        // leave you an empty page that reads as "nothing ever ran".
+        const records = (await history.recent(me().id, limit)) ?? [];
         // Say which of these can actually be resumed (DRY-62). Recording an
         // `agentSessionId` only means a hook reported one — a session spawned
         // before DRY-59 has one AND no transcript, so the tombstone would offer
@@ -325,8 +685,11 @@ const server = http.createServer(async (req, res) => {
     // request id alone.
     const answerMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/permission$/);
     if (answerMatch && req.method === "POST") {
-      const session = manager.get(decodeURIComponent(answerMatch[1]));
-      if (!session) return send(res, 404, { error: "unknown session" });
+      // "own", not "see": answering a gate decides what an agent is allowed to
+      // do to the host, so it belongs to whoever is responsible for that run —
+      // a spectator on a public one may watch it ask and may not answer.
+      const session = sessionFor(decodeURIComponent(answerMatch[1]), me().id, "own", res);
+      if (!session) return;
       // This route's contract is 400/404/409, so neither a parse failure nor a
       // body of literal `null` may escape as a 500 with a raw stack — `null`
       // parses fine and only becomes a TypeError at `body.decision`. Same trap
@@ -371,8 +734,8 @@ const server = http.createServer(async (req, res) => {
     // leave a caller believing it had put a session back on the rail.
     const autonomyMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/autonomy$/);
     if (autonomyMatch && req.method === "POST") {
-      const session = manager.get(decodeURIComponent(autonomyMatch[1]));
-      if (!session) return send(res, 404, { error: "unknown session" });
+      const session = sessionFor(decodeURIComponent(autonomyMatch[1]), me().id, "own", res);
+      if (!session) return;
       let body: any;
       try {
         body = await readJson(req);
@@ -468,6 +831,16 @@ const server = http.createServer(async (req, res) => {
           : body.autonomous === true
             ? CONFIG.autonomous.permissionMode
             : "manual",
+        // Whose run this is (DRY-27). From the authenticated caller and NEVER
+        // from the body — a spawn that could name its own owner would let
+        // anyone put a session on somebody else's desk, or hide one on nobody's.
+        owner: me().id,
+        ownerName: me().name,
+        // Visibility, unlike the owner, IS the caller's to choose — it is the
+        // one thing about a run only the person starting it knows. Whitelisted
+        // rather than coerced, and anything unrecognised reads as `private`:
+        // the failure direction for a typo has to be "fewer people saw it".
+        visibility: body.visibility === "public" ? ("public" as SessionVisibility) : "private",
       };
 
       // Awaited since DRY-57: the session isn't real until its detached
@@ -530,6 +903,20 @@ const server = http.createServer(async (req, res) => {
 
     const killMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/kill$/);
     if (killMatch && req.method === "POST") {
+      const session = manager.get(killMatch[1]);
+      // A session that isn't there is not an error: "gone" is the state that was
+      // asked for. This route has always been idempotent and has to stay that
+      // way — DRY-60's sweep and the ✕ button race each other by design, and a
+      // second kill landing after the first must not raise a banner.
+      if (!session) return send(res, 200, { ok: true });
+      // Somebody else's, though, is refused — and refused as "unknown", so this
+      // doesn't become a way to enumerate other people's sessions. Before
+      // accounts this was a bare `manager.remove(id)`: harmless when one person
+      // could reach the port, and a bulk clear that stops a colleague's live
+      // agent (reporting success) once several can.
+      if (!session.ownedBy(me().id)) {
+        return send(res, 404, { error: `unknown session ${killMatch[1]}` });
+      }
       manager.remove(killMatch[1]);
       return send(res, 200, { ok: true });
     }
@@ -543,11 +930,14 @@ const server = http.createServer(async (req, res) => {
     // The governing rule for this whole section: window positions are a
     // convenience and live PTYs are the product, so a store that's unreachable
     // degrades (503 → the shell keeps its local mirror) and never escalates.
-    // The daemon has no authentication, so `owner` here is a namespace, not a
-    // boundary — it comes from host config, deliberately NOT from the request.
+    //
+    // `owner` became a real boundary in DRY-27. It is still never taken from the
+    // request — it is the authenticated caller's id, which on the single-account
+    // postures is exactly the host-config constant it always was, so a desk
+    // saved before accounts existed is still the desk that loads.
     if (pathname === "/api/workspace") {
       const name = url.searchParams.get("name") || CONFIG.state.workspace;
-      const owner = CONFIG.state.owner;
+      const owner = me().id;
       // Constrain the one request-controlled key that reaches a store. Not
       // theoretical: unconstrained, `?name=__proto__` answered 200 and stored
       // nothing (assigning `__proto__` sets a prototype instead of an own
@@ -580,7 +970,7 @@ const server = http.createServer(async (req, res) => {
       if (req.method === "PUT") {
         let body: any;
         try {
-          body = await readJsonCapped(req, CONFIG.state.maxBytes);
+          body = await readJsonCapped(req, CONFIG.state.maxBytes, "workspace");
         } catch (err) {
           if (err instanceof PayloadTooLarge) return send(res, 413, { error: err.message });
           return send(res, 400, { error: `invalid workspace body: ${String(err)}` });
@@ -638,8 +1028,16 @@ const server = http.createServer(async (req, res) => {
     // only renderable text extensions, cap the size. Revisit with daemon auth.
     const fileMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/file$/);
     if (fileMatch && req.method === "GET") {
-      const session = manager.get(fileMatch[1]);
-      if (!session) return send(res, 404, { error: `unknown session ${fileMatch[1]}` });
+      // "own", and the comment that used to be here was wrong in a way worth
+      // recording: it argued this only shows you what the terminal already has,
+      // so a spectator could read it out of the scrollback anyway. That is not
+      // what this route does. It resolves an ARBITRARY relative path under the
+      // session's working directory and reads the file — the agent need never
+      // have opened it. On a public run that made every .md and .txt in
+      // somebody else's worktree readable by anyone signed in, which is a
+      // different thing entirely from watching their terminal.
+      const session = sessionFor(fileMatch[1], me().id, "own", res);
+      if (!session) return;
       const rel = url.searchParams.get("path") ?? "";
       if (!rel) return send(res, 400, { error: "path is required" });
       if (!/\.(md|markdown|txt)$/i.test(rel)) {
@@ -755,6 +1153,15 @@ const server = http.createServer(async (req, res) => {
       if (!session) {
         return send(res, 404, { error: `unknown session ${sessionId}` });
       }
+      if (!hookAuthorized(session, req)) {
+        // Logged loudly: on a daemon with auth on, this means something that
+        // is not this session's own CLI is POSTing its hook endpoint — either a
+        // stale settings file from a session spawned by another daemon, or
+        // somebody probing. Both are worth a line, and neither may hold the
+        // connection open the way a real gate does.
+        log.warn("hook rejected — wrong or missing session key", { id: session.id });
+        return send(res, 401, { error: "bad session key" });
+      }
       // PreToolUse fires in *every* permission mode. If the agent is running
       // hands-off (bypassPermissions / auto / dontAsk), Claude Code runs the
       // tool regardless of what we return — so popping a gate would be a
@@ -766,7 +1173,7 @@ const server = http.createServer(async (req, res) => {
       // immediately below — is precisely the one whose card would otherwise
       // have nothing to say for its entire life.
       session.noteActivity(tool, body.tool_input ?? {});
-      noteFromHook(session.id, body);
+      noteFromHook(session, body);
       if (HANDS_OFF_MODES.has(mode)) {
         return send(res, 200, {
           hookSpecificOutput: {
@@ -816,10 +1223,14 @@ const server = http.createServer(async (req, res) => {
       const sessionId = (req.headers["x-drydock-session"] as string | undefined) ?? "";
       const session = manager.get(sessionId);
       const body = await readJson(req).catch(() => ({}));
-      if (session && typeof body?.tool_name === "string") {
+      if (session && hookAuthorized(session, req) && typeof body?.tool_name === "string") {
         session.noteActivity(body.tool_name, body.tool_input ?? {});
-        noteFromHook(session.id, body);
+        noteFromHook(session, body);
       }
+      // Still 200 on a rejected key, unlike the gate above. This hook feeds a
+      // caption and holds nothing open; answering it with an error would put a
+      // failure in the agent's transcript for a cosmetic write we simply
+      // declined to make.
       return send(res, 200, {});
     }
 
@@ -833,9 +1244,9 @@ const server = http.createServer(async (req, res) => {
       const sessionId = (req.headers["x-drydock-session"] as string | undefined) ?? "";
       const session = manager.get(sessionId);
       const body = await readJson(req).catch(() => ({}));
-      if (session) {
+      if (session && hookAuthorized(session, req)) {
         session.markIdle();
-        noteFromHook(session.id, body);
+        noteFromHook(session, body);
       }
       return send(res, 200, {});
     }
@@ -849,11 +1260,15 @@ const server = http.createServer(async (req, res) => {
     if (pathname === "/hook/sessionstart" && (req.method === "POST" || req.method === "GET")) {
       const sessionId = (req.headers["x-drydock-session"] as string | undefined) ?? "";
       const session = manager.get(sessionId);
+      if (session && !hookAuthorized(session, req)) {
+        log.warn("session-start hook rejected — wrong or missing session key", { id: session.id });
+        return send(res, 401, { error: "bad session key" });
+      }
       // Before the ticket check, not after: a session with no ticket still has
       // an agent session id worth recording, and it is the earliest moment we
       // can learn it (DRY-56).
       if (req.method === "POST") {
-        noteFromHook(sessionId, await readJson(req).catch(() => ({})));
+        noteFromHook(session, await readJson(req).catch(() => ({})));
       }
       if (!session?.ticket) return send(res, 200, {});
       try {
@@ -884,8 +1299,15 @@ const server = http.createServer(async (req, res) => {
 const wss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
+  // Async since DRY-27 — deciding who is attaching can mean a round trip to the
+  // accounts store — so the catch has to cover the rejection as well as the
+  // synchronous throw. A promise rejecting out of here would reach
+  // `unhandledRejection` with a socket left open and nothing ever written to it.
   try {
-    upgrade(req, socket, head);
+    void upgrade(req, socket, head).catch((err) => {
+      log.warn("upgrade failed — closing socket", describe(err));
+      socket.destroy();
+    });
   } catch (err) {
     // Same bug class this ticket is about: an unguarded throw inside a socket
     // handler. `new URL(…, "http://" + req.headers.host)` throws "Invalid URL"
@@ -935,11 +1357,11 @@ function rejectUpgrade(
   );
 }
 
-function upgrade(
+async function upgrade(
   req: http.IncomingMessage,
   socket: import("node:stream").Duplex,
   head: Buffer,
-): void {
+): Promise<void> {
   const url = new URL(req.url ?? "/", `http://${req.headers.host}`);
   const match = url.pathname.match(/^\/api\/sessions\/([^/]+)\/attach$/);
   if (!match) {
@@ -947,13 +1369,45 @@ function upgrade(
       path: url.pathname,
     });
   }
+  // A browser's WebSocket constructor cannot set an Authorization header, so
+  // this is the second of the two transports that take a short-lived `stream`
+  // token in the query string instead (see Audience in auth/tokens.ts). The
+  // header is still read first, which is what makes `wscat`/curl testing with
+  // an ordinary bearer work.
+  const result = await auth.identify(req.headers.authorization, {
+    streamToken: url.searchParams.get("token") ?? undefined,
+  });
+  if (!result.ok) {
+    // 401 with a real response, not a bare destroy: the browser reports a
+    // failed handshake as an opaque code-1006 close, so without this the one
+    // symptom of an expired token would be a pane that reconnects forever.
+    return rejectUpgrade(socket, result.reason === "unavailable" ? 503 : 401, "not signed in", {
+      id: match[1],
+      reason: result.reason,
+    });
+  }
+  const viewer = result.identity;
   const session = manager.get(match[1]);
-  if (!session) {
+  if (!session || !session.visibleTo(viewer.id)) {
     // The stale-tab case: a browser reconnecting to a session this daemon no
     // longer has (it restarted, or the session was killed). Silently destroying
     // the socket made the single most likely post-restart symptom invisible.
+    // Somebody else's session answers identically — see sessionFor().
     return rejectUpgrade(socket, 404, "unknown session", { id: match[1] });
   }
+  /**
+   * May this client TYPE, or only watch? (DRY-27)
+   *
+   * This is what makes a `public` run worth having. Refusing the attach
+   * outright would leave "everyone can see it" meaning nothing but a card on a
+   * rail; accepting input from anyone would mean a spectator can type into
+   * somebody else's agent. So the socket opens for anyone who may see the
+   * session, and the frames that CHANGE it are dropped for everyone else.
+   *
+   * Decided once, here, from the identity that opened the socket — not
+   * per-frame from something the client sends.
+   */
+  const mayDrive = session.ownedBy(viewer.id);
   wss.handleUpgrade(req, socket, head, (ws) => {
     session.attach(ws);
     // A client socket erroring must cost that client and nothing else (DRY-45).
@@ -983,6 +1437,11 @@ function upgrade(
       } catch {
         return;
       }
+      // Every frame here changes the session, so a spectator on a public run
+      // has nothing to send. Dropped silently rather than answered with an
+      // error: the shell already knows (it renders a read-only pane), and a
+      // stray keystroke is not worth a round trip to be told about.
+      if (!mayDrive) return;
       switch (msg.type) {
         case "input":
           session.write(msg.data);
@@ -1098,5 +1557,17 @@ server.listen(CONFIG.port, CONFIG.host, () => {
     log: log.file() || "(stdout only)",
     sessionsDir: sessionsDir(),
     sessions: manager.list().length,
+    auth: CONFIG.auth.mode,
   });
+  // Said once, at the top of every log, because the alternative is that nobody
+  // ever finds out. This process spawns arbitrary commands as the host user, so
+  // "who can reach this port" is the single most consequential thing about how
+  // it is configured — and the default is still open, because a fresh clone has
+  // to work. A warning that names the fix is the least this can do.
+  if (!CONFIG.auth.enabled && CONFIG.host !== "127.0.0.1" && CONFIG.host !== "localhost") {
+    log.warn("UNAUTHENTICATED on a non-loopback address — anyone who can reach this port can run commands as you", {
+      host: CONFIG.host,
+      fix: "set DRYDOCK_AUTH_PASSWORD, or bind DRYDOCK_HOST=127.0.0.1",
+    });
+  }
 });

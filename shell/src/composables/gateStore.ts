@@ -41,6 +41,8 @@ let source: EventSource | null = null;
 let retry: ReturnType<typeof setTimeout> | null = null;
 let backoffMs = 1000;
 let stopped = true;
+/** A stream is being opened but has no EventSource yet — see startGateStream. */
+let opening = false;
 
 /** Oldest first, matching the daemon's insertion order. */
 export const openGates = computed(() => gates.value);
@@ -118,8 +120,33 @@ function onEvent(event: EventMessage): void {
  */
 export function startGateStream(): void {
   stopped = false;
-  if (source) return;
-  const es = new EventSource(eventsUrl());
+  if (source || opening) return;
+  // Guarded against re-entry BEFORE the await, not after. Minting the stream
+  // credential (DRY-27) made this function asynchronous, and `source` is only
+  // assigned once the URL comes back — so two callers landing in that gap would
+  // each open a stream, which is exactly the double-delivery the module comment
+  // says a singleton exists to prevent.
+  opening = true;
+  void openStream().catch((err) => {
+    opening = false;
+    connected.value = false;
+    // A failure here is usually the token: the credential mint 401s, the shell
+    // signs out, and the login view replaces the desk. Retried on the same
+    // backoff as a dropped stream so a daemon that is merely restarting is
+    // picked back up without a reload.
+    console.warn("gate stream could not open", err);
+    scheduleRetry();
+  });
+}
+
+async function openStream(): Promise<void> {
+  const url = await eventsUrl();
+  opening = false;
+  // Re-checked after the await: stopGateStream may have run while the token was
+  // being minted, and opening a stream after teardown leaks a connection that
+  // nothing will ever close.
+  if (stopped) return;
+  const es = new EventSource(url);
   source = es;
 
   es.onopen = () => {
@@ -140,17 +167,31 @@ export function startGateStream(): void {
     if (es.readyState !== EventSource.CLOSED || stopped) return;
     es.close();
     if (source === es) source = null;
-    if (retry) clearTimeout(retry);
-    retry = setTimeout(() => {
-      retry = null;
-      if (!stopped) startGateStream();
-    }, backoffMs);
-    backoffMs = Math.min(backoffMs * 2, 30_000);
+    scheduleRetry();
   };
+}
+
+/**
+ * Reconnect after a backoff.
+ *
+ * Reached from two places since DRY-27 — a dropped stream and a credential that
+ * couldn't be minted — because the second is now a routine transient: the
+ * stream token lives 60 seconds, so a tab that sleeps through a daemon restart
+ * comes back to a URL that has expired rather than to a stream that dropped.
+ */
+function scheduleRetry(): void {
+  if (stopped) return;
+  if (retry) clearTimeout(retry);
+  retry = setTimeout(() => {
+    retry = null;
+    if (!stopped) startGateStream();
+  }, backoffMs);
+  backoffMs = Math.min(backoffMs * 2, 30_000);
 }
 
 export function stopGateStream(): void {
   stopped = true;
+  opening = false;
   if (retry) clearTimeout(retry);
   retry = null;
   source?.close();

@@ -32,6 +32,55 @@ function keyFor(host: string): string {
   return `${PREFIX}.${host}`;
 }
 
+/**
+ * Forget everything this module holds about one account's desk (DRY-27).
+ *
+ * Called on sign-out, and every line of it is load-bearing rather than tidy —
+ * all the state below is MODULE-scoped, which was correct while a page load
+ * meant one person and is a data-loss bug the moment signing out and back in
+ * can change who that is:
+ *
+ * - `unflushed` is a desk a degraded store never took. Left behind, the next
+ *   account's first successful push flushes A's desk to B's row, under B's
+ *   token. The daemon has no way to tell — it is a well-formed PUT from a
+ *   signed-in client.
+ * - `mayPush` latching open is the guard from DRY-58's conflict rule. Carried
+ *   across a sign-in it says "we have read this account's desk" about an
+ *   account whose desk we have never read, so B's empty from-scratch desk
+ *   overwrites the one B actually had.
+ * - the retry `timer` fires against whoever is signed in when it lands, which
+ *   is the same bug with a delay on it.
+ * - the mirror is keyed by DAEMON, not by account (it predates accounts), so
+ *   leaving it hands B the last person's desk as their offline fallback —
+ *   `hydrate` uses it whenever the daemon has no saved desk, which is exactly
+ *   the state a new account is in.
+ *
+ * Keying the mirror by account instead would be the other fix and a worse one:
+ * the key is fixed when the window manager is constructed, before anybody has
+ * signed in. Signing out costs an offline fallback the daemon has a copy of
+ * anyway — and the token went with it, so there was nothing to be offline with.
+ */
+export function forgetLocalLayout(host: string): void {
+  if (timer) {
+    clearTimeout(timer);
+    timer = null;
+  }
+  hooks = null;
+  recoveryHost = null;
+  unflushed = null;
+  attempt = 0;
+  recovering = false;
+  degraded = false;
+  mayPush = false;
+  clearNotice("workspace-store");
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.removeItem(keyFor(host));
+  } catch {
+    /* storage blocked — nothing was mirrored either */
+  }
+}
+
 const LAYOUTS = new Set<LayoutMode>(["float", "tile", "focus"]);
 
 /** Structural check applied to both sources — neither is trusted more. */

@@ -8,7 +8,8 @@ import {
   type TicketDetail,
 } from "../lib/tracker.js";
 import { removeWorktree, resolveRepoCwd } from "../lib/daemon.js";
-import type { PermissionMode } from "../lib/protocol.js";
+import type { PermissionMode, SessionVisibility } from "../lib/protocol.js";
+import { isMultiUser } from "../lib/auth.js";
 import { renderMarkdown } from "../lib/markdown.js";
 
 // Ticket detail panel (DRY-9 ticket-spawn). Opened when a ticket is picked from
@@ -46,6 +47,12 @@ type SpawnPayload = {
   autonomous?: boolean;
   /** DRY-49: how much an autonomous run may do without asking. */
   permissionMode?: PermissionMode;
+  /**
+   * DRY-27: start it where everyone signed in can watch. Only offered on a
+   * multi-user daemon, and only ever a widening — the daemon defaults a spawn
+   * to private and takes the owner from the token, never from here.
+   */
+  visibility?: SessionVisibility;
 };
 const emit = defineEmits<{
   (e: "send", payload: SpawnPayload): void; // App opens a workspace (DRY-36)
@@ -106,6 +113,12 @@ const cwdMatched = ref(true);
 // the daemon's PreToolUse hook treats as hands-off. On by default; toggle off
 // for a ticket you want to babysit.
 const auto = ref(true);
+
+// DRY-27: start an unattended run where everyone signed in can watch it.
+// Off by default and only rendered on a multi-user daemon — sharing has to be
+// a thing somebody chose, since the run's terminal is its whole transcript.
+const shared = ref(false);
+const multiUser = isMultiUser;
 
 // DRY-49: how much an UNATTENDED run may do without asking. "" means "whatever
 // the host is configured for" — the common case, and the one that lets a policy
@@ -243,6 +256,9 @@ function sendAutonomous(): void {
     // changing DRYDOCK_AUTONOMOUS_PERMISSION_MODE takes effect for everyone
     // without a browser having cached last week's answer.
     permissionMode: runMode.value || undefined,
+    // Omitted when private, which is the daemon's default anyway — so a
+    // single-account daemon never sends a field it has no use for.
+    visibility: shared.value ? "public" : undefined,
     worktree: on ? worktreePath.value.trim() : false,
     branch: on ? branch.value.trim() || undefined : undefined,
   });
@@ -375,6 +391,17 @@ async function resetWorktree(): Promise<void> {
             <option value="acceptEdits">Edit freely, ask to run</option>
             <option value="auto">Never ask</option>
           </select>
+          <!-- Only where there is somebody to be public TO (DRY-27). On a
+               single-account daemon this is a control with one meaningful
+               setting, which is furniture. -->
+          <label
+            v-if="multiUser"
+            class="autotoggle"
+            title="Everyone signed in to this Drydock can see the run and watch its terminal. They cannot type into it, stop it, or answer its permission gates."
+          >
+            <input type="checkbox" v-model="shared" />
+            Shared
+          </label>
         </div>
         <div class="btns">
           <button class="cancel" @click="emit('close')">Cancel</button>

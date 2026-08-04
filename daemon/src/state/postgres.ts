@@ -22,6 +22,8 @@ import type {
   SessionRecord,
   StateStore,
   StoreHealth,
+  UserRecord,
+  UserStore,
   WorkspaceState,
   WorkspaceWrite,
 } from "./types.js";
@@ -79,6 +81,15 @@ export class PostgresStore implements StateStore {
   private failures = 0;
   /** Why we last failed, so `health()` can answer without dialling. */
   private lastError = "";
+
+  /**
+   * Accounts (DRY-27). Assigned in the constructor rather than as a field
+   * initializer: those run BEFORE the constructor body, so `this.pool` would
+   * still be undefined and every query would go to nothing. `history` below
+   * gets away with a field initializer only because its arrow functions read
+   * `this.pool` at call time.
+   */
+  readonly users: UserStore;
 
   constructor(connectionString: string) {
     this.pool = new pg.Pool({
@@ -140,6 +151,7 @@ export class PostgresStore implements StateStore {
     this.pool.on("error", (err) => {
       log.warn("postgres pool error — dropping that client", { err: err.message });
     });
+    this.users = userStore(this.pool, (fn) => this.guard(fn));
   }
 
   /**
@@ -558,6 +570,133 @@ export class PostgresStore implements StateStore {
         return rowCount ?? 0;
       });
     },
+  };
+}
+
+/**
+ * Accounts (DRY-27) — the other thing a database buys.
+ *
+ * Through `guard()` like everything else here, so an outage costs a login
+ * attempt one bounded fast-fail rather than a stack of dials. Note what that
+ * means for a session already logged in: nothing. A token proves itself by its
+ * signature (auth/tokens.ts), so the desk of somebody already at their machine
+ * survives a database that isn't there — the DRY-28 posture, applied to
+ * identity.
+ */
+function userStore(pool: pg.Pool, guard: Guard): UserStore {
+  return {
+    byId: (id) =>
+      guard(async () => {
+        // Parameterised, and the cast is on the COLUMN rather than the value:
+        // `where id = $1` against a uuid column with a non-uuid string raises
+        // 22P02 rather than returning no rows, which would turn a stale token
+        // into a 503 instead of a 401.
+        const { rows } = await pool.query<UserRow>(
+          `select id, name, password_hash, token_epoch, created_at
+             from users where id::text = $1`,
+          [id],
+        );
+        return rows[0] ? toUser(rows[0]) : null;
+      }),
+
+    byName: (name) =>
+      guard(async () => {
+        const { rows } = await pool.query<UserRow>(
+          `select id, name, password_hash, token_epoch, created_at
+             from users where lower(name) = lower($1)`,
+          [name],
+        );
+        return rows[0] ? toUser(rows[0]) : null;
+      }),
+
+    list: () =>
+      guard(async () => {
+        const { rows } = await pool.query<UserRow>(
+          `select id, name, password_hash, token_epoch, created_at
+             from users order by created_at`,
+        );
+        return rows.map(toUser);
+      }),
+
+    count: () =>
+      guard(async () => {
+        const { rows } = await pool.query<{ n: string }>("select count(*)::text as n from users");
+        return Number(rows[0]?.n ?? 0);
+      }),
+
+    create: (user) =>
+      guard(async () => {
+        // The id is minted here rather than by `gen_random_uuid()`, which lives
+        // in pgcrypto before Postgres 13 — a version check this daemon has no
+        // other reason to have. Node's randomUUID is the same v4 shape.
+        const { rows } = await pool.query<UserRow>(
+          `insert into users (id, name, password_hash)
+                values ($1, $2, $3)
+             returning id, name, password_hash, token_epoch, created_at`,
+          [crypto.randomUUID(), user.name, user.passwordHash],
+        );
+        return toUser(rows[0]);
+      }),
+
+    setPassword: async (id, passwordHash) => {
+      await guard(async () => {
+        // The epoch moves with the password, in one statement. Two statements
+        // would leave a window in which the new password is live and the old
+        // sessions are too, which is the opposite of what changing a password
+        // is for.
+        await pool.query(
+          `update users set password_hash = $2, token_epoch = token_epoch + 1
+            where id::text = $1`,
+          [id, passwordHash],
+        );
+      });
+    },
+
+    remove: async (id) => {
+      await guard(async () => {
+        // The rows this user owned are deliberately LEFT: their desk and their
+        // session history are not the daemon's to destroy on the strength of an
+        // account being removed, and DRY-56's retention already prunes history
+        // on its own schedule. Deleting the account is what ends the access —
+        // the token can't be renewed and the old ones stop verifying, because
+        // `byId` now returns null.
+        await pool.query("delete from users where id::text = $1", [id]);
+      });
+    },
+
+    adoptOwner: (from, to) =>
+      guard(async () => {
+        const desks = await pool.query("update workspaces set owner_id = $2 where owner_id = $1", [
+          from,
+          to,
+        ]);
+        const sessions = await pool.query(
+          "update pty_sessions set owner_id = $2 where owner_id = $1",
+          [from, to],
+        );
+        return (desks.rowCount ?? 0) + (sessions.rowCount ?? 0);
+      }),
+  };
+}
+
+/** The shape of `PostgresStore.guard`, so the ports above can be handed it. */
+type Guard = <T>(fn: () => Promise<T>) => Promise<T>;
+
+interface UserRow {
+  id: string;
+  name: string;
+  password_hash: string;
+  token_epoch: number;
+  created_at: Date;
+}
+
+function toUser(row: UserRow): UserRecord {
+  return {
+    id: row.id,
+    name: row.name,
+    passwordHash: row.password_hash,
+    tokenEpoch: row.token_epoch,
+    createdAt: row.created_at.getTime(),
   };
 }
 

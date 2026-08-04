@@ -272,6 +272,48 @@ export class SessionManager {
   }
 
   /**
+   * The sessions `viewer` is allowed to know about (DRY-27).
+   *
+   * Every client-facing surface goes through this rather than `list()` —
+   * /api/sessions, the gate stream's snapshot, the sweep. `list()` survives for
+   * the ones whose audience is the HOST rather than a browser: the crash
+   * inventory and /healthz's count, where filtering by an account would make an
+   * operator's census depend on who asked.
+   */
+  listFor(viewer: string): PtySession[] {
+    return this.list().filter((s) => s.visibleTo(viewer));
+  }
+
+  /** How many live sessions this account owns — see Auth.removeUser (DRY-27). */
+  liveSessionsFor(owner: string): number {
+    return this.list().filter((s) => s.running && s.ownedBy(owner) && s.owner === owner).length;
+  }
+
+  /**
+   * Hand every live session owned by `from` to `to`. Returns how many moved.
+   *
+   * The runtime half of `adoptOwner` (DRY-27): that one moves database rows
+   * when the first account is seeded, and this one moves the PTYs that are
+   * still running. Without it, turning multi-user on strands every session
+   * spawned before it — they carry the pre-accounts owner, which is a real
+   * string that matches nobody, so they become invisible and unkillable rather
+   * than merely unowned.
+   */
+  adoptSessions(from: string, to: string, toName?: string): number {
+    let moved = 0;
+    for (const session of this.sessions.values()) {
+      if (session.owner === from) {
+        // The NAME moves with the id, or every adopted card goes on labelling
+        // itself with the pre-accounts login name — which is nobody, on a desk
+        // that now has real ones.
+        session.adoptOwner(to, toName);
+        moved += 1;
+      }
+    }
+    return moved;
+  }
+
+  /**
    * Let go of every supervisor WITHOUT killing anything (DRY-57).
    *
    * Called on shutdown. The distinction this method exists to make is the whole

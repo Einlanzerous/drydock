@@ -16,6 +16,16 @@ const props = defineProps<{
   active?: boolean;
   hidden?: boolean; // collapsed in the dock — skip fit work
   initialInput?: string; // typed once on first connect (spawn-on-ticket context)
+  /**
+   * Somebody else's public run (DRY-27): the scrollback streams, the keyboard
+   * does not.
+   *
+   * The daemon enforces this — it drops input frames from anyone but the owner
+   * — so this prop is not the security boundary, it is the honesty. Without it
+   * the terminal accepts keystrokes, sends them, and nothing happens, which is
+   * indistinguishable from a wedged agent.
+   */
+  readOnly?: boolean;
 }>();
 const emit = defineEmits<{
   (e: "status", id: string, status: SessionInfo["status"]): void;
@@ -153,7 +163,25 @@ function scheduleReconnect() {
 }
 
 function connect() {
-  const sock = new WebSocket(attachUrl(props.session.id));
+  // Asynchronous since DRY-27: the attach URL now carries a freshly minted,
+  // one-minute stream credential, because a browser WebSocket cannot send a
+  // header. A failure to mint one is treated exactly like a failed connection —
+  // the usual cause is a token that has expired, and the shell's own 401
+  // handling has already swapped the desk for the login view by the time this
+  // lands, so the backoff simply keeps the pane quiet until it does.
+  void attachUrl(props.session.id).then(
+    (url) => {
+      if (unmounting) return;
+      openSocket(url);
+    },
+    () => {
+      if (!unmounting) scheduleReconnect();
+    },
+  );
+}
+
+function openSocket(url: string) {
+  const sock = new WebSocket(url);
   ws.value = sock;
   sock.onopen = () => {
     connected.value = true;
@@ -250,7 +278,12 @@ onMounted(async () => {
   const f = new FitAddon();
   t.loadAddon(f);
   t.open(termEl.value!);
-  t.onData((data) => sendWs({ type: "input", data }));
+  // Not merely "don't send": the cursor stays put and nothing echoes, so a
+  // spectator's keystrokes visibly go nowhere rather than appearing to be
+  // swallowed by a busy agent.
+  t.onData((data) => {
+    if (!props.readOnly) sendWs({ type: "input", data });
+  });
   registerMdLinks(t);
   term.value = t;
   fit.value = f;
@@ -290,6 +323,12 @@ onBeforeUnmount(() => {
          daemon that went away, not a session that ended, and the pane is
          actively dialling back. -->
     <span v-if="!connected" class="detached">{{ disconnectedLabel }}</span>
+
+    <!-- Says whose, not just that it's read-only: "watching" alone reads as a
+         mode you might be able to leave (DRY-27). -->
+    <span v-else-if="readOnly" class="watching">
+      watching {{ session.ownerName || "another account" }}'s run — read only
+    </span>
 
     <!-- DRY-41: dead PTY — the scrollback above is a frozen transcript. -->
     <div v-if="exited" class="exited">
@@ -334,6 +373,21 @@ onBeforeUnmount(() => {
   color: #d6a651;
   background: #2a2114;
   border: 1px solid #4a3a1c;
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-family: "JetBrains Mono", monospace;
+  z-index: 4;
+}
+/* Same corner as .detached — they can't both be showing (DRY-27) — but blue
+   rather than amber: this is a state you chose, not a fault. */
+.watching {
+  position: absolute;
+  top: 6px;
+  right: 8px;
+  font-size: 10px;
+  color: #9dc0e0;
+  background: #16222e;
+  border: 1px solid #2a445d;
   padding: 1px 6px;
   border-radius: 5px;
   font-family: "JetBrains Mono", monospace;
