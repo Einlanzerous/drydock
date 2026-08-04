@@ -118,6 +118,21 @@ export type PermissionMode =
   | "dontAsk";
 
 /**
+ * Who can see a session once more than one person can sign in (DRY-27).
+ *
+ * `private` is the default: yours, and nobody else lists it or attaches to it.
+ * `public` is the deliberate opposite — a run started where everyone can watch
+ * it, which is the point of pushing work at a shared daemon rather than running
+ * it on your own laptop.
+ *
+ * Present in every posture, including the single-account ones where it cannot
+ * yet mean anything. That is on purpose: it lives in the session's metadata,
+ * which survives daemon restarts, so a session spawned today keeps its answer
+ * on the day multi-user is switched on rather than needing one invented for it.
+ */
+export type SessionVisibility = "private" | "public";
+
+/**
  * Why an autonomous run ended badly, carried on the card so a failure can be
  * triaged without opening anything (DRY-49).
  */
@@ -169,6 +184,15 @@ export interface SessionInfo {
   origin: RunOrigin;
   /** What this session is allowed to do without asking. */
   permissionMode: PermissionMode;
+  /**
+   * The account this session belongs to (DRY-27). Absent on a daemon with auth
+   * off, where there is one owner and naming them says nothing.
+   */
+  owner?: string;
+  /** Display name of that account, so a shared desk can label a card. */
+  ownerName?: string;
+  /** Whether anybody else can see this run — see SessionVisibility. */
+  visibility?: SessionVisibility;
   /**
    * What the agent is doing right now, in one clause ("editing src/foo.ts").
    * Fed by the reporting PreToolUse hook; absent until the first tool call,

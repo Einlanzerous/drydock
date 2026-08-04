@@ -49,22 +49,44 @@ export class SessionHistoryRecorder {
 
   constructor(
     private readonly history: SessionHistory | undefined,
-    private readonly owner: string,
+    /**
+     * Who a session belongs to when it doesn't say (DRY-27).
+     *
+     * The pre-accounts constant, `DRYDOCK_OWNER`. It stopped being the only
+     * possible answer when accounts arrived — a session now carries its own
+     * owner — but it is still the right answer for one spawned before they did,
+     * and for every session on a daemon with auth off.
+     */
+    private readonly defaultOwner: string,
   ) {}
 
   get enabled(): boolean {
     return Boolean(this.history);
   }
 
+  /**
+   * Whose row this is. Read from the session rather than fixed at construction,
+   * because one daemon now records for several people — and a recorder that
+   * filed everyone's runs under one owner would put A's history on B's desk,
+   * where DRY-56's tombstones would offer B a Resume of A's conversation.
+   */
+  private ownerOf(session: PtySession): string {
+    return session.owner ?? this.defaultOwner;
+  }
+
   started(session: PtySession): void {
     if (!this.history) return;
     const row = session.historyStart();
-    this.fire("record a session start", row.id, this.history.start(this.owner, row));
+    this.fire("record a session start", row.id, this.history.start(this.ownerOf(session), row));
     // Prune on spawn rather than on a timer: it is the one moment we know the
     // daemon is awake and doing something anyway, and a host that never spawns
     // anything has no history to trim. A timer would be a wakeup on an idle
     // laptop for a table nobody is adding to.
-    this.fire("prune session history", row.id, this.pruneQuietly());
+    //
+    // Per owner, like every other write here. The retention policy is "your last
+    // N runs", so pruning across accounts would let a busy colleague evict the
+    // history behind your tombstones.
+    this.fire("prune session history", row.id, this.pruneQuietly(this.ownerOf(session)));
   }
 
   /**
@@ -77,7 +99,11 @@ export class SessionHistoryRecorder {
     const last = this.touched.get(session.id) ?? 0;
     if (now - last < TOUCH_DEBOUNCE_MS) return;
     this.touched.set(session.id, now);
-    this.fire("stamp session activity", session.id, this.history.touch(this.owner, session.id));
+    this.fire(
+      "stamp session activity",
+      session.id,
+      this.history.touch(this.ownerOf(session), session.id),
+    );
   }
 
   /**
@@ -99,14 +125,15 @@ export class SessionHistoryRecorder {
   ended(session: PtySession): void {
     if (!this.history) return;
     const row = session.historyStart();
+    const owner = this.ownerOf(session);
     this.touched.delete(row.id);
     this.agentIdRecorded.delete(row.id);
     this.fire(
       "record a session ending",
       row.id,
       this.history
-        .start(this.owner, row)
-        .then(() => this.history!.end(this.owner, row.id, session.ending())),
+        .start(owner, row)
+        .then(() => this.history!.end(owner, row.id, session.ending())),
     );
   }
 
@@ -119,22 +146,23 @@ export class SessionHistoryRecorder {
    * hottest path, which is the exact cost the debounce beside it exists to
    * avoid. Cleared when the session ends, with the debounce entry.
    */
-  noteAgentSessionId(sessionId: string, agentSessionId: string): void {
-    if (!this.history || this.agentIdRecorded.has(sessionId)) return;
-    this.agentIdRecorded.add(sessionId);
+  noteAgentSessionId(session: PtySession, agentSessionId: string): void {
+    if (!this.history || this.agentIdRecorded.has(session.id)) return;
+    this.agentIdRecorded.add(session.id);
     this.fire(
       "record an agent session id",
-      sessionId,
-      this.history.noteAgentSessionId(this.owner, sessionId, agentSessionId),
+      session.id,
+      this.history.noteAgentSessionId(this.ownerOf(session), session.id, agentSessionId),
     );
   }
 
-  recent(limit: number) {
-    return this.history?.recent(this.owner, limit);
+  /** One account's recent sessions — the viewer's, never the daemon's. */
+  recent(owner: string, limit: number) {
+    return this.history?.recent(owner, limit);
   }
 
-  private async pruneQuietly(): Promise<void> {
-    const dropped = await this.history!.prune(this.owner);
+  private async pruneQuietly(owner: string): Promise<void> {
+    const dropped = await this.history!.prune(owner);
     if (dropped > 0) {
       log.info("pruned session history", {
         dropped,

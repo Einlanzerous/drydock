@@ -56,6 +56,15 @@ const props = defineProps<{
   /** Windows currently on the desk, so a watched run can be marked as such. */
   watchedIds: string[];
   /**
+   * Who is looking (DRY-27), when that can be more than one person.
+   *
+   * A run whose `owner` is somebody else is one you may WATCH — it was started
+   * public — and may not stop, take over, or answer for. The rail is where that
+   * distinction has to show, because it is the surface those runs appear on.
+   * Undefined on every single-account daemon, where nothing here is foreign.
+   */
+  viewerId?: string;
+  /**
    * When a finished run's card will clear itself, epoch ms, keyed by session id
    * (DRY-60). An absolute deadline rather than a duration, because it is
    * refreshed on the 3s session poll and rendered against this component's own
@@ -178,6 +187,8 @@ interface Card {
   word: string;
   loud: boolean;
   terminal: boolean;
+  /** Somebody else's public run: watchable, not controllable (DRY-27). */
+  foreign: boolean;
   label: string;
   repo: string;
   elapsed: string;
@@ -233,6 +244,7 @@ const cards = computed<Card[]>(() =>
       session,
       state,
       ...meta,
+      foreign: Boolean(session.owner && props.viewerId && session.owner !== props.viewerId),
       label: session.ticket || session.title,
       repo: repoOf(session),
       elapsed: clockMs(now.value - session.createdAt),
@@ -672,6 +684,15 @@ function onCardClick(card: Card): void {
     else emit("focus", card.session.id);
     return;
   }
+  // Somebody else's public run has only one of the two options — take-over ends
+  // autonomy and the daemon refuses it for a run that isn't yours — so the
+  // chooser would be a menu with one live entry and one that reports a failure.
+  // Watching is what a click means here (DRY-27).
+  if (card.foreign) {
+    chooser.value = null;
+    emit("watch", card.session.id);
+    return;
+  }
   chooser.value = chooser.value === card.session.id ? null : card.session.id;
   // Synchronously, not via the watch above: the card element already exists, so
   // measuring here means the panel's first paint is at the right place. Left to
@@ -789,7 +810,13 @@ function onCardClick(card: Card): void {
               >
                 <span class="glyph">{{ card.glyph }}</span>
                 <span class="id">{{ card.label }}</span>
-                <span class="origin">{{ card.session.origin.toUpperCase() }}</span>
+                <!-- Whose run, in the slot that already says where a run came
+                     from. A public run somebody else started is named rather
+                     than badged: "MAGOS" reads as the answer to "why is this on
+                     my rail" in a way a shared-work icon never would. -->
+                <span class="origin">{{
+                  (card.foreign ? card.session.ownerName || "shared" : card.session.origin).toUpperCase()
+                }}</span>
                 <!-- The countdown displaces the elapsed clock rather than
                      joining it: a finished run's runtime stops being the
                      interesting number the moment the card is on its way out,
@@ -807,8 +834,11 @@ function onCardClick(card: Card): void {
                 <span class="meta" :class="{ clearing: card.metaClearing }">{{ card.meta }}</span>
                 <!-- The one control any card ever shows, and only on the two
                      states that persist until acknowledged. -->
+                <!-- Never on somebody else's run: clearing it means killing
+                     it, which the daemon refuses — so the button would be a
+                     control that reports a failure every time (DRY-27). -->
                 <button
-                  v-if="card.terminal"
+                  v-if="card.terminal && !card.foreign"
                   class="clear"
                   title="Clear this run"
                   @click.stop="emit('dismiss', card.session.id)"

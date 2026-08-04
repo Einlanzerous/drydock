@@ -147,6 +147,57 @@ export interface SessionHistory {
   prune(owner: string): Promise<number>;
 }
 
+/** One account (DRY-27). Only ever materialised on a tier that can keep them. */
+export interface UserRecord {
+  /** uuid. This is the `owner_id` on that user's workspaces and sessions. */
+  id: string;
+  /** Login name. Unique case-insensitively — see the migration for why. */
+  name: string;
+  passwordHash: string;
+  /**
+   * Bumped to invalidate every token issued so far for this user.
+   *
+   * The stand-in for a sessions table. Tokens are stateless by design (see
+   * auth/tokens.ts — a token the daemon must look up is a token a database
+   * outage can revoke), so this is the one number that can take a login back:
+   * a password change or a deletion moves it, and every token minted against
+   * the old value stops verifying.
+   */
+  tokenEpoch: number;
+  createdAt: number;
+}
+
+/**
+ * Accounts, on the tiers that can hold them (DRY-27).
+ *
+ * Absent on the file store, exactly like `SessionHistory` above and for the same
+ * reason: the capability is DERIVED from whether the port exists, so a backend
+ * cannot claim more than it implements. `store.users` being undefined is what
+ * makes multi-user impossible without a database, rather than a boolean
+ * somebody has to remember to keep false.
+ */
+export interface UserStore {
+  byId(id: string): Promise<UserRecord | null>;
+  /** Case-insensitive, because a login name typed with a capital is the same person. */
+  byName(name: string): Promise<UserRecord | null>;
+  list(): Promise<UserRecord[]>;
+  count(): Promise<number>;
+  /** Rejects when the name is taken — the unique index is the arbiter, not a read. */
+  create(user: { name: string; passwordHash: string }): Promise<UserRecord>;
+  /** Sets a new password AND bumps the token epoch: changing it signs out other devices. */
+  setPassword(id: string, passwordHash: string): Promise<void>;
+  remove(id: string): Promise<void>;
+  /**
+   * Hand everything owned by `from` over to `to`.
+   *
+   * Run once, when the first account is created on a daemon that already had a
+   * desk under the pre-accounts owner id ("local"). Without it, turning
+   * multi-user on presents as "my workspace and all my session history are
+   * gone" — the rows are still there, just under a name nobody logs in as.
+   */
+  adoptOwner(from: string, to: string): Promise<number>;
+}
+
 /**
  * Storage backend for workspace state. Two implementations, chosen by whether
  * DRYDOCK_DATABASE_URL is set — see ./index.ts. Every method may reject; no
@@ -172,4 +223,14 @@ export interface StateStore {
    * silently accepted the writes and returned nothing would reproduce it.
    */
   readonly history?: SessionHistory;
+  /**
+   * Accounts, or ABSENT on a backend that can't keep them (DRY-27).
+   *
+   * The same derived-capability rule as `history`, doing more work: this is
+   * what makes "no database means no multi-user" a fact about the code rather
+   * than a rule somebody has to enforce. There is no branch anywhere that can
+   * grant a second account on the file tier, because on the file tier there is
+   * nothing to call.
+   */
+  readonly users?: UserStore;
 }

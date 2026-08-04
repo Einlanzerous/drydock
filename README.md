@@ -28,7 +28,7 @@ survive disconnects, sleep, and multi-day gaps. The browser is just a viewer.
    claude Stop hook ─ HTTP ───────────▶│  • resolves ticket repo → spawn cwd    │
    (curl → /hook/stop)                 │  • per-ticket git worktree isolation   │
                                        │  • marks idle ("Your turn") on Stop    │
-                                       │  • one per host; unauthenticated       │
+                                       │  • one per host; password-optional     │
                                        └────────────────────────────────────────┘
                                                         │ spawns  claude --settings <hooks>
                                                         ▼  (PTY in the ticket's worktree/cwd,
@@ -90,9 +90,26 @@ bun run daemon:local   # same, locked to 127.0.0.1
 bun run shell          # → http://0.0.0.0:5320  (runs on Bun; binds LAN by default)
 ```
 
-The daemon API is **unauthenticated** (PoC posture): anyone who can reach the
-port can spawn and attach to shells as you. Keep it on `127.0.0.1` or a trusted
-LAN/Tailscale; real auth is the first thing to add past PoC.
+The daemon API is **unauthenticated by default**, and that is a real decision
+rather than an oversight: a fresh clone has to work with nothing configured, and
+the daemon's whole job — `POST /api/sessions` with a `command` — is remote code
+execution by design. So out of the box, keep it on `127.0.0.1` or a trusted
+LAN/Tailscale.
+
+Give it a password (`DRYDOCK_AUTH_PASSWORD`, or a hash from
+`scripts/hash-password.mts`) and it requires a sign-in: the shell shows a login
+view instead of the desk, and everything it does afterwards carries a token —
+the API, the gate stream, and each terminal's WebSocket. Spawned CLIs are
+unaffected; each session's hooks get their own key, good for `/hook/*` and
+nothing else. That is what makes a public hostname (DRY-70) possible at all —
+TLS encrypts the channel, it does not decide who may open one.
+
+Add `DRYDOCK_MULTI_USER=1` **and** a `DRYDOCK_DATABASE_URL` for accounts: a desk,
+a session history and a set of sessions each. Without a database there is
+nowhere to keep accounts, so that combination refuses to start rather than
+quietly running single-user. A run can be started *shared*, which everyone
+signed in can see and watch — read-only, since watching somebody's agent is not
+supervising it.
 
 ### Bun + node-pty caveat (why the daemon runs on Node)
 
@@ -270,9 +287,10 @@ one.
 that's down from one inside its retry window (`store.cooling` + `retryInMs`) —
 `ok` there is still an answer about the daemon, which is up either way.
 
-State is keyed by an `owner` that is the constant `local` until accounts land
-(DRY-27). It is a namespace, **not** a security boundary — the daemon has no
-auth. `DRYDOCK_WORKSPACE` defaults to `<hostname>-<port>`, so "the desk follows
+State is keyed by an `owner`: the constant `local` (`DRYDOCK_OWNER`) with auth
+off or a single account, and the signed-in account's id under
+`DRYDOCK_MULTI_USER` — where the first account adopts what `local` already had,
+so turning accounts on doesn't lose the desk you were using (DRY-27). `DRYDOCK_WORKSPACE` defaults to `<hostname>-<port>`, so "the desk follows
 you" means one daemon and any number of clients; two daemons share a desk only
 if you deliberately give them the same workspace name.
 

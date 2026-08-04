@@ -272,6 +272,19 @@ export class SessionManager {
   }
 
   /**
+   * The sessions `viewer` is allowed to know about (DRY-27).
+   *
+   * Every client-facing surface goes through this rather than `list()` —
+   * /api/sessions, the gate stream's snapshot, the sweep. `list()` survives for
+   * the ones whose audience is the HOST rather than a browser: the crash
+   * inventory and /healthz's count, where filtering by an account would make an
+   * operator's census depend on who asked.
+   */
+  listFor(viewer: string): PtySession[] {
+    return this.list().filter((s) => s.visibleTo(viewer));
+  }
+
+  /**
    * Let go of every supervisor WITHOUT killing anything (DRY-57).
    *
    * Called on shutdown. The distinction this method exists to make is the whole

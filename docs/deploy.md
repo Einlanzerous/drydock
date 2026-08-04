@@ -70,6 +70,43 @@ Prefer the file when working out why sessions died: it survives restarts of both
 the daemon and journald, and the last line before a gap names the sessions that
 went with it. Override with `DRYDOCK_LOG_FILE` in `~/.drydock/prod/.env`.
 
+## Who may use it (DRY-27)
+
+The prod daemon binds `0.0.0.0:4318` and spawns commands as you. With no
+credential configured that is exactly as open as it sounds — fine behind
+Tailscale or a LAN you trust, and not fine on anything reachable more widely.
+The daemon logs a warning at boot when it is bound to a non-loopback address
+with no password, so a host in that state says so rather than being discovered.
+
+Turning it on is one line in `~/.drydock/prod/.env` and a restart:
+
+```sh
+# generate one rather than putting a plaintext password in a unit's environment
+node --import tsx scripts/hash-password.mts        # → DRYDOCK_AUTH_PASSWORD_HASH=...
+```
+
+```ini
+DRYDOCK_AUTH_PASSWORD_HASH=scrypt$16384$8$1$...
+# DRYDOCK_AUTH_USER=owner                     # the login name; defaults to `owner`
+```
+
+Restarting prod costs live sessions a reattach, not their lives (DRY-57) — but
+an in-flight gate's rail line resets, so do it when nothing is mid-run.
+
+The signing key lands in `~/.drydock/auth-key-4318` on first use and is what
+makes a restart (or a deploy, or a crash under `Restart=always`) not sign
+everybody out. Back it up with the rest of `~/.drydock`, or set
+`DRYDOCK_AUTH_SECRET` explicitly; deleting it is the blunt "sign everyone out
+everywhere" lever.
+
+**Accounts** need Postgres — `DRYDOCK_MULTI_USER=1` alongside
+`DRYDOCK_DATABASE_URL`. Without the URL the daemon refuses to start rather than
+running single-user in silence, so a half-applied config fails visibly on the
+deploy rather than quietly on the security posture. The first account is seeded
+from `DRYDOCK_AUTH_USER`/`_PASSWORD*` and adopts the desk and session history
+already saved under `DRYDOCK_OWNER`; everyone else is added from the shell's
+Accounts panel.
+
 ## Shell (container)
 
 Built and pushed by `.github/workflows/publish-shell.yml` on every `main` push

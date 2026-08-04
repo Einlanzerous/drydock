@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import TerminalPane from "./components/TerminalPane.vue";
 import SessionTombstone from "./components/SessionTombstone.vue";
 import WorkspacePane from "./components/WorkspacePane.vue";
@@ -9,11 +9,22 @@ import TrackerSidebar from "./components/TrackerSidebar.vue";
 import TicketDetail from "./components/TicketDetail.vue";
 import QuickLaunch from "./components/QuickLaunch.vue";
 import RunRail from "./components/RunRail.vue";
+import LoginView from "./components/LoginView.vue";
+import UsersPanel from "./components/UsersPanel.vue";
+import {
+  authReady,
+  authUser,
+  isMultiUser,
+  loadAuthInfo,
+  signOut,
+  signedIn,
+} from "./lib/auth.js";
 import { openGates, startGateStream, stopGateStream } from "./composables/gateStore.js";
 import { askToNotify, notifyGate, useAttention } from "./composables/attention.js";
 import { isFinished, runState } from "./composables/runState.js";
 import { clearNotice, noticeList, setNotice } from "./composables/notices.js";
 import { useWindowManager, type LayoutMode, type Win } from "./composables/useWindowManager.js";
+import { forgetLocalLayout } from "./composables/layoutStore.js";
 import {
   DAEMON_HTTP,
   canResumeConversation,
@@ -25,7 +36,7 @@ import {
   takeOverRun,
   type SessionRecord,
 } from "./lib/daemon.js";
-import type { PermissionMode } from "./lib/protocol.js";
+import type { PermissionMode, SessionVisibility } from "./lib/protocol.js";
 import {
   TICKET_POLL_MAX_MS,
   TICKET_POLL_MS,
@@ -551,6 +562,11 @@ function clearable(list: SessionInfo[]): { session: SessionInfo; win?: Win }[] {
   const out: { session: SessionInfo; win?: Win }[] = [];
   for (const session of list) {
     if (!isFinished(session) || claimed.has(session.id)) continue;
+    // Somebody else's public run (DRY-27). Clearing kills, and killing another
+    // account's session is refused by the daemon — so without this the button
+    // would count runs it cannot take and report a failure for each, and the
+    // automatic sweep would retry them on every poll forever.
+    if (isForeign(session)) continue;
     const win = byId.get(session.id);
     if (win?.kind === "workspace" && win.shellId) {
       const shell = sessionsById[win.shellId];
@@ -700,6 +716,19 @@ function onVisibility(): void {
   for (const id of Object.keys(finishedSeenAt)) delete finishedSeenAt[id];
 }
 
+/**
+ * Is this session somebody else's? (DRY-27)
+ *
+ * Only ever true on a multi-user daemon: everywhere else `owner` is either
+ * absent or the one identity everything runs as. It decides what you may do to
+ * a session rather than whether you can see it — the daemon already answered
+ * that by listing it — so it gates the Stop button, the gate answers and the
+ * pane's keyboard, and nothing else.
+ */
+function isForeign(s: SessionInfo): boolean {
+  return Boolean(s.owner && authUser.value && s.owner !== authUser.value.id);
+}
+
 // --- session discovery / reconciliation ---
 function reconcile(list: SessionInfo[]) {
   const ids = new Set(list.map((s) => s.id));
@@ -717,6 +746,13 @@ function reconcile(list: SessionInfo[]) {
     // deliberately (openRun); reconcile then leaves it alone, because a window
     // for it already exists.
     if (s.autonomous && !wm.windows.find((w) => w.id === s.id)) continue;
+    // Somebody else's public run (DRY-27). Visible — that is what public means
+    // — but it is not YOUR desk's business to lay out: cascading a window for
+    // every run a colleague shares would fill this desk with work nobody here
+    // started, and DRY-60's sweep would then count them as clutter to clear.
+    // An autonomous one still gets its rail card by the rule above; a
+    // supervised one is reached deliberately or not at all.
+    if (isForeign(s) && !wm.windows.find((w) => w.id === s.id)) continue;
     // Being cleared right now (DRY-60). This list may predate the kill — it is
     // fetched at the top of refresh() and a clear can land while it is in
     // flight — and re-adding here would put the window back at a CASCADE
@@ -1170,6 +1206,7 @@ function onSendTicket(payload: {
   auto: boolean;
   autonomous?: boolean;
   permissionMode?: PermissionMode;
+  visibility?: SessionVisibility;
 }) {
   selectedTicket.value = null;
   if (payload.autonomous) void spawnAutonomous(payload);
@@ -1196,6 +1233,8 @@ async function spawnAutonomous(opts: {
   worktree: string | false;
   branch?: string;
   permissionMode?: PermissionMode;
+  /** DRY-27: start it where everyone signed in can watch. Absent = private. */
+  visibility?: SessionVisibility;
 }) {
   try {
     await createSession({
@@ -1211,6 +1250,7 @@ async function spawnAutonomous(opts: {
       // Undefined means "let the host decide" — the daemon applies
       // DRYDOCK_AUTONOMOUS_PERMISSION_MODE rather than the shell guessing.
       permissionMode: opts.permissionMode,
+      visibility: opts.visibility,
       input: opts.prompt,
     });
     await refresh();
@@ -1431,6 +1471,10 @@ const rail = ref<{ handleEscape: () => boolean } | null>(null);
 // --- desktop sizing ---
 const deskEl = ref<HTMLDivElement | null>(null);
 let deskObs: ResizeObserver | null = null;
+/** The desk's timers and listeners are live — see startDesk/stopDesk (DRY-27). */
+let deskRunning = false;
+/** The accounts panel, on a daemon that can have more than one. */
+const usersOpen = ref(false);
 
 // DRY-43. The palette shortcut never fired while a terminal had focus: xterm's
 // textarea handler calls cancel() (preventDefault + stopPropagation) for Ctrl+K,
@@ -1519,7 +1563,25 @@ function onKey(e: KeyboardEvent) {
   }
 }
 
-onMounted(async () => {
+/**
+ * Everything the desk does: streams, polls, the saved arrangement, the
+ * keybindings.
+ *
+ * Extracted from onMounted for DRY-27, because "the shell has started" and "we
+ * know whose desk this is" stopped being the same moment. Every call in here
+ * needs a credential, so running it before a sign-in would produce a screenful
+ * of 401s behind a login form — and running it once per sign-in, rather than
+ * once per page load, is what lets signing out and back in work without a
+ * reload.
+ */
+async function startDesk() {
+  if (deskRunning) return;
+  deskRunning = true;
+  ticketPollStopped = false;
+  // The desk's own DOM only exists once `signedIn` flips, and this can be
+  // called from the watcher that observes it — so wait for the v-if to render
+  // before anything measures deskEl.
+  await nextTick();
   loadScope();
   // Opened before anything else awaits: a gate raised while the tracker call is
   // still in flight has to land somewhere, and the daemon replays whatever is
@@ -1585,21 +1647,75 @@ onMounted(async () => {
   // bubble, so we have to claim it on the way down (DRY-43).
   window.addEventListener("keydown", onKey, true);
   document.addEventListener("visibilitychange", onVisibility);
-});
+}
 
-onBeforeUnmount(() => {
+/**
+ * Put the desk down. Called on unmount AND on sign-out (DRY-27).
+ *
+ * Sign-out has to leave nothing running: a poll that survives it dials the
+ * daemon every 3 seconds with a token that has just been thrown away, and every
+ * one of those 401s re-enters the sign-out path. The windows go too — they are
+ * the previous account's arrangement, and leaving them on screen behind the
+ * login form would show the next person what the last one was working on.
+ */
+function stopDesk() {
+  deskRunning = false;
   if (poll) clearInterval(poll);
+  poll = null;
   ticketPollStopped = true;
   if (ticketPoll) clearTimeout(ticketPoll);
+  ticketPoll = null;
   stopGateStream();
   deskObs?.disconnect();
+  deskObs = null;
   window.removeEventListener("keydown", onKey, true);
   document.removeEventListener("visibilitychange", onVisibility);
+}
+
+/** Sign-out also clears what's on screen — see stopDesk. */
+function forgetDesk() {
+  stopDesk();
+  for (const w of [...wm.windows]) wm.remove(w.id);
+  for (const id of Object.keys(sessionsById)) delete sessionsById[id];
+  tickets.value = [];
+  selectedTicket.value = null;
+  // The offline mirror too, not just what's on screen. It is keyed by daemon
+  // rather than by account, so leaving it behind hands the next person to sign
+  // in on this browser the last person's desk — `hydrate` falls back to it
+  // whenever the daemon has no saved desk for you, which is precisely the state
+  // a new account is in.
+  forgetLocalLayout(DAEMON_HTTP);
+}
+
+onMounted(async () => {
+  // Before anything else asks the daemon for something: this decides whether
+  // the desk renders at all, and a daemon from before DRY-27 answers "off",
+  // which is the behaviour that has always shipped.
+  await loadAuthInfo();
+  if (signedIn.value) await startDesk();
+  // A sign-in starts the desk; a 401 anywhere signs out, which stops it. One
+  // watcher for both directions, so the two can't disagree about which state
+  // the polls are in.
+  watch(signedIn, (now) => {
+    if (now) void startDesk();
+    else forgetDesk();
+  });
 });
+
+onBeforeUnmount(stopDesk);
 </script>
 
 <template>
-  <div class="app">
+  <!-- Nothing at all until /api/auth/info has answered (DRY-27). A blank frame
+       for one round trip beats drawing the desk and snatching it back, or
+       flashing a login form at somebody who never needed one. -->
+  <div v-if="!authReady" class="app booting"></div>
+
+  <!-- The door, INSTEAD of the desk rather than over it: until this succeeds
+       the shell doesn't know whose desk it would be drawing. -->
+  <LoginView v-else-if="!signedIn" />
+
+  <div v-else class="app">
     <!-- TOP BAR -->
     <header class="topbar">
       <div class="brand">
@@ -1677,8 +1793,27 @@ onBeforeUnmount(() => {
         >
           + workspace
         </button>
+        <!-- Identity, and only when there is one to show (DRY-27). A daemon
+             with auth off has nobody to name, and a "signed in as local" chip
+             on a single-host desk is furniture that means nothing. -->
+        <div v-if="authUser" class="whoami">
+          <button
+            v-if="isMultiUser"
+            class="ghost"
+            title="Add or remove accounts on this Drydock"
+            @click="blurSpawn($event), (usersOpen = true)"
+          >
+            {{ authUser.name }}
+          </button>
+          <span v-else class="who">{{ authUser.name }}</span>
+          <button class="ghost" title="Sign out of this Drydock" @click="signOut()">
+            Sign out
+          </button>
+        </div>
       </div>
     </header>
+
+    <UsersPanel v-if="usersOpen" @close="usersOpen = false" />
 
     <p v-if="error" class="error">{{ error }}</p>
     <!-- Sticky: nothing re-raises a failed action, so it waits to be read. -->
@@ -1756,6 +1891,7 @@ onBeforeUnmount(() => {
             :session="sessionsById[w.id]"
             :active="wm.focusedId.value === w.id"
             :initial-input="initialInputById[w.id]"
+            :read-only="isForeign(sessionsById[w.id])"
             @status="onStatus"
             @attention="onAttention"
             @idle="onIdle"
@@ -1791,6 +1927,7 @@ onBeforeUnmount(() => {
           :sessions="sessionList"
           :docked="dockItems"
           :watched-ids="watchedIds"
+          :viewer-id="authUser?.id"
           :sweep-at="sweepAt"
           :sweep-after-ms="clearFinishedAfterMs"
           :desk-height="wm.desk.h"
@@ -1842,6 +1979,22 @@ onBeforeUnmount(() => {
   background: #0a0c0f;
   color: #d5dde6;
   overflow: hidden;
+}
+/* One round trip's worth of nothing, while /api/auth/info answers (DRY-27). */
+.booting {
+  background: #0a0c0f;
+}
+.whoami {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 4px;
+  padding-left: 10px;
+  border-left: 1px solid #ffffff12;
+}
+.whoami .who {
+  color: #9aa6b2;
+  font-size: 12px;
 }
 .topbar {
   height: 54px;

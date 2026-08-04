@@ -37,6 +37,11 @@ Nothing here runs in CI or on install. Three groups:
   minutes. Run it when touching `sweepFinished` / `mayClear` / `clearSession` in
   `App.vue`, `isFinished` in `runState.ts`, or anything that changes when a
   window is removed.
+- **Who may use the daemon (DRY-27)** —
+  [its own section](#who-may-use-the-daemon-dry-27). Three daemons, three vite
+  servers, a throwaway Postgres and a browser; about a minute. Run it when
+  touching `daemon/src/auth/`, the route guard in `server.ts`, or
+  `shell/src/lib/auth.ts`.
 - **The permission gate's action row (DRY-78)** —
   [its own section](#the-permission-gates-action-row-dry-78). A browser, about a
   minute; no daemon config beyond a spare port. Run it when touching
@@ -299,6 +304,91 @@ Two sessions per shape, deliberately: `sleep 1` ends cleanly, `exit 3` ends with
 a `failure` set, `while :; do sleep 1; done` never ends. No `claude`, no tokens,
 no tracker — the sweep cannot tell what was running inside a PTY and shouldn't
 be tested as though it could.
+
+## Who may use the daemon (DRY-27)
+
+Three postures are three code paths, not three settings, so the rig runs all of
+them at once — one daemon each, one vite each (`VITE_DAEMON_URL` is baked in at
+vite start, so a daemon needs its own server). The multi-user one needs a
+database, because that is the whole point: no Postgres, no accounts.
+
+```sh
+npm i playwright --prefix scripts/verify     # ad-hoc; not a repo dependency
+
+# A throwaway password for a throwaway container, generated rather than written
+# down — a literal one in a checked-in file is a credential-shaped string that
+# every scanner has to be told to ignore, forever, for no benefit.
+export PGPASS=$(openssl rand -hex 12)
+docker run -d --name dry27-db -e POSTGRES_PASSWORD="$PGPASS" -e POSTGRES_USER=drydock \
+  -e POSTGRES_DB=drydock -p 127.0.0.1:55441:5432 postgres:16-alpine
+
+# off — what a fresh clone runs
+(cd daemon && DRYDOCK_PORT=4392 DRYDOCK_HOST=127.0.0.1 DRYDOCK_TRACKER=fixture \
+   DRYDOCK_STATE_FILE=/tmp/dry27-off.json DRYDOCK_SESSIONS_DIR=/tmp/dry27s-off \
+   node --import tsx src/index.ts &)
+# single — one account, no database
+(cd daemon && DRYDOCK_PORT=4394 DRYDOCK_HOST=127.0.0.1 DRYDOCK_TRACKER=fixture \
+   DRYDOCK_STATE_FILE=/tmp/dry27-single.json DRYDOCK_SESSIONS_DIR=/tmp/dry27s-single \
+   DRYDOCK_AUTH_PASSWORD="$DRYDOCK_TEST_PASSWORD" node --import tsx src/index.ts &)
+# multi — accounts in Postgres
+(cd daemon && DRYDOCK_PORT=4393 DRYDOCK_HOST=127.0.0.1 DRYDOCK_TRACKER=fixture \
+   DRYDOCK_SESSIONS_DIR=/tmp/dry27s-multi DRYDOCK_MULTI_USER=1 \
+   DRYDOCK_DATABASE_URL="postgres://drydock:$PGPASS@127.0.0.1:55441/drydock" \
+   DRYDOCK_AUTH_USER=magos DRYDOCK_AUTH_PASSWORD="$DRYDOCK_TEST_PASSWORD" \
+   node --import tsx src/index.ts &)
+
+(cd shell && VITE_DAEMON_URL=http://127.0.0.1:4392 bunx vite --port 5392 --strictPort &)
+(cd shell && VITE_DAEMON_URL=http://127.0.0.1:4394 bunx vite --port 5394 --strictPort &)
+(cd shell && VITE_DAEMON_URL=http://127.0.0.1:4393 bunx vite --port 5393 --strictPort &)
+
+# the second account the isolation scenario signs in as
+TOK=$(curl -s -X POST localhost:4393/api/auth/login -H 'Content-Type: application/json' \
+        -d "{\"name\":\"magos\",\"password\":\"$DRYDOCK_TEST_PASSWORD\"}" | jq -r .token)
+curl -s -X POST -H "Authorization: Bearer $TOK" -H 'Content-Type: application/json' \
+     localhost:4393/api/users \
+     -d "{\"name\":\"colleague\",\"password\":\"$DRYDOCK_TEST_PASSWORD_B\"}"
+
+node scripts/verify/auth.mjs                 # from the repo root
+```
+
+| harness | what it holds down |
+|---|---|
+| `auth.mjs` | The desk is behind the door: with a password set the shell renders a login view and NOT the desk, a wrong password says so, a right one opens it, a reload keeps it, a dead token returns to the door with an explanation, and signing out stops the polls. Plus the two transports that cannot carry a header (SSE and the terminal WebSocket, both on short-lived stream tokens), and multi-user isolation at the surface — B cannot see A's private run, sees A's shared one, is offered no way to clear it, and gets a read-only pane. |
+
+Why a browser and not curl: `curl /api/sessions` returning 401 is *also* what a
+shell that ignored auth entirely would be talking to. That shell would render
+its desk, poll every three seconds, and put a banner about an unreachable daemon
+on screen — the desk drawing anyway is the bug, and only a rendered page can see
+it. The stream-token transports are worse than that: neither `EventSource` nor
+the browser `WebSocket` constructor exists outside a browser, so there is no
+curl equivalent of the path the shell actually takes.
+
+**Confirm it still discriminates** before trusting a green run. Break exactly the
+gate and re-run — the two checks in (b) must fail:
+
+```sh
+sed -i 's/v-else-if="!signedIn"/v-else-if="false"/' shell/src/App.vue
+sed -i 's/if (signedIn.value) await startDesk();/await startDesk();/' shell/src/App.vue
+node scripts/verify/auth.mjs      # expect: FAIL the login view replaces the desk
+git checkout shell/src/App.vue
+```
+
+The one scenario that needs care when editing: **B's window count is a delta, not
+an absolute**. By the time the desks are compared, B is watching A's shared run —
+a window B opened on purpose — so `=== 0` would fail against correct behaviour,
+and (worse) written before the watch step existed it would have passed
+vacuously.
+
+Teardown: kill the daemons by EXECUTABLE, never by pattern — `pgrep -f "tsx
+src/index.ts"` also matches the shell whose command line contains that string,
+which is CLAUDE.md's `pkill -f supervisor/main` footgun one pattern over.
+
+```sh
+for p in $(pgrep -f "tsx src/index.ts") $(pgrep -f "supervisor/main"); do
+  case "$(readlink /proc/$p/exe)" in *node*) kill -9 "$p";; esac
+done
+docker rm -f dry27-db
+```
 
 ## The permission gate's action row (DRY-78)
 

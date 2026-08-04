@@ -15,7 +15,7 @@
 // is refused above MAX_FRAME_BYTES rather than buffered — the socket is 0600 in
 // the owner's home dir, but a corrupt length prefix on a stream we're about to
 // concatenate is an unbounded allocation either way.
-import type { PermissionMode, RunOrigin } from "../protocol.js";
+import type { PermissionMode, RunOrigin, SessionVisibility } from "../protocol.js";
 
 /**
  * Bumped whenever a frame type or a metadata field changes meaning.
@@ -174,6 +174,42 @@ export interface SessionMeta {
   autonomous: boolean;
   origin: RunOrigin;
   permissionMode: PermissionMode;
+  /**
+   * Whose session this is (DRY-27) — the `owner_id` its history and its
+   * visibility are keyed on.
+   *
+   * Optional, and NOT a reason to bump PROTOCOL_VERSION. That integer guards
+   * against a field whose MEANING changed, because guessing at one strands a
+   * live agent (CLAUDE.md); a field that is simply absent is answerable —
+   * absent means the pre-accounts owner, which is the only thing it could have
+   * been. Bumping instead would make every running session on the host
+   * undrivable to buy nothing.
+   *
+   * The supervisor never reads it. It is here because the sessions directory is
+   * the only record that survives a daemon restart, and "who may attach to
+   * this" has to survive with it.
+   */
+  owner?: string;
+  /**
+   * That account's display name, cached at spawn so a shared desk can label a
+   * card without a lookup per session. Stale after a rename, deliberately: this
+   * file is a pidfile, not a copy of the users table, and the price of a
+   * correct label is a query the daemon would have to make on every list —
+   * against a store whose whole design premise is that it may be unreachable.
+   */
+  ownerName?: string;
+  /**
+   * Who may see this session, once more than one person can (DRY-27).
+   *
+   * `private` — the default and the safe one — means the owner only. `public`
+   * means every signed-in user can see it and attach: the shape of "kick a run
+   * off on the server and let the team watch it", which is the reason this is
+   * on the session at spawn rather than bolted on later. Meaningless in the
+   * single-account postures, where there is nobody else to be public to, and
+   * deliberately still recorded there so a desk doesn't change meaning the day
+   * multi-user is switched on.
+   */
+  visibility?: SessionVisibility;
   /**
    * Only the variables the daemon ADDS to the child's environment — never a
    * snapshot of `process.env`. The supervisor inherits the daemon's environment

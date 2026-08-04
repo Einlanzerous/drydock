@@ -32,6 +32,30 @@ function keyFor(host: string): string {
   return `${PREFIX}.${host}`;
 }
 
+/**
+ * Drop the local mirror for a daemon (DRY-27).
+ *
+ * Called on sign-out, and it is not tidiness. The mirror is keyed by DAEMON,
+ * not by account — it predates accounts existing — so on a shared daemon the
+ * next person to sign in on this browser would be handed the last person's desk
+ * as their offline fallback, and `hydrate` uses it whenever the daemon has no
+ * saved desk for them. Which is exactly the state a NEW account is in.
+ *
+ * Keying it by account instead would be the other fix, and a worse one: the key
+ * is fixed when the window manager is constructed, which is before anybody has
+ * signed in. Signing out costs an offline fallback that the daemon has a copy
+ * of anyway — and the token went with it, so there was nothing to be offline
+ * with.
+ */
+export function forgetLocalLayout(host: string): void {
+  if (typeof localStorage === "undefined") return;
+  try {
+    localStorage.removeItem(keyFor(host));
+  } catch {
+    /* storage blocked — nothing was mirrored either */
+  }
+}
+
 const LAYOUTS = new Set<LayoutMode>(["float", "tile", "focus"]);
 
 /** Structural check applied to both sources — neither is trusted more. */
