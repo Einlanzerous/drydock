@@ -176,13 +176,16 @@ export function verifyToken(token: string, aud: Audience): TokenResult {
   if (parts.length !== 3 || parts[0] !== VERSION) return { ok: false, reason: "malformed" };
   const [, payload, signature] = parts;
   const expected = sign(payload);
-  // Both are base64url of a 32-byte digest, so they are the same length unless
-  // the token is malformed — which timingSafeEqual would throw on rather than
-  // report, hence the guard.
-  if (
-    signature.length !== expected.length ||
-    !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))
-  ) {
+  // Compared as BYTES, not as characters. Both are base64url of a 32-byte
+  // digest so they normally match in both, but a token is attacker-supplied
+  // text: one multibyte character makes a string of the right `length` into a
+  // Buffer of the wrong byteLength, and `timingSafeEqual` THROWS on a length
+  // mismatch rather than returning false. That throw escapes a function whose
+  // whole contract is to return a verdict — turning a malformed credential into
+  // a 500 on every guarded route, including the WebSocket upgrade.
+  const given = Buffer.from(signature, "utf8");
+  const want = Buffer.from(expected, "utf8");
+  if (given.byteLength !== want.byteLength || !crypto.timingSafeEqual(given, want)) {
     return { ok: false, reason: "bad-signature" };
   }
   let claims: Claims;

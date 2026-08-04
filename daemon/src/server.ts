@@ -33,6 +33,15 @@ const store = createStore();
 // accounts live in it — and absent from it on the file tier, which is precisely
 // what makes multi-user impossible there rather than merely discouraged.
 const auth = new Auth(store);
+// What Auth needs to know about live PTYs, injected rather than imported so it
+// stays a thing that decides who somebody is (DRY-27). Two questions: whether an
+// account still has agents running (removing it would strand them with nothing
+// able to reach them), and where the pre-accounts sessions go when the first
+// account is seeded.
+auth.useSessions({
+  liveSessionsFor: (owner) => manager.liveSessionsFor(owner),
+  adoptSessions: (from, to, toName) => manager.adoptSessions(from, to, toName),
+});
 // The sidebar's pull, cached and coalesced (DRY-72). One per daemon, keyed by
 // query, so every browser tab on the same scope shares one fan-out at the
 // tracker instead of each paying for its own.
@@ -81,6 +90,27 @@ const EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
  */
 const MAX_CONCURRENT_LOGINS = 4;
 let loginsInFlight = 0;
+
+/**
+ * Consecutive failed sign-ins, and the delay they buy.
+ *
+ * The concurrency cap above bounds how much work arrives at once; it does not
+ * bound how many GUESSES an attacker gets, because a patient one simply sends
+ * them four at a time. This does: each failure adds a delay to the ANSWER, so
+ * the millionth guess costs a second and a half whether or not anybody is in a
+ * hurry.
+ *
+ * Delay rather than lockout, deliberately. A lockout on a daemon holding
+ * somebody's live agents is a denial of service anybody can trigger from
+ * outside — the owner is locked out of their own running work by a stranger
+ * typing the wrong password. A delay costs an attacker everything and costs the
+ * owner one slow login, once, before their correct password resets it.
+ */
+const FAILED_LOGIN_DELAY_MS = 250;
+const FAILED_LOGIN_DELAY_CAP_MS = 1_500;
+let failedLogins = 0;
+
+const wait = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /**
  * Learn what a hook payload can tell us about a session (DRY-56).
@@ -363,12 +393,24 @@ const server = http.createServer(async (req, res) => {
         loginsInFlight -= 1;
       }
       if (!outcome.ok) {
+        // A 503 is the store being unreachable, not a wrong password — counting
+        // it would let a database outage throttle the owner's real login the
+        // moment it came back.
+        if (outcome.status !== 503) {
+          failedLogins += 1;
+          await wait(Math.min(failedLogins * FAILED_LOGIN_DELAY_MS, FAILED_LOGIN_DELAY_CAP_MS));
+        }
         // Logged because a login that keeps failing is either somebody locked
         // out or somebody trying, and the daemon log is the only place either
         // is visible — the browser only ever sees its own attempt.
-        log.warn("login refused", { name: String(body.name ?? ""), reason: outcome.error });
+        log.warn("login refused", {
+          name: String(body.name ?? ""),
+          reason: outcome.error,
+          consecutiveFailures: failedLogins || undefined,
+        });
         return send(res, outcome.status ?? 401, { error: outcome.error });
       }
+      failedLogins = 0;
       log.info("signed in", { user: outcome.identity?.name });
       return send(res, 200, {
         token: outcome.token,
@@ -442,15 +484,19 @@ const server = http.createServer(async (req, res) => {
     if (passwordMatch && req.method === "PUT") {
       const id = decodeURIComponent(passwordMatch[1]);
       try {
-        const body = await readJson(req).catch(() => null);
+        const body = await readJsonCapped(req, 4096, "password change").catch(() => null);
         if (!body || typeof body !== "object" || Array.isArray(body)) {
           return send(res, 400, { error: "body must be a JSON object" });
         }
-        await auth.setPassword(id, body.password);
-        // The caller has just invalidated their OWN token if this was their own
-        // account — the epoch moved. Say so in the response rather than letting
-        // the next poll 401 out of nowhere.
-        return send(res, 200, { ok: true, signedOut: id === me().id });
+        // Own account only, current password required — see Auth.setPassword.
+        // Both rules live there rather than here so there is one place to read
+        // for "can this become account takeover", instead of a route that
+        // enforces half of it and a method that trusts the route.
+        await auth.setPassword(id, body.current, body.password, me());
+        // The caller has just invalidated their own token — the epoch moved.
+        // Say so in the response rather than letting the next poll 401 out of
+        // nowhere.
+        return send(res, 200, { ok: true, signedOut: true });
       } catch (err) {
         return send(res, ...accountsError(err));
       }
@@ -982,10 +1028,15 @@ const server = http.createServer(async (req, res) => {
     // only renderable text extensions, cap the size. Revisit with daemon auth.
     const fileMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/file$/);
     if (fileMatch && req.method === "GET") {
-      // "see": this reads what the session's terminal is already showing you, so
-      // gating it harder than the pane would be a distinction without a
-      // difference — a spectator could read the same file out of the scrollback.
-      const session = sessionFor(fileMatch[1], me().id, "see", res);
+      // "own", and the comment that used to be here was wrong in a way worth
+      // recording: it argued this only shows you what the terminal already has,
+      // so a spectator could read it out of the scrollback anyway. That is not
+      // what this route does. It resolves an ARBITRARY relative path under the
+      // session's working directory and reads the file — the agent need never
+      // have opened it. On a public run that made every .md and .txt in
+      // somebody else's worktree readable by anyone signed in, which is a
+      // different thing entirely from watching their terminal.
+      const session = sessionFor(fileMatch[1], me().id, "own", res);
       if (!session) return;
       const rel = url.searchParams.get("path") ?? "";
       if (!rel) return send(res, 400, { error: "path is required" });

@@ -12,9 +12,15 @@ import {
 // Managing accounts (DRY-27), on the tier that can have more than one.
 //
 // Flat by design — the ticket's own non-goal list rules out roles — so anybody
-// signed in can add or remove anybody. That is honest rather than lax: every
+// signed in can ADD or REMOVE anybody. That is honest rather than lax: every
 // account here can already spawn a process as the host user, so a permission
 // system over this list would be guarding the shed beside an open house.
+//
+// Setting a password is the one thing that is NOT flat, and the line is worth
+// stating: removal ends somebody's access and they notice. Changing their
+// password takes it over — their desk, their history, their agents' transcripts
+// — and they find out when they can't sign in. The daemon refuses it; this
+// panel doesn't offer it.
 
 const emit = defineEmits<{ (e: "close"): void }>();
 
@@ -27,9 +33,18 @@ const newName = ref("");
 const newPassword = ref("");
 const nameEl = ref<HTMLInputElement | null>(null);
 
-/** Which row has its change-password field open. */
+/**
+ * The change-password row, which is only ever YOUR OWN.
+ *
+ * The daemon refuses to set another account's password — that is silent
+ * takeover, not the "add or remove" this panel is for — so offering the control
+ * on somebody else's row would be a button that exists to report an error.
+ * Removing them is the way to end their access, and a removal is something they
+ * notice.
+ */
 const changing = ref<string | null>(null);
 const changed = ref("");
+const current = ref("");
 
 const me = computed(() => authUser.value?.id);
 
@@ -86,9 +101,12 @@ function remove(row: AccountRow) {
 
 const setPassword = (row: AccountRow) =>
   run(async () => {
-    await changePassword(row.id, changed.value);
+    // Signs this browser out on success — the token's epoch moved with the
+    // password — so there is nothing to refresh afterwards.
+    await changePassword(row.id, current.value, changed.value);
     changing.value = null;
     changed.value = "";
+    current.value = "";
   });
 </script>
 
@@ -112,7 +130,10 @@ const setPassword = (row: AccountRow) =>
               <span v-if="row.id === me" class="you">you</span>
             </span>
             <div class="acts">
-              <button @click="changing = changing === row.id ? null : row.id; changed = ''">
+              <button
+                v-if="row.id === me"
+                @click="changing = changing === row.id ? null : row.id; changed = ''; current = ''"
+              >
                 Password
               </button>
               <button
@@ -127,6 +148,12 @@ const setPassword = (row: AccountRow) =>
           </div>
           <form v-if="changing === row.id" class="inline" @submit.prevent="setPassword(row)">
             <input
+              v-model="current"
+              type="password"
+              placeholder="Current password"
+              autocomplete="current-password"
+            />
+            <input
               v-model="changed"
               type="password"
               placeholder="New password"
@@ -134,9 +161,9 @@ const setPassword = (row: AccountRow) =>
             />
             <!-- Said out loud because it is surprising: changing a password
                  moves the token epoch, so every browser signed in as this
-                 account is signed out — including this one, if it is yours. -->
-            <span class="hint">Signs out their other browsers</span>
-            <button type="submit" :disabled="busy || changed.length < 8">Set</button>
+                 account is signed out — including this one. -->
+            <span class="hint">Signs you out everywhere</span>
+            <button type="submit" :disabled="busy || !current || changed.length < 8">Set</button>
           </form>
         </li>
       </ul>

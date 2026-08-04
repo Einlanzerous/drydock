@@ -79,9 +79,35 @@ function msOrOff(raw: string | undefined, fallback: number): number {
   return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
-/** Boolean knob. Unset is false; only the written-out affirmatives are true. */
-function flag(raw: string | undefined): boolean {
-  return raw === "1" || raw === "true" || raw === "yes";
+/**
+ * Configuration that cannot mean what it says. Collected rather than thrown,
+ * because this module is imported by every other one and a throw here produces
+ * a stack trace where a sentence belongs — `index.ts` prints these and exits
+ * before anything binds a port.
+ */
+export const CONFIG_ERRORS: string[] = [];
+
+/**
+ * Boolean knob, and an UNRECOGNISED value is an error rather than a false.
+ *
+ * `raw === "true"` was the obvious spelling and it is exactly the bug this
+ * whole area is about: `DRYDOCK_MULTI_USER=True` would read as false and boot a
+ * single-user daemon in silence — the precise silent downgrade the boot check
+ * in index.ts exists to refuse, walked straight past by the parse. So the
+ * affirmatives and the negatives are both enumerated, and anything else stops
+ * the daemon rather than being guessed at.
+ */
+function flag(name: string, raw: string | undefined): boolean {
+  const value = (raw ?? "").trim().toLowerCase();
+  if (value === "" ) return false;
+  if (["1", "true", "yes", "on"].includes(value)) return true;
+  if (["0", "false", "no", "off"].includes(value)) return false;
+  CONFIG_ERRORS.push(
+    `${name}=${raw} is not a yes/no value. Use 1/true/yes/on or 0/false/no/off, ` +
+      `or leave it unset — it will NOT be guessed at, because guessing wrong here ` +
+      `silently weakens the daemon's security posture.`,
+  );
+  return false;
 }
 
 /** Read once: the default log path is per-port so concurrent daemons don't share a file. */
@@ -108,9 +134,36 @@ const PORT = Number(process.env.DRYDOCK_PORT ?? 4317);
  */
 export type AuthMode = "off" | "single" | "multi";
 
+/**
+ * Shortest password this daemon will accept ANYWHERE — the configured one and
+ * the ones typed into the accounts panel.
+ *
+ * Enforced on host config too, not just on the API, because the two were
+ * inconsistent in a way that mattered: `createUser` refused seven characters
+ * while `DRYDOCK_AUTH_PASSWORD=x` was accepted silently, on the tier that is
+ * most likely to be the only thing between a LAN and a shell.
+ */
+export const MIN_PASSWORD = 8;
+
 const AUTH_PASSWORD = process.env.DRYDOCK_AUTH_PASSWORD || undefined;
 const AUTH_PASSWORD_HASH = process.env.DRYDOCK_AUTH_PASSWORD_HASH || undefined;
-const MULTI_USER = flag(process.env.DRYDOCK_MULTI_USER);
+const MULTI_USER = flag("DRYDOCK_MULTI_USER", process.env.DRYDOCK_MULTI_USER);
+
+if (AUTH_PASSWORD && AUTH_PASSWORD.length < MIN_PASSWORD) {
+  CONFIG_ERRORS.push(
+    `DRYDOCK_AUTH_PASSWORD is ${AUTH_PASSWORD.length} characters; the minimum is ${MIN_PASSWORD}. ` +
+      `This is the whole credential for a daemon that runs commands as you.`,
+  );
+}
+// A hash that isn't one can only ever answer "wrong password", for every
+// attempt, forever — indistinguishable from a forgotten password and impossible
+// to debug from the browser. Caught here rather than at the first login.
+if (AUTH_PASSWORD_HASH && !AUTH_PASSWORD_HASH.startsWith("scrypt$")) {
+  CONFIG_ERRORS.push(
+    `DRYDOCK_AUTH_PASSWORD_HASH is not a Drydock password hash (it must start with "scrypt$"). ` +
+      `Generate one with: node --import tsx scripts/hash-password.mts`,
+  );
+}
 const AUTH_MODE: AuthMode = MULTI_USER
   ? "multi"
   : AUTH_PASSWORD || AUTH_PASSWORD_HASH

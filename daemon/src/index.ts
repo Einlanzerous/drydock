@@ -1,6 +1,6 @@
 // Drydock daemon entry point. Owns AI-CLI PTYs per host; the browser is a viewer.
 import "./env.js"; // load .env before anything reads process.env (config, tracker)
-import { CONFIG } from "./config.js";
+import { CONFIG, CONFIG_ERRORS } from "./config.js";
 
 /**
  * Refuse to start on a configuration that cannot mean what it says (DRY-27).
@@ -19,11 +19,24 @@ import { CONFIG } from "./config.js";
  * database never costs a PTY.
  */
 if (CONFIG.auth.multiUser && !CONFIG.state.databaseUrl) {
-  process.stderr.write(
-    "drydock: DRYDOCK_MULTI_USER is set but DRYDOCK_DATABASE_URL is not.\n" +
+  CONFIG_ERRORS.push(
+    "DRYDOCK_MULTI_USER is set but DRYDOCK_DATABASE_URL is not.\n" +
       "  Accounts live in Postgres — there is no file-backed multi-user mode.\n" +
       "  Set DRYDOCK_DATABASE_URL, or unset DRYDOCK_MULTI_USER to run single-user\n" +
-      "  (which still supports a password: see DRYDOCK_AUTH_PASSWORD).\n",
+      "  (which still supports a password: see DRYDOCK_AUTH_PASSWORD).",
+  );
+}
+
+if (CONFIG_ERRORS.length) {
+  // Every one of these is a static contradiction — no network, no database — so
+  // they are all answerable before anything loads. Printed together rather than
+  // one per run: fixing four config errors in four restarts, on a daemon that
+  // adopts live sessions each time, is four chances to give up halfway.
+  process.stderr.write(
+    `drydock: refusing to start — ${CONFIG_ERRORS.length} configuration ` +
+      `problem${CONFIG_ERRORS.length > 1 ? "s" : ""}:\n` +
+      CONFIG_ERRORS.map((e) => `  • ${e}`).join("\n") +
+      "\n",
   );
   process.exit(1);
 }

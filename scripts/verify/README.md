@@ -315,6 +315,12 @@ database, because that is the whole point: no Postgres, no accounts.
 ```sh
 npm i playwright --prefix scripts/verify     # ad-hoc; not a repo dependency
 
+# The harness reads these two and has NO defaults, so the password a daemon is
+# started with and the one the browser types cannot drift apart. Both 8+ chars —
+# the daemon refuses a shorter one, including its own configured credential.
+export DRYDOCK_TEST_PASSWORD=whatever-you-like-8-plus
+export DRYDOCK_TEST_PASSWORD_B=something-else-8-plus
+
 # A throwaway password for a throwaway container, generated rather than written
 # down — a literal one in a checked-in file is a credential-shaped string that
 # every scanner has to be told to ignore, forever, for no benefit.
@@ -348,12 +354,12 @@ curl -s -X POST -H "Authorization: Bearer $TOK" -H 'Content-Type: application/js
      localhost:4393/api/users \
      -d "{\"name\":\"colleague\",\"password\":\"$DRYDOCK_TEST_PASSWORD_B\"}"
 
-node scripts/verify/auth.mjs                 # from the repo root
+(cd daemon && node --import tsx ../scripts/verify/auth.mts)
 ```
 
 | harness | what it holds down |
 |---|---|
-| `auth.mjs` | The desk is behind the door: with a password set the shell renders a login view and NOT the desk, a wrong password says so, a right one opens it, a reload keeps it, a dead token returns to the door with an explanation, and signing out stops the polls. Plus the two transports that cannot carry a header (SSE and the terminal WebSocket, both on short-lived stream tokens), and multi-user isolation at the surface — B cannot see A's private run, sees A's shared one, is offered no way to clear it, and gets a read-only pane. |
+| `auth.mts` | The desk is behind the door: with a password set the shell renders a login view and NOT the desk, a wrong password says so, a right one opens it, a reload keeps it, a dead token returns to the door with an explanation, and signing out stops the polls. Plus the two transports that cannot carry a header (SSE and the terminal WebSocket, both on short-lived stream tokens), and multi-user isolation at the surface — B cannot see A's private run, sees A's shared one, is offered no way to clear it, and gets a read-only pane. |
 
 Why a browser and not curl: `curl /api/sessions` returning 401 is *also* what a
 shell that ignored auth entirely would be talking to. That shell would render
@@ -369,7 +375,7 @@ gate and re-run — the two checks in (b) must fail:
 ```sh
 sed -i 's/v-else-if="!signedIn"/v-else-if="false"/' shell/src/App.vue
 sed -i 's/if (signedIn.value) await startDesk();/await startDesk();/' shell/src/App.vue
-node scripts/verify/auth.mjs      # expect: FAIL the login view replaces the desk
+(cd daemon && node --import tsx ../scripts/verify/auth.mts)   # expect: FAIL the login view replaces the desk
 git checkout shell/src/App.vue
 ```
 

@@ -6,7 +6,12 @@ import { authMessage, authMode, authNeedsSetup, signIn } from "../lib/auth.js";
 // top of a live desktop implies the desk behind it is yours to look at, and the
 // whole point is that until this succeeds the shell has no idea whose it is.
 
-const emit = defineEmits<{ (e: "signed-in"): void }>();
+// No emit for a successful sign-in, deliberately. The desk is started by a
+// watcher on `signedIn` in App.vue — the same one a 401 anywhere else has to go
+// through — so an event here would be a second, narrower path to the same
+// state, live only when the sign-in happened to come from this form. The first
+// version of this file emitted `signed-in` and nothing listened; that is the
+// less bad of the two ways that ends.
 
 const name = ref("");
 const password = ref("");
@@ -35,7 +40,6 @@ async function submit() {
   error.value = null;
   try {
     await signIn(name.value.trim(), password.value);
-    emit("signed-in");
   } catch (e) {
     error.value = String((e as Error).message ?? e);
     // The password is cleared and the field re-focused, the name is not: a

@@ -11,10 +11,11 @@
 // own signature, so a database that is down cannot log anybody out, cannot
 // strand an open gate, and cannot stop the rail reaching the run it is
 // watching. The only thing an outage costs is a NEW login, and it says so.
-import { CONFIG } from "../config.js";
+import * as crypto from "node:crypto";
+import { CONFIG, MIN_PASSWORD } from "../config.js";
 import { log } from "../log.js";
 import type { StateStore, UserRecord } from "../state/types.js";
-import { hashPassword, isHash, verifyPassword, verifyPlaintext } from "./password.js";
+import { hashPassword, verifyPassword } from "./password.js";
 import { bearerFrom, mintToken, verifyToken, type Audience, type Identity } from "./tokens.js";
 
 /** Life of a stream credential — see Audience in tokens.ts for why it's short. */
@@ -35,15 +36,6 @@ const IDENTITY_CACHE_MS = 10_000;
 
 /** Login names, deliberately narrow: this becomes a directory-ish key elsewhere. */
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$/;
-
-/**
- * Minimum password length, and nothing else.
- *
- * No character-class rules: they are known not to work, and here they would be
- * actively silly — the realistic deployment is one person on a Tailscale
- * network protecting a daemon from the internet, not a public signup form.
- */
-const MIN_PASSWORD = 8;
 
 export type AuthFailure =
   /** No credential presented at all. */
@@ -103,7 +95,57 @@ export class Auth {
    * owned by that constant, and in `off` and `single` they still are.
    */
   private get localIdentity(): Identity {
-    return { id: CONFIG.state.owner, name: CONFIG.auth.user };
+    return { id: CONFIG.state.owner, name: CONFIG.auth.user, epoch: this.credentialEpoch() };
+  }
+
+  /**
+   * A fingerprint of the CONFIGURED credential, carried in single-tier tokens.
+   *
+   * Without it, rotating `DRYDOCK_AUTH_PASSWORD` did nothing to the tokens
+   * already issued — they stayed good for the full 30-day TTL, so the one
+   * action anybody takes when they think a password has leaked had no effect
+   * whatsoever. There is no users table on this tier to hold an epoch, so the
+   * credential is its own epoch: change it and every token minted against the
+   * old one stops verifying.
+   *
+   * Derived from what is in the ENV, never from the scrypt hash computed at
+   * boot — that hash has a fresh random salt each time, so it would change on
+   * every restart and sign everybody out on every save under `--watch`.
+   *
+   * Four bytes of a SHA-256, which is a fingerprint and not a secret: it rides
+   * in a token the holder can already decode, and it says only "the credential
+   * is still the one this was issued against".
+   */
+  private credentialEpoch(): number {
+    const seed = CONFIG.auth.passwordHash ?? CONFIG.auth.password ?? "";
+    return crypto.createHash("sha256").update(seed, "utf8").digest().readUInt32BE(0);
+  }
+
+  /**
+   * The seeded account's password as a scrypt hash, whatever form it was
+   * configured in.
+   *
+   * A plaintext `DRYDOCK_AUTH_PASSWORD` used to be checked with two SHA-256
+   * digests — microseconds — which quietly made the DEFAULT way of turning auth
+   * on the fastest one to brute-force, and made the concurrency cap on the login
+   * route (justified out loud by scrypt's cost) protect a path that wasn't
+   * paying it. Hashing once at first use puts both forms on the same code path
+   * at the same cost.
+   *
+   * Cached as a PROMISE so N concurrent first logins compute it once.
+   */
+  private seedHashPromise: Promise<string | null> | null = null;
+
+  private seedHash(): Promise<string | null> {
+    if (!this.seedHashPromise) {
+      const seed = this.seedCredential();
+      this.seedHashPromise = !seed
+        ? Promise.resolve(null)
+        : seed.hash
+          ? Promise.resolve(seed.hash)
+          : hashPassword(seed.plaintext!);
+    }
+    return this.seedHashPromise;
   }
 
   async info(): Promise<AuthInfo> {
@@ -167,6 +209,15 @@ export class Auth {
       if (again) return again;
       throw err;
     }
+    // The LIVE sessions first, because they are the ones with a clock on them.
+    // Everything spawned while this daemon ran `off` or `single` recorded
+    // `owner: DRYDOCK_OWNER` — a real value, not an absent one — so the
+    // "no owner means yours" heal doesn't cover them: the moment multi-user
+    // comes on they belong to a string nobody logs in as, and an owned session
+    // that isn't yours is invisible AND unkillable. Live agents, on the host,
+    // reachable only by pid. Same adoption the rows below get, applied to the
+    // thing that is still running.
+    const sessions = this.adoptSessions?.(CONFIG.state.owner, created.id, created.name) ?? 0;
     const adopted = await users
       .adoptOwner(CONFIG.state.owner, created.id)
       .catch((err) => {
@@ -185,6 +236,7 @@ export class Auth {
       user: created.name,
       id: created.id,
       adoptedRows: adopted,
+      adoptedSessions: sessions || undefined,
     });
     return created;
   }
@@ -208,8 +260,8 @@ export class Auth {
     const wrong: LoginOutcome = { ok: false, status: 401, error: "wrong name or password" };
 
     if (this.mode === "single") {
-      const seed = this.seedCredential();
-      if (!seed) return wrong;
+      const hash = await this.seedHash();
+      if (!hash) return wrong;
       // An OMITTED name means the configured account, because on this tier
       // there is only one and the login form doesn't ask for it — the name is
       // host config, so demanding it would be a quiz about somebody's `.env`.
@@ -217,9 +269,7 @@ export class Auth {
       // field it never showed, and `??` passes that straight through to a
       // comparison that can only fail. (It did, once.)
       const nameOk = (given || CONFIG.auth.user).toLowerCase() === CONFIG.auth.user.toLowerCase();
-      const passwordOk = seed.hash
-        ? await verifyPassword(password, seed.hash)
-        : verifyPlaintext(password, seed.plaintext!);
+      const passwordOk = await verifyPassword(password, hash);
       // Both halves are evaluated before the decision, so a wrong NAME costs
       // the same scrypt as a wrong password. Short-circuiting on the name
       // makes the response time say which of the two was wrong.
@@ -228,7 +278,11 @@ export class Auth {
       return {
         ok: true,
         identity,
-        token: mintToken({ id: identity.id, name: identity.name }, "api", CONFIG.auth.sessionTtlMs),
+        token: mintToken(
+          { id: identity.id, name: identity.name, tokenEpoch: identity.epoch },
+          "api",
+          CONFIG.auth.sessionTtlMs,
+        ),
       };
     }
 
@@ -256,10 +310,19 @@ export class Auth {
     } catch (err) {
       // A database outage is not a failed login, and saying so is the whole
       // difference between "check your password" and "wait a minute".
+      //
+      // The DETAIL stays in the log. This route answers whoever asks, signed in
+      // or not, and a pg connection error carries the database host, port and
+      // user — a plain "accounts unavailable: <err>" hands the layout of the
+      // back end to anybody who can reach the login page.
       log.warn("could not check a login — the accounts store is unreachable", {
         err: String(err),
       });
-      return { ok: false, status: 503, error: `accounts unavailable: ${String(err)}` };
+      return {
+        ok: false,
+        status: 503,
+        error: "accounts are unreachable right now — try again shortly",
+      };
     }
   }
 
@@ -296,7 +359,14 @@ export class Auth {
     if (!raw) return { ok: false, reason: "anonymous" };
     const result = verifyToken(raw, aud);
     if (!result.ok) return { ok: false, reason: "invalid" };
-    if (this.mode !== "multi") return { ok: true, identity: result.identity };
+    if (this.mode !== "multi") {
+      // The credential this token was issued against is still the configured
+      // one. Rotating DRYDOCK_AUTH_PASSWORD used to leave every token already
+      // out there valid for its full 30-day life — see credentialEpoch().
+      return result.identity.epoch === this.credentialEpoch()
+        ? { ok: true, identity: result.identity }
+        : { ok: false, reason: "invalid" };
+    }
     return this.stillValid(result.identity);
   }
 
@@ -385,10 +455,35 @@ export class Auth {
     }
   }
 
-  async setPassword(id: string, password: string): Promise<void> {
+  /**
+   * Change YOUR OWN password, having proved you know the current one.
+   *
+   * Both halves are the fix for the same hole. The flat capability model says
+   * anybody signed in can add or remove an account — that is defensible, since
+   * every account can already run commands as the host user, and a removal is
+   * something you NOTICE. Setting somebody else's password is not: it is silent
+   * account takeover, after which their desk, their session history and their
+   * agents' transcripts are yours, and they find out when they can't log in.
+   * "Add or remove" was never "become".
+   *
+   * Requiring the current password matters even for your own account, because
+   * the token in a browser somebody left open is otherwise enough to change the
+   * credential and lock the owner out of a daemon holding their live agents.
+   */
+  async setPassword(id: string, current: unknown, password: unknown, actor: Identity): Promise<void> {
     const users = this.requireUsers();
+    if (id !== actor.id) {
+      throw new BadRequest(
+        "you can only change your own password — removing an account is the way to end somebody else's access",
+      );
+    }
     if (typeof password !== "string" || password.length < MIN_PASSWORD) {
       throw new BadRequest(`password must be at least ${MIN_PASSWORD} characters`);
+    }
+    const user = await users.byId(id);
+    if (!user) throw new BadRequest("that account no longer exists");
+    if (typeof current !== "string" || !(await verifyPassword(current, user.passwordHash))) {
+      throw new BadRequest("the current password is wrong");
     }
     await users.setPassword(id, await hashPassword(password));
     this.forget(id);
@@ -404,9 +499,43 @@ export class Auth {
       throw new BadRequest("you cannot remove the account you are signed in as");
     }
     if ((await users.count()) <= 1) throw new BadRequest("this is the last account");
+    // Their RUNNING sessions are the reason this can't be unconditional. An
+    // account's id is the only handle anything has on its sessions — no
+    // surface can list, attach to or kill one whose owner doesn't exist — so
+    // removing an account mid-run strands live agents on the host permanently:
+    // burning CPU, holding worktrees, reachable only by pid. Refused with the
+    // count, because "stop them first" is a thing somebody can act on and a
+    // silently orphaned agent is not.
+    const live = this.liveSessionsFor?.(id) ?? 0;
+    if (live > 0) {
+      throw new BadRequest(
+        `that account has ${live} session${live > 1 ? "s" : ""} still running — ` +
+          `stop them first, or they will keep running with nothing able to reach them`,
+      );
+    }
     await users.remove(id);
     this.forget(id);
     log.info("account removed", { id, by: actor.name });
+  }
+
+  /**
+   * How many live sessions an account owns, and who to hand the pre-accounts
+   * ones to when the first account is seeded.
+   *
+   * Injected rather than imported, for the reason the manager keeps every other
+   * collaborator at arm's length: this class decides who somebody IS, and a
+   * direct dependency on the thing that owns PTYs would make identity a
+   * question about processes. Set once, in server.ts.
+   */
+  private liveSessionsFor?: (owner: string) => number;
+  private adoptSessions?: (from: string, to: string, toName?: string) => number;
+
+  useSessions(hooks: {
+    liveSessionsFor: (owner: string) => number;
+    adoptSessions: (from: string, to: string, toName?: string) => number;
+  }): void {
+    this.liveSessionsFor = hooks.liveSessionsFor;
+    this.adoptSessions = hooks.adoptSessions;
   }
 
   private requireUsers() {
@@ -425,5 +554,5 @@ export class BadRequest extends Error {}
 /** 501: this tier can't do that at all — the file store's answer to accounts. */
 export class NotSupported extends Error {}
 
-export { hashPassword, isHash };
+export { hashPassword };
 export type { Identity };

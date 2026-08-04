@@ -1687,19 +1687,25 @@ function forgetDesk() {
   forgetLocalLayout(DAEMON_HTTP);
 }
 
+// A sign-in starts the desk; a 401 anywhere signs out, which stops it. One
+// watcher for both directions, so the two can't disagree about which state the
+// polls are in.
+//
+// Registered SYNCHRONOUSLY at setup, not inside onMounted after an await. A
+// watcher created after an await is outside the component's effect scope, so
+// nothing stops it on unmount — it outlives the component and keeps starting
+// desks for a component that is gone. Vue doesn't warn; it just leaks.
+watch(signedIn, (now) => {
+  if (now) void startDesk();
+  else forgetDesk();
+});
+
 onMounted(async () => {
   // Before anything else asks the daemon for something: this decides whether
   // the desk renders at all, and a daemon from before DRY-27 answers "off",
   // which is the behaviour that has always shipped.
   await loadAuthInfo();
   if (signedIn.value) await startDesk();
-  // A sign-in starts the desk; a 401 anywhere signs out, which stops it. One
-  // watcher for both directions, so the two can't disagree about which state
-  // the polls are in.
-  watch(signedIn, (now) => {
-    if (now) void startDesk();
-    else forgetDesk();
-  });
 });
 
 onBeforeUnmount(stopDesk);

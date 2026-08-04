@@ -34,9 +34,38 @@ function readStored(): string | null {
   }
 }
 
+/**
+ * Read the identity out of a token, without trusting it.
+ *
+ * The daemon signs these and is the only thing that verifies them; this is for
+ * LABELS and for the ownership UI, both of which the daemon enforces anyway. It
+ * exists because `authUser` being null is not a neutral state: `isForeign`
+ * returns false for everything when it can't tell who you are, which silently
+ * turns off the whole ownership surface on a multi-user desk — foreign runs get
+ * a ✕ that 404s and a pane that looks writable. That is one failed
+ * `/api/auth/me` away, and a 503 from the accounts store is a case we
+ * deliberately DON'T sign out for.
+ *
+ * So identity comes from the credential we already hold, and `/api/auth/me`
+ * refreshes it (a rename) rather than establishing it.
+ */
+function identityFromToken(raw: string | null): AuthUser | null {
+  if (!raw) return null;
+  try {
+    const payload = raw.split(".")[1];
+    if (!payload) return null;
+    const claims = JSON.parse(atob(payload.replace(/-/g, "+").replace(/_/g, "/")));
+    return typeof claims?.u === "string" ? { id: claims.u, name: claims.n ?? claims.u } : null;
+  } catch {
+    // A token we can't read is one the daemon will refuse; the 401 handler is
+    // what acts on that, not this.
+    return null;
+  }
+}
+
 const token = ref<string | null>(readStored());
 const mode = ref<AuthMode>("off");
-const user = ref<AuthUser | null>(null);
+const user = ref<AuthUser | null>(identityFromToken(token.value));
 const needsSetup = ref(false);
 /** True once /api/auth/info has answered — the desk mustn't draw before then. */
 const ready = ref(false);
@@ -55,6 +84,9 @@ export const signedIn = computed(() => mode.value === "off" || Boolean(token.val
 
 function store(value: string | null): void {
   token.value = value;
+  // Identity follows the credential, always — so there is no window in which
+  // the shell is signed in and doesn't know as whom. See identityFromToken.
+  user.value = identityFromToken(value);
   try {
     if (value) localStorage.setItem(TOKEN_KEY, value);
     else localStorage.removeItem(TOKEN_KEY);
@@ -121,7 +153,9 @@ export async function signIn(name: string, password: string): Promise<void> {
   if (!res.ok) throw new Error(body?.error ?? `daemon returned ${res.status}`);
   if (!body?.token) throw new Error("daemon returned no token");
   store(body.token);
-  user.value = body.user ?? null;
+  // `store` has already derived this from the token; the daemon's answer is
+  // preferred when it gives one, since it is the authority on a rename.
+  if (body.user) user.value = body.user;
   message.value = null;
   needsSetup.value = false;
 }
@@ -133,7 +167,6 @@ export async function signIn(name: string, password: string): Promise<void> {
  */
 export function signOut(why?: string): void {
   store(null);
-  user.value = null;
   message.value = why ?? null;
 }
 
@@ -233,16 +266,25 @@ export async function removeAccount(id: string): Promise<void> {
   if (!res.ok) throw new Error(body?.error ?? `daemon returned ${res.status}`);
 }
 
-export async function changePassword(id: string, password: string): Promise<void> {
+/**
+ * Change your OWN password. `current` is required by the daemon — see
+ * Auth.setPassword: setting somebody else's is silent account takeover, and
+ * even for your own, a token left open in a browser must not be enough to
+ * change the credential and lock the owner out.
+ */
+export async function changePassword(
+  id: string,
+  current: string,
+  password: string,
+): Promise<void> {
   const res = await authFetch(`${DAEMON_HTTP}/api/users/${encodeURIComponent(id)}/password`, {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ password }),
+    body: JSON.stringify({ current, password }),
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body?.error ?? `daemon returned ${res.status}`);
-  // Changing your own password moves your token epoch, so the token in this tab
-  // is already dead. Say so rather than letting the next poll 401 out of
-  // nowhere — the daemon tells us which case this was.
-  if (body?.signedOut) signOut("Password changed — sign in with the new one.");
+  // The epoch moved, so the token in this tab is already dead. Say so rather
+  // than letting the next poll 401 out of nowhere.
+  signOut("Password changed — sign in with the new one.");
 }

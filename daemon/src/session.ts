@@ -82,6 +82,23 @@ export interface SpawnOptions {
  */
 export type RunEndReason = "finished" | "ended-turn" | "failed" | "stopped";
 
+/**
+ * Does "whose session is this" mean anything on this daemon? (DRY-27)
+ *
+ * Only under multi-user. Everywhere else there is exactly one identity, so an
+ * ownership check can only ever produce a wrong answer — and it did, in the
+ * direction nobody tests: turn multi-user OFF again and every session spawned
+ * while it was on carries a uuid owner, while the viewer is now the
+ * `DRYDOCK_OWNER` constant. Owned, not yours, not public: invisible and
+ * unkillable, on a daemon with no accounts to explain it.
+ *
+ * Read at call time rather than captured, because the mode is host config and a
+ * session outlives the process that spawned it.
+ */
+function ownershipApplies(): boolean {
+  return CONFIG.auth.mode === "multi";
+}
+
 export type RunEndNotifier = (session: PtySession, reason: RunEndReason) => void;
 
 /**
@@ -248,8 +265,13 @@ export class PtySession {
    * `ownedBy`/`visibleTo` rather than directly, so the "nobody recorded one"
    * case is answered in one place instead of at every call site.
    */
-  readonly owner?: string;
-  readonly ownerName?: string;
+  /**
+   * Not readonly, for one reason: the first account created on a daemon that
+   * was running `off` or `single` adopts the sessions spawned under it. See
+   * `adoptOwner` and SessionManager.adoptSessions.
+   */
+  owner?: string;
+  ownerName?: string;
   readonly visibility: SessionVisibility;
   title: string;
   /**
@@ -396,6 +418,7 @@ export class PtySession {
    * feature switch, with no surface left that could stop it.
    */
   visibleTo(viewer: string): boolean {
+    if (!ownershipApplies()) return true;
     return !this.owner || this.owner === viewer || this.visibility === "public";
   }
 
@@ -407,7 +430,22 @@ export class PtySession {
    * accounts would be the worst possible way to discover the difference.
    */
   ownedBy(viewer: string): boolean {
+    if (!ownershipApplies()) return true;
     return !this.owner || this.owner === viewer;
+  }
+
+  /**
+   * Hand this session to the first account, at bootstrap (DRY-27).
+   *
+   * Persisted immediately, not just held in memory: the index file is what a
+   * restart rebuilds this session from, so an un-persisted change would survive
+   * exactly until the next `--watch` save and then put the session back where
+   * nobody can reach it.
+   */
+  adoptOwner(owner: string, ownerName?: string): void {
+    this.owner = owner;
+    if (ownerName) this.ownerName = ownerName;
+    this.persist();
   }
 
   /**
