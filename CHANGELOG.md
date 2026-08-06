@@ -1,5 +1,51 @@
 # Changelog
 
+## [1.1.0](https://github.com/Einlanzerous/drydock/compare/v1.0.0...v1.1.0) (2026-08-04)
+
+
+### Features
+
+* **daemon:** a door on the daemon, and accounts behind it (DRY-27) ([f5cdd42](https://github.com/Einlanzerous/drydock/commit/f5cdd42916e216b877bf0176dd18f982f2dbd8fd))
+* **daemon:** a door on the daemon, and accounts behind it (DRY-27) ([f1c847f](https://github.com/Einlanzerous/drydock/commit/f1c847f0e9412f644a25e1c50331268a8d1dee38))
+* **daemon:** brief spawned agents from the comment thread and epic (DRY-53) ([fb60612](https://github.com/Einlanzerous/drydock/commit/fb606121d76caa0f58f7b6d59fd810c081e0d053))
+* **shell:** clear finished sessions from the desk (DRY-60) ([5cec804](https://github.com/Einlanzerous/drydock/commit/5cec804fcb6d85bf7e68b2c5d1510aa30da38804))
+* **shell:** clear finished sessions from the desk (DRY-60) ([8fcd61a](https://github.com/Einlanzerous/drydock/commit/8fcd61adcae1d8a2609e93252a83a751a3e7aa72))
+
+
+### Bug Fixes
+
+* **daemon:** add the IDE marker, tolerate malformed session env (DRY-59 review) ([ade231d](https://github.com/Einlanzerous/drydock/commit/ade231d783166b00435c62c8e07e9d8c81213cba))
+* **daemon:** cache and coalesce the sidebar's tracker pull (DRY-72) ([e9fae36](https://github.com/Einlanzerous/drydock/commit/e9fae361c5150782d83122d2e639da7799d044b0))
+* **daemon:** cache and coalesce the sidebar's tracker pull (DRY-72) ([d411d43](https://github.com/Einlanzerous/drydock/commit/d411d43edb5465d9c9c2e09e76b9652648d4aaa1))
+* **daemon:** close the review findings on the tracker cache (DRY-72) ([bf324e6](https://github.com/Einlanzerous/drydock/commit/bf324e6a0a2528b27242ae7d07e245ccd6498791))
+* **daemon:** close the review's holes in the new auth surface (DRY-27) ([eabde0e](https://github.com/Einlanzerous/drydock/commit/eabde0ed113757556a590c823391ae2f8de3fab2))
+* **daemon:** harden the ticket brief against its own inputs (DRY-53) ([383ed25](https://github.com/Einlanzerous/drydock/commit/383ed254657405eaa88368f6b6a694613c56071f))
+* **daemon:** stop spawned agents inheriting the daemon's claude session markers (DRY-59) ([5e8ae01](https://github.com/Einlanzerous/drydock/commit/5e8ae01197f4ed60c31a4a028c9a501ecc2edd0e))
+* **daemon:** stop spawned agents inheriting the daemon's claude session markers (DRY-59) ([d77a445](https://github.com/Einlanzerous/drydock/commit/d77a4450ae198d2829cddc865bcbd9ed01661d17))
+* **shell:** budget the ticket pull and stop the outage copy guessing (DRY-55 review) ([55c3393](https://github.com/Einlanzerous/drydock/commit/55c3393e3e62a634a835b14665e00a39f1068f03))
+* **shell:** close the review findings on the gate's action row (DRY-78) ([01403c5](https://github.com/Einlanzerous/drydock/commit/01403c5753370529797e3c9f697352adb7156645))
+* **shell:** correct the epic row's expand predicate and toggle (DRY-75) ([7167766](https://github.com/Einlanzerous/drydock/commit/7167766bcbdf7e9409ffa5fe3c50f59923c932d7))
+* **shell:** don't offer to resume a conversation that was never written (DRY-62) ([1aa1155](https://github.com/Einlanzerous/drydock/commit/1aa11551c652615e007017abc6c739489181c59f))
+* **shell:** don't offer to resume a conversation that was never written (DRY-62) ([4a51788](https://github.com/Einlanzerous/drydock/commit/4a51788085dc6193b866e194d6efb1d0bf5f8f4b))
+* **shell:** expand an epic on row click, launch from its own icon (DRY-75) ([8a068fd](https://github.com/Einlanzerous/drydock/commit/8a068fdb044894b686b2b34e824be784783da55b))
+* **shell:** expand an epic on row click, launch from its own icon (DRY-75) ([149ac83](https://github.com/Einlanzerous/drydock/commit/149ac83159aee98c4579cf18b679e5ec3b7a0a18))
+* **shell:** give the countdown the card's second row, not more width (DRY-60) ([8245bc5](https://github.com/Einlanzerous/drydock/commit/8245bc503d7708f144e66e4099f4ce64a7000496))
+* **shell:** handle what the panel's new scroll container brings with it (DRY-74) ([358f450](https://github.com/Einlanzerous/drydock/commit/358f450a7588b3fd4cfe4f7850f3fad782c0052e))
+* **shell:** keep the permission gate's answers inside its panel (DRY-78) ([f28394b](https://github.com/Einlanzerous/drydock/commit/f28394bcb534cc3c429b38e802c36237d6174321))
+* **shell:** keep the permission gate's answers inside its panel (DRY-78) ([3c2c684](https://github.com/Einlanzerous/drydock/commit/3c2c6846001dffad6406d04a49201050af83ef35))
+* **shell:** let the rail's chooser be dismissed, and stop the deny flow offering approval (DRY-73) ([6ae3512](https://github.com/Einlanzerous/drydock/commit/6ae3512bc7bb05fef65864cde1df3228cda0cb8e))
+* **shell:** let the rail's chooser be dismissed, and stop the deny flow offering approval (DRY-73) ([6eaa54e](https://github.com/Einlanzerous/drydock/commit/6eaa54e84142af8b25d3951be22bafe8d7723e55))
+* **shell:** make the sweep's countdown survive a crowded desk (DRY-60) ([3078abd](https://github.com/Einlanzerous/drydock/commit/3078abd5b036604e29149a9392575f2e7bba9344))
+* **shell:** say when the tracker is unreachable instead of "No tickets match." (DRY-55) ([c760181](https://github.com/Einlanzerous/drydock/commit/c76018166cf2a96af2ff718da12c8e5393d10681))
+* **shell:** say when the tracker is unreachable instead of "No tickets match." (DRY-55) ([3d9e36b](https://github.com/Einlanzerous/drydock/commit/3d9e36b7dd703d82b5ef38d7d1a4da2ebdd55b1b))
+* **shell:** stop the spawn panel's action row overflowing (DRY-74) ([7e00dd7](https://github.com/Einlanzerous/drydock/commit/7e00dd7d14d9e08a059427d0524d198f33e587b7))
+* **shell:** stop the spawn panel's action row overflowing (DRY-74) ([24c0efb](https://github.com/Einlanzerous/drydock/commit/24c0efbe2e0340030284c8b41f493ff5c7ea1159))
+
+
+### Documentation
+
+* note that the compile gate is required on main (DRY-52) ([9ad53fc](https://github.com/Einlanzerous/drydock/commit/9ad53fc095b54a8ab64edf7f2bb642e8ff7b9e12))
+
 ## 1.0.0 (2026-07-28)
 
 
