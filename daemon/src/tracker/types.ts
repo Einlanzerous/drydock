@@ -162,6 +162,28 @@ export interface TicketQuery {
    * post-filter what was already pulled.
    */
   includeBacklog?: boolean;
+  /**
+   * Only children of this ticket, given by KEY (DRY-83) — the sidebar expanding
+   * an epic to the work under it.
+   *
+   * A separate axis from `projects`/`includeBacklog` rather than a filter over
+   * them, because the pull those describe deliberately excludes the backlog
+   * bucket: an epic whose work hasn't started has every child excluded, so the
+   * row had nothing to expand at exactly the moment somebody wanted it. Reaching
+   * those children through the backlog toggle means pulling the whole backlog
+   * (~29 tickets to 250+ on a real tracker) to see two epics' worth.
+   *
+   * A key and not the provider's internal id, because the shell only ever has
+   * keys — Switchyard's UUID is deliberately not exposed (see `SwitchyardTicket.id`),
+   * so that provider resolves the key itself. Jira's JQL takes the key directly.
+   *
+   * Scoping: providers must honour `open`/`includeBacklog` alongside it. The
+   * sidebar asks for every non-closed child, which makes the row count equal the
+   * rollup's non-done segments — a number the user can check against the bar
+   * above it — and keeps the query bounded by open work rather than by years of
+   * closed children, which is what makes the child-stats query cappable.
+   */
+  parent?: string;
   text?: string;
   limit?: number;
 }

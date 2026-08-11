@@ -5,6 +5,7 @@ import {
   epicNodeId,
   epicRollup,
   groupTickets,
+  listEpicChildren,
   tagColor,
   type EpicNode,
   type RepoGroup,
@@ -126,6 +127,97 @@ const fEpic = ref("");
 const expanded = reactive<Record<string, boolean>>({});
 const epicExpanded = reactive<Record<string, boolean>>({});
 
+/**
+ * An epic's children, fetched on demand when its row is expanded (DRY-83).
+ *
+ * Keyed by epic KEY and not by `epicNodeId`, unlike the expand state beside it:
+ * the same epic can head a group in two repos, but it has one set of children
+ * either way, so both rows share the one fetch.
+ */
+interface ChildLoad {
+  /** Absent until a fetch succeeds — see `epicChildren` for what stands in. */
+  rows?: Ticket[];
+  loading: boolean;
+  error?: string;
+}
+const childLoads = reactive<Record<string, ChildLoad>>({});
+
+/**
+ * Fetch an epic's children, once.
+ *
+ * Called from `toggleEpic` — that is, from an explicit expand — and deliberately
+ * NOT from `isEpicOpen` or anywhere in the render path. A filter force-opens
+ * every epic on the desk (see `isEpicOpen`), so driving this off "is it open"
+ * would fire one request per epic on every keystroke in the search box, which is
+ * precisely the per-poll fan-out DRY-72 spent a ticket removing.
+ *
+ * A previous failure leaves neither `rows` nor `loading` set, so re-expanding
+ * retries. A previous success is kept for the sidebar's lifetime rather than
+ * re-pulled on the 20s poll: the daemon caches this key for its TTL anyway, and
+ * re-fetching every expanded epic on every tick puts that fan-out back one epic
+ * at a time. Refresh is the hook for "this may have moved" — see `onRefresh`.
+ */
+function loadChildren(key: string, force = false): void {
+  const cur = childLoads[key];
+  if (cur?.loading) return;
+  if (cur?.rows && !force) return;
+  // The rows already on screen are KEPT while a forced re-pull is in flight,
+  // and that isn't cosmetic. A forced fetch waits on the daemon, and the
+  // fallback when there are no fetched rows is `node.shown` — which for the
+  // epic this feature exists for is EMPTY, since none of its children were in
+  // the pull. Dropping them first therefore empties an expanded epic for the
+  // length of the round trip and fills it again, i.e. replaces a working list
+  // with nothing while nothing is wrong (DRY-55's rule, one level down). The
+  // harness caught it as a flicker; a slow tracker would make it a second or
+  // more of blank.
+  childLoads[key] = { loading: true, ...(cur?.rows ? { rows: cur.rows } : {}) };
+  listEpicChildren(key, force)
+    .then((rows) => {
+      childLoads[key] = { loading: false, rows };
+    })
+    .catch((e: unknown) => {
+      // Same rule on the failure path: a re-pull that fails keeps what it had.
+      childLoads[key] = { loading: false, error: String(e), ...(cur?.rows ? { rows: cur.rows } : {}) };
+    });
+}
+
+/**
+ * Epics the user has expanded by hand, by key — what Refresh has to re-pull.
+ *
+ * Reads `epicExpanded` rather than `isEpicOpen` for the same reason
+ * `loadChildren` does: under a filter the latter is true of everything.
+ */
+const openEpicKeys = computed(() => {
+  const out = new Set<string>();
+  for (const g of groups.value) {
+    for (const n of g.epics) if (epicExpanded[epicNodeId(g.repo, n.key)]) out.add(n.key);
+  }
+  return out;
+});
+
+/**
+ * Refresh means "I have stopped trusting what is on screen", so it has to reach
+ * the expanded epics too (DRY-83). Left out, the one button somebody presses for
+ * that would freshen every row on the desk EXCEPT the ones they opened on
+ * purpose — and those are the rows an agent gets spawned from, which is where
+ * DRY-55's "spawn against a ticket that closed an hour ago" actually bites.
+ *
+ * Only what is open right now. Re-pulling every epic ever expanded would make
+ * one click cost a request per epic visited this session, most of them collapsed
+ * and unread.
+ */
+function onRefresh(): void {
+  for (const key of openEpicKeys.value) {
+    // Forced, or this whole loop is theatre: the daemon caches the children key
+    // like any other, so re-issuing the same request inside the TTL is answered
+    // from the same memory that made the button look stale in the first place
+    // (DRY-72 trap 3). Caught by the harness — the re-pull never reached the
+    // tracker and every row still looked right.
+    loadChildren(key, true);
+  }
+  emit("refresh");
+}
+
 const filtering = computed(
   () =>
     !!search.value.trim() ||
@@ -161,9 +253,18 @@ const epicOptions = computed(() => {
   return [...seen].map(([key, title]) => ({ key, title })).sort((a, b) => a.key.localeCompare(b.key));
 });
 
-const filtered = computed(() => {
+/**
+ * The filter predicate, as a function rather than inline in `filtered`, because
+ * on-demand epic children (DRY-83) have to pass through the SAME test.
+ *
+ * They arrive outside `props.tickets` — that is the whole point of the call —
+ * so nothing else would filter them. Expanding an epic and then typing in the
+ * search box would otherwise leave that epic's children as the only unfiltered
+ * rows on screen.
+ */
+const matches = computed(() => {
   const q = search.value.trim().toLowerCase();
-  return props.tickets.filter((t) => {
+  return (t: Ticket): boolean => {
     if (fProject.value && t.repo !== fProject.value) return false;
     if (fStatus.value && t.status.category !== fStatus.value) return false;
     // "This epic" means the epic and its children, so the row you filtered by
@@ -183,8 +284,10 @@ const filtered = computed(() => {
       if (!hay.includes(q)) return false;
     }
     return true;
-  });
+  };
 });
+
+const filtered = computed(() => props.tickets.filter(matches.value));
 
 const groups = computed(() => groupTickets(filtered.value, props.tickets));
 
@@ -208,26 +311,123 @@ type Row =
        */
       expandable: boolean;
       title: string;
+      /** The on-demand fetch's state, so the row can show it (DRY-83). */
+      load?: ChildLoad;
     }
-  | { kind: "ticket"; id: string; t: Ticket; child: boolean };
+  | { kind: "ticket"; id: string; t: Ticket; child: boolean }
+  /**
+   * A line under an expanded epic about the fetch behind it (DRY-83) — in
+   * flight, or failed and clickable to retry. A row of its own so the template
+   * keeps one v-if chain; see the note in the template for what happens
+   * otherwise.
+   */
+  | { kind: "note"; id: string; text: string; bad?: boolean; detail?: string; retry?: string };
+
+/**
+ * Active work before dormant work, so an expanded epic opens on the tickets
+ * somebody might start (DRY-83).
+ *
+ * The rollup bar above it is ordered done-first, because there it reads
+ * left-to-right as progress. A LIST is read top-down looking for something to
+ * pick up, and on-demand children are mostly backlog by construction — that is
+ * why they weren't in the pull — so the tracker's own order would bury the one
+ * in-flight ticket under thirty that haven't started.
+ */
+const CHILD_ORDER: Ticket["status"]["category"][] = [
+  "in_progress",
+  "review",
+  "blocked",
+  "planning",
+  "backlog",
+  "done",
+];
+function childRank(t: Ticket): number {
+  const i = CHILD_ORDER.indexOf(t.status.category);
+  return i < 0 ? CHILD_ORDER.length : i;
+}
+
+/**
+ * What an expanded epic renders.
+ *
+ * Prefers the on-demand fetch (DRY-83) and falls back to `node.shown` — the
+ * children the sidebar's own pull happened to include — while it's in flight, if
+ * it failed, or when a filter force-opened this epic without anybody asking.
+ *
+ * The two sets are unioned rather than swapped. They should agree (the fetch
+ * asks for every non-closed child, which is a superset of what an open-only pull
+ * returned), but a child that changed status between the two calls would
+ * otherwise blink out of a list it is legitimately in, and dropping a row that
+ * was on screen a moment ago is worse than showing one twice would be.
+ */
+function epicChildren(node: EpicNode): Ticket[] {
+  const load = childLoads[node.key];
+  if (!load?.rows) return node.shown;
+  const seen = new Set<string>();
+  const out: Ticket[] = [];
+  // Filtered HERE and not upstream: these never passed through `filtered`,
+  // because they were never in `props.tickets`.
+  for (const t of load.rows) {
+    if (!matches.value(t)) continue;
+    seen.add(t.key);
+    out.push(t);
+  }
+  for (const t of node.shown) if (!seen.has(t.key)) out.push(t);
+  return out.sort((a, b) => childRank(a) - childRank(b));
+}
 
 function rowsOf(g: RepoGroup): Row[] {
   const out: Row[] = [];
   for (const node of g.epics) {
-    // `shown`, NOT `children`: what expanding renders is the filtered set, and
-    // an epic that matched a filter on its own with every child filtered out
-    // has children it cannot show. Off a filter the two are the same list.
-    const expandable = node.shown.length > 0;
+    const roll = epicRollup(node);
+    const load = childLoads[node.key];
+    // What expanding would reveal. `shown` is what the pull loaded and the
+    // filter kept — off a filter, `children`.
+    //
+    // Since DRY-83 that is no longer the whole answer, and it was the bug: the
+    // pull excludes the backlog bucket and exempts only the EPICS in it, so an
+    // epic whose work hasn't started arrives with no children whatsoever and the
+    // row went inert at exactly the moment somebody wanted to look inside it.
+    // `childStats` already knows better — it counts every child, including the
+    // ones the pull deliberately dropped — so the open ones (total minus done)
+    // are what a click can now go and fetch. Only when it's AUTHORITATIVE: the
+    // fallback rollup counts loaded children, which is `shown` again and would
+    // make this say nothing new.
+    const fetchable = roll.authoritative && roll.total - roll.done > 0;
+    const expandable = node.shown.length > 0 || fetchable;
     out.push({
       kind: "epic",
       id: epicNodeId(g.repo, node.key),
       node,
-      roll: epicRollup(node),
+      roll,
       expandable,
-      title: epicRowTitle(node, expandable),
+      title: epicRowTitle(node, expandable, roll),
+      load,
     });
     if (isEpicOpen(g.repo, node.key)) {
-      for (const t of node.shown) out.push({ kind: "ticket", id: t.key, t, child: true });
+      // Said only while there's nothing better to show. Once rows arrive they
+      // ARE the answer, and a failed fetch still leaves whatever the pull
+      // loaded on screen rather than replacing working rows with an error —
+      // DRY-55's rule about which of the two bugs is worse, one level down.
+      // Only while there is nothing else to say. A forced re-pull keeps the rows
+      // it already had (see `loadChildren`), and announcing a fetch over a list
+      // that is still on screen and still right is noise on a 20s surface.
+      if (load?.loading && !load.rows) {
+        out.push({
+          kind: "note",
+          id: `${node.key}:loading`,
+          text: `loading ${node.key}'s tickets…`,
+        });
+      } else if (load?.error) {
+        out.push({
+          kind: "note",
+          id: `${node.key}:error`,
+          text: `couldn't load ${node.key}'s tickets — retry`,
+          bad: true,
+          detail: load.error,
+          retry: node.key,
+        });
+      }
+      for (const t of epicChildren(node)) out.push({ kind: "ticket", id: t.key, t, child: true });
     }
   }
   for (const t of g.loose) out.push({ kind: "ticket", id: t.key, t, child: false });
@@ -261,6 +461,10 @@ function isEpicOpen(repo: string, key: string): boolean {
 function toggleEpic(repo: string, key: string): void {
   const id = epicNodeId(repo, key);
   epicExpanded[id] = !epicExpanded[id];
+  // The one place the on-demand fetch is triggered (DRY-83) — an explicit
+  // expand, never the render path. See `loadChildren` for why that distinction
+  // is load-bearing rather than tidiness.
+  if (epicExpanded[id]) loadChildren(key);
 }
 /**
  * Clicking an epic row expands or collapses it (DRY-75). Sessions are opened
@@ -293,15 +497,21 @@ function onEpicRow(repo: string, key: string, expandable: boolean): void {
  * until the pointer leaves. The chevron's rotation and the rows appearing say
  * which way it is; this only has to say what the gesture does.
  */
-function epicRowTitle(node: EpicNode, expandable: boolean): string {
+function epicRowTitle(node: EpicNode, expandable: boolean, roll: Rollup): string {
   // Restores what the old row tooltip said about a ghost. The `not pulled`
   // chip carries the full explanation, but that's a much smaller target than
   // the row, and losing the hint entirely was a regression.
   const unpulled = node.ticket ? "" : " — not in this pull";
-  // Not "no children in this pull": `childStats` counts children the pull
-  // deliberately excludes, so an epic can read "40/40 done" two lines below a
-  // tooltip flatly denying it has any.
-  if (!expandable) return `${node.key} — no children to expand here${unpulled}`;
+  // Since DRY-83 the inert case is much narrower, and the two reasons left are
+  // worth telling apart. An epic every one of whose children is closed is not
+  // an epic with nothing in it, and the rollup two lines below says "40/40 done"
+  // either way — a tooltip flatly denying it has children reads as a bug.
+  if (!expandable) {
+    if (roll.authoritative && roll.total > 0) {
+      return `${node.key} — nothing open to expand; all ${roll.total} children are done${unpulled}`;
+    }
+    return `${node.key} — no children to expand here${unpulled}`;
+  }
   // A filter force-opens every epic, so a click here records what you want but
   // moves nothing until the filter clears — same as the repo group above it.
   // Worth saying, because otherwise the row reads as broken.
@@ -341,7 +551,7 @@ function clearFilters(): void {
         :class="{ spinning: refreshing }"
         title="Refresh tickets"
         :disabled="refreshing"
-        @click="emit('refresh')"
+        @click="onRefresh"
       >
         <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
           <path d="M13.5 8a5.5 5.5 0 1 1-1.6-3.9" />
@@ -529,6 +739,22 @@ function clearFilters(): void {
                 <svg width="11" height="11" viewBox="0 0 12 12" fill="currentColor"><path d="M3 2l6 4-6 4z" /></svg>
               </button>
               <span v-else class="epic-play blank"></span>
+            </div>
+
+            <!-- What the on-demand child fetch is doing (DRY-83). Its own row
+                 variant rather than markup wedged between the two below, because
+                 the ticket row's `v-else` chains to the epic row's `v-if` and
+                 anything with a `v-if` in between silently re-parents it — the
+                 ticket branch then renders for epic rows, off an undefined
+                 `row.t`. -->
+            <div
+              v-else-if="row.kind === 'note'"
+              class="child-note"
+              :class="{ bad: row.bad }"
+              :title="row.detail"
+              @click="row.retry && loadChildren(row.retry)"
+            >
+              {{ row.text }}
             </div>
 
             <!-- ticket row: an epic's child, or a ticket that hangs off none -->
@@ -1138,6 +1364,23 @@ function clearFilters(): void {
   padding-left: 11px;
   border-left: 1px solid #1e262e;
   border-radius: 0 8px 8px 0;
+}
+/* The on-demand child fetch talking about itself (DRY-83). Sits in the child
+   lane so it reads as belonging to the epic above it, and stays quieter than a
+   ticket row — it is scaffolding, not work. */
+.child-note {
+  margin-left: 13px;
+  padding: 5px 11px;
+  border-left: 1px solid #1e262e;
+  font-size: 10.5px;
+  color: #6b7682;
+}
+.child-note.bad {
+  color: #b98a80;
+  cursor: pointer;
+}
+.child-note.bad:hover {
+  color: #d57a6e;
 }
 .parent-chip {
   font-family: "JetBrains Mono", monospace;

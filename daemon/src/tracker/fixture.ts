@@ -98,6 +98,19 @@ export class FixtureProvider implements TrackerProvider {
   }
 
   async listTickets(q: TicketQuery): Promise<Ticket[]> {
+    // One ticket's children (DRY-83), before everything below — the same
+    // ordering the live providers use, and for the same reasons: the epic
+    // exemption is about pulling headings into a backlog-less list, and the
+    // project scope can only wrongly hide a child of the epic that was asked
+    // for by name.
+    if (q.parent) {
+      const kids = FIXTURES.filter((f) => f.parent?.key === q.parent);
+      return kids
+        .filter((f) =>
+          q.open ? f.category !== "done" && (q.includeBacklog || f.category !== "backlog") : true,
+        )
+        .map(toTicket);
+    }
     // Epics are exempt from the backlog exclusion (DRY-13) — see the same rule
     // in the Switchyard and Jira providers.
     let out = FIXTURES.filter((f) =>

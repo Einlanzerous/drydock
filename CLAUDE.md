@@ -781,6 +781,57 @@ Both halves have harnesses (`scripts/verify/ticket-brief.mts`,
 `tracker-getticket.mts`, in-process and seconds), because the failure is silent
 by construction and curl can't see it. Neither replaces trap 3.
 
+## Expanding an epic to its children (DRY-83)
+
+The sidebar's pull excludes the backlog bucket (DRY-30) and exempts only the
+**epics** in it (DRY-13), not their children. So an epic whose work hasn't
+started arrives as a heading with nothing under it: the row went inert, tooltip
+"no children to expand here", and the only way to reach the work was the backlog
+toggle — which changes the pull for the whole sidebar, ~29 tickets to 250+, to
+see inside one epic.
+
+Expanding now issues its own query: `TicketQuery.parent` (a ticket KEY),
+`/api/tracker/tickets?parent=KEY`, fetched once per epic on an explicit expand.
+
+1. **The trigger is `toggleEpic`, never the render path.** A filter force-opens
+   every epic (`isEpicOpen`), so a fetch driven off "is it open" fires one
+   request per epic on every keystroke in the search box — DRY-72's per-poll
+   fan-out, back one gesture at a time. `openEpicKeys` reads the same map for
+   the same reason.
+2. **Ask for OPEN children, not all of them.** It keeps the query bounded by
+   live work rather than by years of closed tickets — the thing that makes the
+   child-stats query cappable — and makes the row count equal the rollup's
+   non-done segments, so the bar and the list can be checked against each other.
+3. **Expandability comes from `childStats`, and only when authoritative.** The
+   fallback rollup counts loaded children, which is `shown` again, so deriving
+   it from that says nothing new. `total - done > 0` is the test; an epic whose
+   children are all done is a different sentence and says so.
+4. **A forced re-pull must KEEP the rows it has.** Refresh forces past the cache
+   (DRY-72 trap 3 — otherwise the one button somebody presses when they've
+   stopped trusting the screen is answered from the memory that made it stale),
+   and a forced pull waits. The fallback while it's in flight is the pull's own
+   children, which for this epic is the empty set that made it inert — so
+   dropping first empties the epic for a round trip and fills it again. Both
+   halves were found by the harness, not by reading.
+5. **The daemon must not project-scope a parent query, or fan it out per
+   project.** Switchyard's `listTickets` fans out one call per key in scope, so
+   a parent query that reached it would issue the same query N times and
+   concatenate the same rows; and scoping can only wrongly hide a child that
+   lives in another project. Handled before both.
+6. **Switchyard costs an extra hop.** Its list filter is `parent_id`, a UUID,
+   and the shell only ever has keys, so the provider resolves one first. Jira
+   takes the key in JQL directly — and `parent` is unsupported on older DC,
+   where `attachChildStats` swallows it; here it must NOT, or the expansion
+   presents as an epic that opens onto nothing.
+7. The row's filter applies to fetched children too. They never passed through
+   `filtered`, because they were never in `props.tickets`.
+
+Harness: `scripts/verify/epic-children.mjs`, rig in its README — it needs
+`STUB_DORMANT_EPIC=1`, which is off by default because every epic in the stub
+costs another child-stats request and `tracker-cache.mjs` asserts on those
+counts exactly. Confirm it discriminates: against the unpatched shell it fails 5
+of 15, including the row's real tooltip.
+
 ## Verifying the tracker sidebar (DRY-55)
 
 The quietest failure the desk has. `/api/tracker/tickets` 502s when the daemon

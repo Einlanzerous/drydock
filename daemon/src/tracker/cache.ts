@@ -360,6 +360,7 @@ export function ticketQueryKey(q: TicketQuery): string {
     projects: [...(q.projects ?? [])].sort(),
     open: !!q.open,
     includeBacklog: !!q.includeBacklog,
+    parent: q.parent ?? "",
     text: q.text ?? "",
     limit: q.limit ?? 0,
   };
