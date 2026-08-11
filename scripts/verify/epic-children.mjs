@@ -173,6 +173,13 @@ async function main() {
   check("no error note under it", !s.notes.some((n) => /couldn't load/.test(n)), s.notes.join(" | "));
 
   // ---- (c) it did not widen the pull to do it ------------------------------
+  //
+  // The backlog toggle is the assertion, NOT the header count. The count reads
+  // the augmented set, so expanding moves it on purpose — two more tickets are
+  // genuinely loaded, and a header that ignored them would contradict the rows
+  // under it. What must not move is the control that changes what the daemon
+  // pulls, since reaching these children through THAT is the thing DRY-83 exists
+  // to avoid: on a real tracker it takes the sidebar from ~29 tickets to 250+.
   console.log("\n(c) the pull itself is untouched");
   check(
     "the backlog toggle is still off",
@@ -180,33 +187,92 @@ async function main() {
     `before=${backlogBefore} after=${s.backlogOn}`,
   );
   check(
-    "the header count did not move",
-    s.count === countBefore,
-    `before=${countBefore} after=${s.count}`,
+    "the header count grew by exactly the children revealed",
+    Number(s.count) === Number(countBefore) + OPEN_KIDS.length,
+    `before=${countBefore} after=${s.count} (+${OPEN_KIDS.length} expected)`,
   );
 
-  // ---- (d) a filter must not fan out --------------------------------------
-  // Measured UPSTREAM. The daemon caches this key, so a per-epic fetch storm is
-  // invisible from the route — which is the same reason DRY-72's harness uses a
-  // counting origin instead of proxy-tracker.mjs.
-  console.log("\n(d) typing in the filter box does not fan out");
+  // ---- (d) the filter and the fetched rows agree --------------------------
+  //
+  // The first version of this section typed a term matching only the fetched
+  // children, which made it VACUOUS in the worst way: `groups` is built from the
+  // filtered list, so that term emptied the sidebar of epic rows entirely — and
+  // an implementation cannot fan out from rows that aren't rendered. It passed
+  // against a fan-out and against a bug that deleted the very rows it typed.
+  //
+  // So the two claims are separated, and the fan-out one now uses a term that
+  // keeps every epic row on screen (a filter force-opens all of them, which is
+  // precisely the state a render-path fetch would storm in).
+  console.log("\n(d) filtering keeps the fetched rows, and does not fan out");
   await stubReset();
   const before = await stubState();
-  await page.fill(".sidebar .searchbox input", "dormant");
+  await page.fill(".sidebar .searchbox input", "DRY-");
   await sleep(1200);
-  const after = await stubState();
+  let after = await stubState();
   check(
-    "no extra child lookups while filtering",
-    after.lookup === before.lookup,
-    `lookup ${before.lookup} -> ${after.lookup}`,
+    "every epic row is force-open and none of them fetched",
+    after.lookup === before.lookup && after.children === before.children,
+    `lookup ${before.lookup}->${after.lookup}, children ${before.children}->${after.children}`,
+  );
+  s = await snap(page);
+  check(
+    "the filter did not render an empty sidebar",
+    s.rows.length > 0,
+    `rows=${s.rows.length}`,
+  );
+
+  // A term that matches ONLY a fetched child. The rows came from outside
+  // `props.tickets`, so anything that filters or groups off the pull alone drops
+  // the epic node — and takes the child that matched with it.
+  await page.fill(".sidebar .searchbox input", "Dormant child one");
+  await sleep(600);
+  s = await snap(page);
+  check(
+    "a term matching only a fetched child keeps it on screen",
+    keysOf(s).includes(OPEN_KIDS[0]),
+    `rows: ${keysOf(s).map((k) => k ?? "?").join(", ") || "none"}`,
   );
   check(
-    "no extra child queries while filtering",
-    after.children === before.children,
-    `children ${before.children} -> ${after.children}`,
+    "and keeps the epic heading it",
+    s.epic !== null,
+    s.epic === null ? `${EPIC} row gone` : "",
+  );
+  check(
+    "and the header counts it rather than contradicting the row",
+    s.count !== null && !/^0/.test(s.count),
+    `count=${s.count}`,
   );
   await page.fill(".sidebar .searchbox input", "");
-  await sleep(300);
+  await sleep(400);
+
+  // ---- (d2) a re-expand costs nothing when the pull already has them -------
+  //
+  // The epic DRY-1's open children are all in the list, so its rollup and its
+  // loaded children already agree: there is nothing to go and get, and firing a
+  // request anyway is one tracker query per epic per click that can only return
+  // rows the sidebar is already drawing.
+  console.log("\n(d2) an epic the pull already covers issues no query");
+  await stubReset();
+  const other = process.env.COVERED_EPIC ?? "DRY-1";
+  await page.click(`.sidebar .row.epic:has(.key:text-is("${other}"))`);
+  await sleep(900);
+  after = await stubState();
+  check(
+    `${other} expanded without a lookup`,
+    after.lookup === 0,
+    `lookup=${after.lookup}`,
+  );
+  // Named, not counted. `.row.child` is every nested row on the desk, so a bare
+  // count is satisfied by the OTHER epic's children, which are still expanded.
+  const covered = process.env.COVERED_KID ?? "DRY-2";
+  s = await snap(page);
+  check(
+    `and still showed ${covered} under it`,
+    childrenOf(s).includes(covered),
+    `children: ${childrenOf(s).join(", ")}`,
+  );
+  await page.click(`.sidebar .row.epic:has(.key:text-is("${other}"))`);
+  await sleep(200);
 
   // ---- (e) Refresh reaches the expanded epic ------------------------------
   console.log("\n(e) Refresh re-pulls what is open");

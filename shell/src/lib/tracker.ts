@@ -248,18 +248,27 @@ export async function listEpicChildren(
    * read, or opening an epic would cost a tracker round trip every time.
    */
   force = false,
-): Promise<Ticket[]> {
+): Promise<TicketPull> {
   const params = new URLSearchParams({
     parent: key,
     open: "true",
     backlog: "true",
   });
   if (force) params.set("fresh", "true");
-  const body = await getJson<{ tickets?: Ticket[] }>(
+  const body = await getJson<{ tickets?: Ticket[]; stale?: TicketPull["stale"] }>(
     `${DAEMON_HTTP}/api/tracker/tickets?${params}`,
     { signal: AbortSignal.timeout(LIST_TIMEOUT_MS) },
   );
-  return expectList(body.tickets, "tickets");
+  // `stale` rides along here for exactly the reason it does on `listTickets`
+  // (DRY-72 trap 2): the daemon answers this route from its last-good cache, so
+  // a tracker outage arrives as a 200 with real-looking rows. Dropping the field
+  // would make an expansion during an outage — and, worse, a Refresh during one
+  // — indistinguishable from a healthy pull, which is DRY-55's silence in a
+  // surface that has no other way to report.
+  return {
+    tickets: expectList(body.tickets, "tickets"),
+    ...(body.stale ? { stale: body.stale } : {}),
+  };
 }
 
 export async function searchTickets(q: string, projects?: string[]): Promise<Ticket[]> {

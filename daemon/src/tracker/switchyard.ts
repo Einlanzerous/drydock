@@ -311,9 +311,28 @@ export class SwitchyardProvider implements TrackerProvider {
         ? OPEN_CATEGORIES_WITH_BACKLOG
         : OPEN_CATEGORIES
       : undefined;
-    // No project param: `parent_id` already names one ticket's children, and a
-    // child in another project is still that epic's child.
-    const { rows } = await this.fetchPages({ limit: q.limit }, status, undefined, epic.id);
+    // `q` is passed through whole, not rebuilt from `limit`. Rebuilding dropped
+    // `text` and `project`, which the Jira provider honours alongside its
+    // `parent` clause — so the same TicketQuery returned different sets
+    // depending on the tracker, and the cache kept two entries for what callers
+    // had every reason to think was one query. `fetchPages` reads only
+    // project/text/limit off it; `projects` is handled by the fan-out this
+    // method returns before, and is deliberately not applied — `parent_id`
+    // already names one ticket's children, and a child in another project is
+    // still that epic's child.
+    const { rows, truncated } = await this.fetchPages(q, status, undefined, epic.id);
+    // Not an error, and deliberately not treated as one — unlike the child-STATS
+    // path, which abandons a capped count because a partial total wearing an
+    // authoritative badge is a wrong number presented as a right one. A partial
+    // LIST is still a usable list, and reaching it needs more than MAX_TICKETS
+    // OPEN children under a single epic. Said out loud rather than silently
+    // truncated, because a sidebar cannot show you what it left out.
+    if (truncated) {
+      console.warn(
+        `[drydock] switchyard: ${q.parent} has more than ${MAX_TICKETS} open children; ` +
+          `the expanded list is truncated.`,
+      );
+    }
     return rows.map(toTicket);
   }
 

@@ -238,7 +238,7 @@ empty string counts as set.
 
 | harness | what it holds down |
 |---|---|
-| `epic-children.mjs` | An epic with no children in the pull can still be expanded, and expands to its OPEN children — not its closed ones, and not by widening the pull: the header count and the backlog toggle are asserted unmoved. A filter must not fan out one child query per epic per keystroke, measured on UPSTREAM counts because the daemon's cache hides it from the route. Refresh reaches the expanded epic (forced past that cache, or it re-reads the memory that made it stale) **and the rows never leave the screen while it does** — sampled across the refresh, since a check that reads once at the end lands after they are back. |
+| `epic-children.mjs` | An epic with no children in the pull can still be expanded, and expands to its OPEN children — not its closed ones, and not by touching the backlog toggle, which is the control that widens the pull. Fetched rows survive a filter that matches only them (they go through `groupTickets`, so anything filtering off the pull alone deletes them), and a filter must not fan out one child query per epic per keystroke — measured on UPSTREAM counts, because the daemon's cache hides it from the route. An epic the pull already covers issues no query at all. Refresh reaches the expanded epic (forced past that cache, or it re-reads the memory that made it stale) **and the rows never leave the screen while it does** — sampled across the refresh, since a check that reads once at the end lands after they are back. |
 
 `DRY-13` in the stub is a closed child, deliberately: expandability is derived
 from `childStats.total - done`, so an epic with a done child is what tells that
@@ -252,12 +252,19 @@ git show main:shell/src/components/TrackerSidebar.vue > shell/src/components/Tra
 git show main:shell/src/lib/tracker.ts > shell/src/lib/tracker.ts
 ```
 
-Expect **5 failures**, and expect the row's own tooltip to be one of them
-(`DRY-10 — no children to expand here`). Sections (c) and (d) pass either way on
-purpose: they are guards on things that must not change, not discriminators.
-Restore with `git checkout -- shell/` — note the redirect above writes the
-worktree without staging, unlike `git checkout <ref> -- path`, which stages the
-revert and will sweep it into the next commit.
+Expect **10 failures**, and expect the row's own tooltip to be one of them
+(`DRY-10 — no children to expand here`). The backlog-toggle check passes either
+way on purpose: it is a guard on something that must not change, not a
+discriminator. Restore with `git checkout -- shell/` — note the redirect above
+writes the worktree without staging, unlike `git checkout <ref> -- path`, which
+stages the revert and will sweep it into the next commit.
+
+**Section (d) was vacuous when first written, and it is worth knowing how.** It
+typed a term matching only the fetched children — which, before the fix, emptied
+the sidebar of epic rows entirely, because `groups` is built from the filtered
+list. Nothing can fan out from rows that are not rendered, so the check passed
+against a fan-out AND against the bug that deleted the rows it had just typed
+for. Any assertion on this surface has to keep epic rows on screen first.
 
 ## The tombstone's resume button (DRY-62)
 
