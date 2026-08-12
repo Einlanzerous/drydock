@@ -16,7 +16,9 @@ Nothing here runs in CI or on install. Three groups:
 - **The tracker sidebar (DRY-55)** —
   [its own section](#the-tracker-sidebar-dry-55), with its own rig. A browser,
   about a minute. Run it when touching the sidebar's empty/outage states or
-  `loadTickets` in `App.vue`.
+  `loadTickets` in `App.vue`. The scope row's backlog control has
+  [a harness of its own](#the-backlog-control-dry-85) on the same rig — run
+  both when touching which pulls a control is allowed to notice.
 - **The tracker cache (DRY-72)** —
   [its own section](#the-tracker-cache-dry-72), with its own rig again (a
   counting stub tracker, since the claims are about upstream requests that
@@ -113,6 +115,40 @@ couldn't ask" from "we asked and there are none".
 Why a second proxy rather than a mode on `proxy-http.mjs`: that one breaks the
 state store, and the two outages are independent conditions — sharing it would
 mean a path parameter on a harness three other scripts depend on.
+
+### The backlog control (DRY-85)
+
+Same rig — daemon, proxy and vite exactly as above — so run it beside
+`sidebar.mjs` rather than standing anything else up. Run from `daemon/`, which
+is where `tsx` is installed:
+
+```sh
+(cd daemon && node --import tsx ../scripts/verify/backlog-toggle.mts)
+```
+
+| harness | what it holds down |
+|---|---|
+| `backlog-toggle.mts` | The scope row's backlog control is a switch, and it does not dim on a pull nobody asked for. `refreshingTickets` was set by every pull, so the control disabled and greyed on the 20s poll's cadence — announcing a fetch nobody started and nothing was waiting on. Asserts the background poll leaves it (and the header's spinner) alone, that a scope change still locks it, that the lock clears, and that the switch is still a real `<input type=checkbox>` underneath. |
+
+Two things about it are deliberate and easy to undo.
+
+**It waits for the real 20s poll.** Synthesising a background pull — firing a
+visibility wake, say — exercises a different entry point into the same function
+and leaves the reported symptom unobserved. The ticket's claim is about *every*
+poll, so the poll is what it watches, and that is most of the run's ~45s.
+
+**It parks the pull rather than sampling.** Against the fixture tracker a pull
+settles in single-digit milliseconds, so "was the control disabled while it ran"
+is a race the harness loses: it samples after the window shut, prints a clean
+pass, and does so just as happily against the bug. `hang` gives that window a
+beginning and an end, and every "during a pull" check asserts `held > 0` from
+the proxy alongside, so a check cannot pass because nothing was in flight.
+
+Confirm it discriminates by pointing it at the unpatched shell (stash the two
+files and let vite reload) — it fails 5 of 19, including all three symptoms the
+ticket names. It reports them rather than throwing: the toggle is clicked by its
+**label**, which both builds have, because a harness that dies on a missing
+selector half way through is one you cannot read the discrimination off.
 
 ## The tracker cache (DRY-72)
 

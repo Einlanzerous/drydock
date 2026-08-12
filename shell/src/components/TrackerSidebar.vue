@@ -42,7 +42,26 @@ const props = defineProps<{
    */
   name: string;
   tickets: Ticket[];
+  /**
+   * A refresh the USER asked for is in flight — the header button or the
+   * outage panel's Retry (DRY-85).
+   *
+   * Deliberately not "a pull is in flight". This drives a spinner and two
+   * disables, and every one of those is a claim that somebody is waiting; the
+   * 20s background poll is not that. It used to be, so the header spun and the
+   * scope controls dimmed on a cadence, and since DRY-72 answers the poll from
+   * the daemon's cache it read as a blink rather than as a wait.
+   */
   refreshing?: boolean;
+  /**
+   * A pull the user's own SCOPE change started is in flight (DRY-85).
+   *
+   * Separate from `refreshing` because it guards a different thing: re-toggling
+   * scope mid-flight desyncs the control from the list, and `loadTickets`'
+   * epoch guard protects the list, not the control. A forced refresh doesn't
+   * change scope, so it has no business locking this — and a poll least of all.
+   */
+  scopeBusy?: boolean;
   /**
    * Why the last pull failed, or null while they're working (DRY-55). Read
    * together with `tickets`, because the two combinations are different
@@ -735,20 +754,36 @@ function clearFilters(): void {
           title="Add a project key to pull (↵)"
           @keydown.enter.prevent="addProject"
         />
-        <!-- Disabled while a pull is in flight: a mid-flight re-toggle races the
-             fetches and leaves the checkbox out of sync with the list. -->
+        <!-- A switch rather than a bare checkbox (DRY-85). It was the only
+             unstyled form control in the sidebar, and it is not a filter over
+             what is already loaded — it widens what the daemon PULLS, which on
+             a corporate tracker is the difference between ~29 tickets and 250+.
+             A switch reads as changing a setting; a checkbox reads as ticking a
+             filter, which is the distinction the title had to spell out in
+             words. The title now names the cost instead.
+
+             The native input is still the control — kept in the accessibility
+             tree and merely made invisible, so role, focus and keyboard
+             behaviour stay the browser's. `display:none` would take all three
+             away; the track and thumb are decoration painted over it.
+
+             Locked by `scopeBusy` alone. Re-toggling mid-flight genuinely does
+             desync the control from the list — `loadTickets`' epoch guard
+             protects the list, not this — but that is a hazard of a scope
+             change, not of the 20s background poll it used to dim on. -->
         <label
           class="backlog"
-          :class="{ busy: refreshing }"
-          title="Also pull backlog-status tickets from the tracker"
+          :class="{ on: showBacklog, busy: scopeBusy }"
+          title="Also pull backlog-status tickets — widens what the daemon fetches, not a view filter"
         >
           <input
             type="checkbox"
             :checked="showBacklog"
-            :disabled="refreshing"
+            :disabled="scopeBusy"
             @change="emit('toggle-backlog', ($event.target as HTMLInputElement).checked)"
           />
-          backlog
+          <span class="sw" aria-hidden="true"><i></i></span>
+          <span class="txt">backlog</span>
         </label>
       </div>
     </div>
@@ -1135,26 +1170,75 @@ function clearFilters(): void {
   border-color: #3d6fa6;
 }
 .backlog {
+  position: relative;
   margin-left: auto;
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   font-size: 10px;
   color: #6b7682;
   cursor: pointer;
   user-select: none;
 }
+/* Hidden, not removed. The input still carries the role, the checked state and
+   the keyboard behaviour — `display:none` or `visibility:hidden` would drop it
+   out of the accessibility tree and off the tab order, leaving a switch only a
+   mouse can reach. Clipped to a pixel inside the (positioned) label instead. */
 .backlog input {
-  accent-color: #3d6fa6;
-  width: 11px;
-  height: 11px;
-  cursor: pointer;
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
+.backlog .sw {
+  position: relative;
+  flex: none;
+  width: 20px;
+  height: 11px;
+  border-radius: 6px;
+  background: #0b0e12;
+  border: 1px solid #20272f;
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+.backlog .sw i {
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #4f5965;
+  transition:
+    transform 0.12s ease,
+    background 0.12s ease;
+}
+.backlog.on .sw {
+  background: #16314a;
+  border-color: #2a557d;
+}
+.backlog.on .sw i {
+  background: #5b9bd5;
+  transform: translateX(9px);
+}
+.backlog.on .txt {
+  color: #aecbe8;
+}
+/* The ring the hidden input can no longer draw for itself. */
+.backlog input:focus-visible + .sw {
+  outline: 1px solid #3d6fa6;
+  outline-offset: 1px;
+}
+/* Only ever raised by a scope change now, so this is a real wait rather than
+   the 20s poll's blink (DRY-85). */
 .backlog.busy {
   opacity: 0.45;
-  cursor: default;
-}
-.backlog.busy input {
   cursor: default;
 }
 
