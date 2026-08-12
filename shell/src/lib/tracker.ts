@@ -213,6 +213,64 @@ export async function listTickets(
   };
 }
 
+/**
+ * Every non-closed child of one ticket (DRY-83) — what expanding an epic in the
+ * sidebar renders.
+ *
+ * Not a filter over the loaded set, which is what every other control in the
+ * sidebar is. The pull excludes the backlog bucket (DRY-30) and only exempts the
+ * EPICS in it, not their children, so an epic whose work hasn't started arrives
+ * with no children at all and the row had nothing to expand — at exactly the
+ * moment somebody wants to look inside it. The escape hatch until now was the
+ * backlog toggle, which changes the pull for the whole sidebar: ~29 tickets to
+ * 250+ on a real tracker, to reach two epics.
+ *
+ * `backlog: true` is therefore the point of the call, not a variation on it.
+ * Asking for open children rather than all of them keeps the answer bounded by
+ * live work instead of by years of closed tickets — the thing that makes the
+ * child-STATS query cappable (DRY-72) — and makes the row count equal the
+ * rollup's non-done segments, so the two surfaces can be checked against each
+ * other instead of merely coexisting.
+ *
+ * Shares `LIST_TIMEOUT_MS` with the sidebar pull. The pairing that constant
+ * documents (shorter than the poll interval) is about a poll superseding itself
+ * and doesn't apply to a one-shot gesture, but the budget is the right size for
+ * the same reason it is there: same daemon, same provider, and a hung tracker
+ * must not leave the row spinning forever.
+ */
+export async function listEpicChildren(
+  key: string,
+  /**
+   * Overrule the daemon's cache, exactly as `listTickets` does and for the same
+   * reason (DRY-72 trap 3): this is Refresh reaching an epic somebody has open,
+   * and a Refresh answered from a cache is a button that spins and changes
+   * nothing. Set ONLY from there — an expansion joins the cache like any other
+   * read, or opening an epic would cost a tracker round trip every time.
+   */
+  force = false,
+): Promise<TicketPull> {
+  const params = new URLSearchParams({
+    parent: key,
+    open: "true",
+    backlog: "true",
+  });
+  if (force) params.set("fresh", "true");
+  const body = await getJson<{ tickets?: Ticket[]; stale?: TicketPull["stale"] }>(
+    `${DAEMON_HTTP}/api/tracker/tickets?${params}`,
+    { signal: AbortSignal.timeout(LIST_TIMEOUT_MS) },
+  );
+  // `stale` rides along here for exactly the reason it does on `listTickets`
+  // (DRY-72 trap 2): the daemon answers this route from its last-good cache, so
+  // a tracker outage arrives as a 200 with real-looking rows. Dropping the field
+  // would make an expansion during an outage — and, worse, a Refresh during one
+  // — indistinguishable from a healthy pull, which is DRY-55's silence in a
+  // surface that has no other way to report.
+  return {
+    tickets: expectList(body.tickets, "tickets"),
+    ...(body.stale ? { stale: body.stale } : {}),
+  };
+}
+
 export async function searchTickets(q: string, projects?: string[]): Promise<Ticket[]> {
   const params = new URLSearchParams({ q });
   if (projects?.length) params.set("projects", projects.join(","));

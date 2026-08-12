@@ -1082,12 +1082,23 @@ const server = http.createServer(async (req, res) => {
     };
 
     if (pathname === "/api/tracker/tickets" && req.method === "GET") {
+      // One ticket's children (DRY-83), for the sidebar expanding an epic. Same
+      // route rather than a new one: it wants the same cache, the same 502, and
+      // the same `stale` contract, and all three already live here.
+      const parent = url.searchParams.get("parent") ?? undefined;
       const query = {
         project: url.searchParams.get("project") ?? undefined,
-        projects: scopedProjects(),
+        // A parent query is NOT project-scoped. It already names one ticket's
+        // children, so scoping can only wrongly hide a child that lives in
+        // another project — and the bound the scope exists to provide (DRY-30)
+        // is already there: an epic's children are not a corporate tracker.
+        projects: parent ? undefined : scopedProjects(),
         open: url.searchParams.get("open") === "true",
-        // Backlog stays out of the pull unless asked for (DRY-30).
+        // Backlog stays out of the pull unless asked for (DRY-30). The sidebar
+        // DOES ask for it on a parent query — reaching an epic's not-yet-started
+        // children without pulling the whole backlog is the point of DRY-83.
         includeBacklog: url.searchParams.get("backlog") === "true",
+        parent,
         text: url.searchParams.get("text") ?? undefined,
       };
       try {

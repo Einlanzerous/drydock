@@ -27,6 +27,13 @@ Nothing here runs in CI or on install. Three groups:
   the browser to the daemon. There is also an
   [in-process suite](#the-caches-own-semantics-in-process) for the cache's
   ordering and timing, which needs neither daemon nor browser and takes a second.
+- **Expanding an epic (DRY-83)** —
+  [its own section](#expanding-an-epic-to-its-children-dry-83). Reuses DRY-72's
+  counting stub with `STUB_DORMANT_EPIC=1`. A browser, well under a minute. Run
+  it when touching the sidebar's epic rows, `listEpicChildren`, `TicketQuery.parent`,
+  or either provider's handling of it. **Run `tracker-cache.mjs` too** — the
+  stub is shared, and an epic added to it changes the child-stats counts that
+  harness pins exactly.
 - **The tombstone's resume button (DRY-62)** —
   [its own section](#the-tombstones-resume-button-dry-62). A browser and a
   throwaway Postgres, about a minute. Run it when touching
@@ -193,6 +200,71 @@ Expect **15 failures**, and expect the numbers to be the diagnosis: six pulls
 becoming `18 upstream requests`, one pull taking `7509ms against a 2500ms
 tracker`, and the hang case never answering at all (`0 after 30001ms` — the
 probe's own budget, which is why `pull()` carries one).
+
+## Expanding an epic to its children (DRY-83)
+
+Same counting stub as DRY-72, with a second epic switched on: `DRY-10`, whose
+children are all in the backlog bucket the sidebar's pull excludes. That is the
+shape the whole ticket is about — the epic arrives (providers exempt epics from
+the exclusion, DRY-13), the work under it does not, and before DRY-83 the row
+went inert with "no children to expand here".
+
+`STUB_DORMANT_EPIC=1` is **opt-in**, and must stay that way: every epic in the
+set costs one more child-stats request, and `tracker-cache.mjs` asserts
+`children <= 1` exactly.
+
+```sh
+npm i playwright --prefix scripts/verify     # ad-hoc; not a repo dependency
+
+STUB_PORT=4396 STUB_DORMANT_EPIC=1 node scripts/verify/stub-tracker.mjs &
+(cd daemon && DRYDOCK_PORT=4395 DRYDOCK_HOST=127.0.0.1 \
+   DRYDOCK_TRACKER=switchyard DRYDOCK_SWITCHYARD_URL=http://127.0.0.1:4396 \
+   DRYDOCK_TRACKER_PROJECTS=DRY \
+   DRYDOCK_TRACKER_CACHE_MS=4000 DRYDOCK_TRACKER_CHILD_STATS_CACHE_MS=60000 \
+   DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS=3000 \
+   DRYDOCK_DATABASE_URL= DRYDOCK_AUTH_PASSWORD= DRYDOCK_MULTI_USER= \
+   DRYDOCK_STATE_FILE=/tmp/dry83-state.json \
+   DRYDOCK_SESSIONS_DIR=/tmp/dry83-sessions node --import tsx src/index.ts &)
+(cd shell && VITE_DAEMON_URL=http://127.0.0.1:4395 bunx vite --port 5395 --strictPort &)
+
+node scripts/verify/epic-children.mjs
+```
+
+**Clear `DRYDOCK_DATABASE_URL` and `DRYDOCK_AUTH_PASSWORD` explicitly**, as
+above. `env.ts` walks up from cwd and a dev checkout's `.env` has both, so a
+throwaway daemon otherwise answers 401 to the whole harness and writes workspace
+rows into the database your real desk is using. Real env wins, and an exported
+empty string counts as set.
+
+| harness | what it holds down |
+|---|---|
+| `epic-children.mjs` | An epic with no children in the pull can still be expanded, and expands to its OPEN children — not its closed ones, and not by touching the backlog toggle, which is the control that widens the pull. Fetched rows survive a filter that matches only them (they go through `groupTickets`, so anything filtering off the pull alone deletes them), and a filter must not fan out one child query per epic per keystroke — measured on UPSTREAM counts, because the daemon's cache hides it from the route. An epic the pull already covers issues no query at all. Refresh reaches the expanded epic (forced past that cache, or it re-reads the memory that made it stale) **and the rows never leave the screen while it does** — sampled across the refresh, since a check that reads once at the end lands after they are back. |
+
+`DRY-13` in the stub is a closed child, deliberately: expandability is derived
+from `childStats.total - done`, so an epic with a done child is what tells that
+apart from a plain `total > 0`.
+
+To see it discriminate, restore just the shell half — the daemon route stays, so
+what's under test is the sidebar having no way to ask, which is the actual bug:
+
+```sh
+git show main:shell/src/components/TrackerSidebar.vue > shell/src/components/TrackerSidebar.vue
+git show main:shell/src/lib/tracker.ts > shell/src/lib/tracker.ts
+```
+
+Expect **10 failures**, and expect the row's own tooltip to be one of them
+(`DRY-10 — no children to expand here`). The backlog-toggle check passes either
+way on purpose: it is a guard on something that must not change, not a
+discriminator. Restore with `git checkout -- shell/` — note the redirect above
+writes the worktree without staging, unlike `git checkout <ref> -- path`, which
+stages the revert and will sweep it into the next commit.
+
+**Section (d) was vacuous when first written, and it is worth knowing how.** It
+typed a term matching only the fetched children — which, before the fix, emptied
+the sidebar of epic rows entirely, because `groups` is built from the filtered
+list. Nothing can fan out from rows that are not rendered, so the check passed
+against a fan-out AND against the bug that deleted the rows it had just typed
+for. Any assertion on this surface has to keep epic rows on screen first.
 
 ## The tombstone's resume button (DRY-62)
 
@@ -539,6 +611,7 @@ tiers** — the file store is what a fresh clone runs.
 | `surface.mjs` | DRY-28's surface claims (wipe localStorage → reload → desk intact; a fresh profile gets the same desk) plus how the notice presents: once, no focus steal, self-clearing, and a hidden tab still recovers. |
 | `timings.mjs` | Postgres only. Timings, not status codes: one request per window pays the timeout, the rest return in ms, the window widens 10 → 20 → 30 and stops, `/healthz` answers instantly while cooling and resets after a heal. |
 | `drift.sh` | Postgres only. An edited applied migration 503s naming the file while the live PTY keeps running; reverting clears it; a null checksum is adopted and backfilled. |
+| `epic-children.mjs` | DRY-83. An epic with nothing under it in the pull expands to its open children, without widening the pull, without fanning out under a filter, and without the rows blinking out when Refresh re-pulls them. |
 
 Each exits non-zero on failure and prints one line per check.
 
@@ -558,6 +631,12 @@ git checkout main -- shell/src/App.vue shell/src/components/TrackerSidebar.vue \
 node scripts/verify/sidebar.mjs     # expect failures across (a), (c), (e), (f), (g)
 git checkout HEAD -- shell/src/App.vue shell/src/components/TrackerSidebar.vue \
   shell/src/lib/tracker.ts
+
+# DRY-83: revert only the SHELL half, so what's under test is the sidebar
+# having no way to ask rather than the daemon having no way to answer.
+git checkout main -- shell/src/components/TrackerSidebar.vue shell/src/lib/tracker.ts
+node scripts/verify/epic-children.mjs   # expect 5, incl. the row's own tooltip
+git checkout HEAD -- shell/src/components/TrackerSidebar.vue shell/src/lib/tracker.ts
 ```
 
 `sweep.mjs` has no pre-DRY-60 file to check out — there was no sweep to break —

@@ -246,6 +246,15 @@ export class SwitchyardProvider implements TrackerProvider {
   }
 
   async listTickets(q: TicketQuery): Promise<Ticket[]> {
+    // Children of one ticket (DRY-83), handled before anything below it.
+    //
+    // BEFORE the project fan-out, because `parent_id` already identifies a
+    // single ticket's children: fanning out would issue the same query once per
+    // project key in scope and concatenate the same rows N times. And before the
+    // epic exemption, which exists to pull epic HEADINGS into a list that
+    // excludes the backlog — irrelevant to a query that is already one epic's
+    // children and asks for the backlog outright.
+    if (q.parent) return this.listChildren(q);
     // The API filters by a single `project` param, so a multi-project scope
     // (DRY-30) fans out one query per key and concatenates — projects are
     // disjoint, so no dedupe needed.
@@ -275,6 +284,56 @@ export class SwitchyardProvider implements TrackerProvider {
     const out = rows.map(toTicket);
     if (q.open) await this.attachChildStats(rows, out);
     return out;
+  }
+
+  /**
+   * One ticket's children (DRY-83), for the sidebar expanding an epic.
+   *
+   * Costs one extra round trip that the Jira provider doesn't pay: the list
+   * filter is `parent_id`, a UUID, and the shell only ever has keys — the id is
+   * deliberately not on the wire (see `SwitchyardTicket.id`). So resolve the key
+   * first. That single GET is the honest way round; the alternative is caching a
+   * key→id map off the last list pull, which ties this path to a call that may
+   * not have happened and empties on every daemon restart, to save a request on
+   * a user gesture.
+   *
+   * Status scope comes from the query rather than being fixed here, so the same
+   * method serves a caller that wants only open children (the sidebar) and one
+   * that wants everything.
+   */
+  private async listChildren(q: TicketQuery): Promise<Ticket[]> {
+    const epic: SwitchyardTicket = await this.req(`/v1/tickets/${encodeURIComponent(q.parent!)}`);
+    // A ticket with no id can't be asked about, and answering [] would render an
+    // epic that opens onto nothing — indistinguishable from one with no children.
+    if (!epic.id) throw new Error(`switchyard: no id for ${q.parent}`);
+    const status = q.open
+      ? q.includeBacklog
+        ? OPEN_CATEGORIES_WITH_BACKLOG
+        : OPEN_CATEGORIES
+      : undefined;
+    // `q` is passed through whole, not rebuilt from `limit`. Rebuilding dropped
+    // `text` and `project`, which the Jira provider honours alongside its
+    // `parent` clause — so the same TicketQuery returned different sets
+    // depending on the tracker, and the cache kept two entries for what callers
+    // had every reason to think was one query. `fetchPages` reads only
+    // project/text/limit off it; `projects` is handled by the fan-out this
+    // method returns before, and is deliberately not applied — `parent_id`
+    // already names one ticket's children, and a child in another project is
+    // still that epic's child.
+    const { rows, truncated } = await this.fetchPages(q, status, undefined, epic.id);
+    // Not an error, and deliberately not treated as one — unlike the child-STATS
+    // path, which abandons a capped count because a partial total wearing an
+    // authoritative badge is a wrong number presented as a right one. A partial
+    // LIST is still a usable list, and reaching it needs more than MAX_TICKETS
+    // OPEN children under a single epic. Said out loud rather than silently
+    // truncated, because a sidebar cannot show you what it left out.
+    if (truncated) {
+      console.warn(
+        `[drydock] switchyard: ${q.parent} has more than ${MAX_TICKETS} open children; ` +
+          `the expanded list is truncated.`,
+      );
+    }
+    return rows.map(toTicket);
   }
 
   /**

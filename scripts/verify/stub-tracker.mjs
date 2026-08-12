@@ -20,14 +20,21 @@
 //   POST /__heal                  back to normal, releases parked sockets
 //   POST /__latency?ms=N          every response delayed by N ms
 //   POST /__reset                 zero the counters (not the mode)
-//   GET  /__state                 {mode, latencyMs, list, epicList, children, total}
+//   GET  /__state                 {mode, latencyMs, list, epicList, children, lookup, total}
+//
+// STUB_DORMANT_EPIC=1 adds a second epic whose children are ALL in the backlog
+// bucket (DRY-83) — the shape the sidebar's pull renders as an epic with nothing
+// under it, and the one an on-demand child fetch exists for. OFF by default,
+// because every epic in the set costs one more child-stats request and
+// `tracker-cache.mjs` asserts on those counts exactly.
 import http from "node:http";
 
 const PORT = Number(process.env.STUB_PORT ?? 4386);
+const DORMANT_EPIC = process.env.STUB_DORMANT_EPIC === "1";
 
 let mode = "ok";
 let latencyMs = 0;
-const counts = { list: 0, epicList: 0, children: 0, total: 0 };
+const counts = { list: 0, epicList: 0, children: 0, lookup: 0, total: 0 };
 const held = new Set();
 // Requests the daemon has open right now. Reported but never reset: it's what
 // lets a harness wait for a BACKGROUND refresh to land before asserting on
@@ -81,6 +88,54 @@ const TICKETS = [
   },
 ];
 
+// The DRY-83 shape: an epic whose work has not started, so every child sits in
+// the backlog bucket the sidebar's pull excludes. The epic itself still arrives
+// (providers exempt epics from that exclusion, DRY-13), which is what makes this
+// the interesting case rather than a missing row — the heading is there, the
+// work under it is not, and until DRY-83 the only way to reach it was the
+// backlog toggle, i.e. pulling the entire backlog of every project in scope.
+//
+// One child is `closed` so `childStats` has a done segment: the row's
+// expandability is derived from total-minus-done, and an epic with a done child
+// is what tells that apart from a plain `total > 0`.
+const DORMANT = [
+  {
+    id: "e10",
+    key: "DRY-10",
+    title: "Epic whose work hasn't started",
+    type: "epic",
+    status: { category: "planning", display_name: "Planning" },
+  },
+  {
+    id: "t11",
+    key: "DRY-11",
+    title: "Dormant child one",
+    type: "task",
+    status: { category: "backlog", display_name: "Backlog" },
+    parent_id: "e10",
+    parent: { key: "DRY-10", title: "Epic whose work hasn't started" },
+  },
+  {
+    id: "t12",
+    key: "DRY-12",
+    title: "Dormant child two",
+    type: "task",
+    status: { category: "backlog", display_name: "Backlog" },
+    parent_id: "e10",
+    parent: { key: "DRY-10", title: "Epic whose work hasn't started" },
+  },
+  {
+    id: "t13",
+    key: "DRY-13",
+    title: "Dormant child already finished",
+    type: "task",
+    status: { category: "closed", display_name: "Done" },
+    parent_id: "e10",
+    parent: { key: "DRY-10", title: "Epic whose work hasn't started" },
+  },
+];
+if (DORMANT_EPIC) TICKETS.push(...DORMANT);
+
 const PROJECT = { key: "DRY", name: "Drydock", repo_url: null };
 const withProject = (t) => ({ ...t, project: PROJECT, labels: [] });
 
@@ -121,7 +176,14 @@ const server = http.createServer(async (req, res) => {
   // Counted apart because they answer different questions. `children` is the
   // unbounded half DRY-72 puts on a long TTL; a regression there shows up as
   // this climbing with every poll while `list` behaves.
-  if (parentId) counts.children++;
+  //
+  // `lookup` is DRY-83's extra hop: this API filters children by `parent_id`, a
+  // UUID, and the shell only ever has keys, so the provider resolves one before
+  // it can ask. Counted so a harness can prove that cost is per EXPANSION and
+  // not per poll.
+  const single = url.pathname.match(/^\/v1\/tickets\/(.+)$/);
+  if (single) counts.lookup++;
+  else if (parentId) counts.children++;
   else if (type === "epic") counts.epicList++;
   else counts.list++;
 
@@ -137,12 +199,25 @@ const server = http.createServer(async (req, res) => {
   if (mode === "502") return json(502, { error: "stub tracker is broken" });
 
   if (url.pathname === "/v1/projects") return json(200, { items: [PROJECT] });
+  // Single-ticket GET (DRY-83). Real Switchyard has always had this — the
+  // provider's `getTicket` uses it — but nothing in the DRY-72 rig touched it,
+  // so the stub didn't answer it and an epic expansion 404'd upstream.
+  if (single) {
+    const t = TICKETS.find((x) => x.key === decodeURIComponent(single[1]));
+    if (!t) return json(404, { error: "no such ticket" });
+    return json(200, withProject(t));
+  }
   if (url.pathname !== "/v1/tickets") return json(404, { error: "no such path" });
 
   const statuses = (url.searchParams.get("status") ?? "").split(",").filter(Boolean);
   const rows = TICKETS.filter((t) => {
-    if (parentId) return t.parent_id === parentId;
-    if (type && t.type !== type) return false;
+    // `status` applies to a children query too, and this used to return before
+    // reading it — so a caller asking for one epic's OPEN children got its
+    // closed ones as well. Harmless while the only caller was the child-stats
+    // count (which wants every status); wrong for DRY-83, which asks for the
+    // open ones and would have rendered a done ticket as work to pick up.
+    if (parentId && t.parent_id !== parentId) return false;
+    if (!parentId && type && t.type !== type) return false;
     if (statuses.length && !statuses.includes(t.status.category)) return false;
     return true;
   });

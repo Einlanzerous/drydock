@@ -294,6 +294,12 @@ export class JiraProvider implements TrackerProvider {
     const clauses: string[] = [];
     if (q.project) clauses.push(`project = ${jqlQuote(q.project)}`);
     if (q.projects?.length) clauses.push(`project in (${q.projects.map(jqlQuote).join(", ")})`);
+    // Children of one ticket (DRY-83). The same `parent` clause attachChildStats
+    // uses, which is unsupported JQL on older DC — there it swallows, because it
+    // decorates a sidebar that must still draw. Here it must NOT: this query IS
+    // the expansion, so a 400 has to reach the route and be reported rather than
+    // present as an epic that opens to nothing.
+    if (q.parent) clauses.push(`parent = ${jqlQuote(q.parent)}`);
     if (q.open) {
       // Backlog-excluded is the default (DRY-30): only the "In Progress"
       // statusCategory (key `indeterminate` — the middle bucket every workflow
@@ -426,7 +432,13 @@ export class JiraProvider implements TrackerProvider {
       out.push(...page.issues.map((i) => this.toTicket(i)));
       next = page.next;
     } while (paginate && next && out.length < MAX_TICKETS);
-    if (q.open) await this.attachChildStats(out);
+    // Not on a parent query (DRY-83). Those results are one epic's children, and
+    // nothing renders a rollup for a child row — but `parent` also matches a
+    // task's subtasks, and a Jira whose hierarchy nests epics would find one in
+    // there and pay a second `parent in (…)` search per expansion for a bar
+    // nobody draws. The Switchyard provider gets this for free: `listChildren`
+    // returns before the child-stats pass.
+    if (q.open && !q.parent) await this.attachChildStats(out);
     return out;
   }
 
