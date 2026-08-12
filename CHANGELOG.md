@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.2.0](https://github.com/Einlanzerous/drydock/compare/v1.1.0...v1.2.0) (2026-08-12)
+
+
+### Features
+
+* **shell:** expand an epic to its children, not to what the pull included (DRY-83) ([8b79ceb](https://github.com/Einlanzerous/drydock/commit/8b79cebeef39e19df705c929b17adf8fb39a0ed0))
+* **shell:** expand an epic to its children, not to what the pull included (DRY-83) ([849fe44](https://github.com/Einlanzerous/drydock/commit/849fe44072296e646124a0abff2157723909a5c1))
+
+
+### Bug Fixes
+
+* **shell:** route on-demand epic children through the grouping (DRY-83) ([f6ad1a2](https://github.com/Einlanzerous/drydock/commit/f6ad1a2aed155c9b5060f61d71e9473eda66d6d8))
+
 ## [1.1.0](https://github.com/Einlanzerous/drydock/compare/v1.0.0...v1.1.0) (2026-08-04)
 
 
