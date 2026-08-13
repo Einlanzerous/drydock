@@ -21,7 +21,10 @@ bun run shell      # dev shell   → :5320 (Vite)
   `node scripts/build-native.mjs` to do this. If PTY spawns crash after a
   dependency change, rebuild with that script — not `bun x node-gyp`.
 - Typecheck: `bun run --filter '@drydock/daemon' typecheck` (and the shell build
-  runs `vue-tsc`).
+  runs `vue-tsc`). `scripts/` is a **third** program with its own tsconfig —
+  `bun run typecheck:scripts` (DRY-80). It needs the DOM lib for the
+  `page.evaluate` bodies and pulls `SessionInfo` and friends out of `daemon/src`
+  through `scripts/verify/api.mts`, so it can't join either of the others.
 - `daemon/src/protocol.ts` is duplicated **verbatim** in
   `shell/src/lib/protocol.ts`. If you touch one, mirror the other.
 
@@ -604,7 +607,7 @@ role there is a construct-server change, deliberately out of scope (DRY-28/58).
      directory must leave the flag unset, or one bad permission strips Resume
      from every card on the desk. Test it by taking the directory away, not by
      reasoning about it.
-   - Harness: `scripts/verify/tombstone.mjs`, rig in its README. Assert the
+   - Harness: `scripts/verify/tombstone.mts`, rig in its README. Assert the
      label AND the args the click sends — they're computed in different files,
      and a card that says "Start again" while still passing `--resume` is the
      same bug in better copy.
@@ -633,7 +636,7 @@ curl -s -X POST localhost:4360/api/sessions -H 'Content-Type: application/json' 
 ```
 
 Five minutes is the right default and a terrible test — the same trap DRY-49's
-timeout has. Harness: `scripts/verify/sweep.mjs`, rig in its README, and it
+timeout has. Harness: `scripts/verify/sweep.mts`, rig in its README, and it
 refuses to run against a delay over 30s rather than pass by waiting.
 
 Note the two surfaces render the same countdown at different resolutions on
@@ -869,9 +872,9 @@ wearing an authoritative badge is a wrong number presented as a right one — a
 partial list is still a usable list, and reaching 2000 open children under one
 epic is not a shape worth threading a flag through the cache for.
 
-Harness: `scripts/verify/epic-children.mjs`, rig in its README — it needs
+Harness: `scripts/verify/epic-children.mts`, rig in its README — it needs
 `STUB_DORMANT_EPIC=1`, which is off by default because every epic in the stub
-costs another child-stats request and `tracker-cache.mjs` asserts on those
+costs another child-stats request and `tracker-cache.mts` asserts on those
 counts exactly. Confirm it discriminates: against the unpatched shell it fails
 10 of 21, including the row's real tooltip and the filter deleting the rows it
 matched. Note the anti-fan-out section shipped VACUOUS in review: it typed a
@@ -887,7 +890,7 @@ can't reach the tracker, `loadTickets` keeps the last-good list — right on a
 refresh — but on a FIRST load there is no last-good list, so the sidebar used
 to render its ordinary "No tickets match.", which is also exactly what a
 healthy tracker with nothing in scope says. Harness:
-`scripts/verify/sidebar.mjs`, rig in its README.
+`scripts/verify/sidebar.mts`, rig in its README.
 
 1. **The two halves are separate tests.** An outage that starts before the
    first pull and one that starts after a good pull are different paths through
@@ -920,8 +923,8 @@ tracker request carries a deadline, and the shell's poll backs off and skips a
 hidden tab. Knobs: `DRYDOCK_TRACKER_CACHE_MS`,
 `DRYDOCK_TRACKER_CHILD_STATS_CACHE_MS`, `DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS`.
 
-Harness: `scripts/verify/tracker-cache.mjs` + `stub-tracker.mjs`, rig in its
-README — and run `sidebar.mjs` beside it, because this moved who reports an
+Harness: `scripts/verify/tracker-cache.mts` + `stub-tracker.mts`, rig in its
+README — and run `sidebar.mts` beside it, because this moved who reports an
 outage. The traps:
 
 1. **A plain TTL cannot work here.** The shell polls on a fixed interval, so a
@@ -991,7 +994,7 @@ outage. The traps:
    since the cache that fetch is a memory read. It's that a poll keeps the
    daemon's entry live, so a tab left open overnight is a background refresh
    against a corporate Jira every 20 seconds until morning.
-10. **`proxy-tracker.mjs` structurally cannot test any of this.** It sits between
+10. **`proxy-tracker.mts` structurally cannot test any of this.** It sits between
    the browser and the daemon, so it never sees what the daemon does upstream —
    which is where every claim here lives. Hence a counting origin instead. And
    assert on request COUNTS and timings, never on the route's body: a 200 with
@@ -1143,14 +1146,26 @@ restart it to test things.
   When the tracker is reachable, attach the PR URL to its DRY ticket on open —
   the poller auto-closes the ticket on merge, so don't close it by hand.
 - **CI on a PR is a compile gate only** (DRY-52, `.github/workflows/pr-checks.yml`):
-  the daemon typecheck, the shell's `vue-tsc -b && vite build`, and a check that
-  the two `protocol.ts` copies haven't drifted. There are no automated tests, so
-  green means "it compiles" — everything above in this file is still verified by
-  hand. CI installs with `--ignore-scripts` (no node-pty native build) because
-  nothing there spawns a PTY. Both checks are **required** on `main` (ruleset
-  "main: compile gate"), with admin bypass — so a red PR is merged on purpose,
-  not by inattention. The workflow has no path filters on purpose: a required
-  check that never reports on a docs-only PR would leave it unmergeable.
+  the daemon typecheck, the shell's `vue-tsc -b && vite build`, the `scripts/`
+  typecheck (DRY-80), and a check that the two `protocol.ts` copies haven't
+  drifted. There are no automated tests, so green means "it compiles" —
+  everything above in this file is still verified by hand. CI installs with
+  `--ignore-scripts` (no node-pty native build, no Playwright browser download)
+  because nothing there spawns a PTY or opens a page. Both checks are
+  **required** on `main` (ruleset "main: compile gate"), with admin bypass — so
+  a red PR is merged on purpose, not by inattention. The workflow has no path
+  filters on purpose: a required check that never reports on a docs-only PR
+  would leave it unmergeable.
+- **Everything under `scripts/` is TypeScript** (DRY-80), with two recorded
+  exceptions: `build-native.mjs` is the postinstall and `node --import tsx` does
+  not resolve from the repo root (tsx is a daemon-workspace dependency), and
+  `scripts/verify/drift.sh` orchestrates `docker` and `psql`. Copy the shape of
+  the `.mts` neighbour with the same job. The one cost the conversion carries:
+  a Playwright `page.evaluate` body containing a **named** inner function has to
+  be a STRING, because tsx's esbuild transform wraps such functions in a
+  `__name(...)` helper that doesn't exist in the page — it fails as
+  `ReferenceError: __name is not defined` at a line that reads perfectly well.
+  Anonymous inline arrows are fine, which is what makes the rule look optional.
 - Comment style: explain *why* and the non-obvious constraint (see
   `daemon/src/tracker/jira.ts` for the house style); reference the DRY-NN
   ticket that introduced a behavior.
