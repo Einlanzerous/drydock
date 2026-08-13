@@ -5,19 +5,50 @@
 // as colour, because a 16px favicon at a glance is a silhouette — a recoloured
 // hull and a hull are the same icon to anyone not looking for the difference.
 //
-//   nothing     outline hull
-//   running     hull with a blue waterline
+//   nothing     the mark: a ship in a graving dock
+//   running     the mark, dock flooded to a waterline
 //   gate        solid disc with an exclamation   ← a different silhouette
 //   failed      solid disc with a cross          ← a different silhouette
-//   finished    filled hull (completion is not an interruption)
+//   finished    the mark in green (completion is not an interruption)
 //
 // The favicon is DRAWN, not fetched: a canvas data URL has no asset pipeline,
 // no extra request, and cannot 404 on a shell served from a container.
+//
+// THIS FILE IS THE FAVICON, not `shell/public/favicon.svg` (DRY-86). That file
+// is only what the tab shows for the moment before this module mounts and
+// overwrites the href, so a change made there alone is invisible in every
+// browser — which is how DRY-86 was chased for an evening across three
+// browsers and a private window. The two carry the same mark and have to be
+// changed together.
+//
+// Drawn at 32 rather than 48: a favicon is slotted into 16 device pixels, and
+// 48 makes that a 3:1 downsample — which is what erased the dock's 1-unit
+// walls and left the bare hull that got this reported as "a rowboat". At 32
+// the halving is exact, so the geometry below is the SVG's own 16-unit path
+// data with the context scaled x2, and every edge lands on an even pixel.
 import { computed, ref, watch } from "vue";
 
 export type AttentionState = "idle" | "running" | "gate" | "failed" | "finished";
 
 const BASE_TITLE = "Drydock";
+
+/** Drawn size. Twice the 16px tab slot, so the browser's halving is exact. */
+const SIZE = 32;
+
+// Copied VERBATIM from shell/public/favicon.svg. Same mark, same numbers: the
+// context is scaled x2 so these stay in that file's 16-unit coordinates and
+// the two can be compared without arithmetic.
+const DOCK_PATH = "M1 4h2v8h10V4h2v10H1Z";
+const HULL_PATH = "M4 8h8l-1 4H5Z";
+const HOUSE_PATH = "M6 6h3v2H6Z";
+const MAST_PATH = "M7 3h1v3H7Z";
+
+const PLATE = "#0e1116";
+const DOCK = "#5b7794";
+const SHIP = "#8fb8dd";
+const WATER = "#3f7fb8";
+const DONE_DOCK = "#3f6b55";
+const DONE_SHIP = "#5fb98a";
 
 let link: HTMLLinkElement | null = null;
 let alternate: ReturnType<typeof setInterval> | null = null;
@@ -33,67 +64,102 @@ function iconLink(): HTMLLinkElement {
   return link;
 }
 
-/** The hull from the Drydock mark, at favicon scale. */
-function drawHull(ctx: CanvasRenderingContext2D, fill: string | null, stroke: string): void {
-  ctx.lineWidth = 2.4;
-  ctx.strokeStyle = stroke;
+/**
+ * The plate. Every state sits on one, because a background-less icon cannot be
+ * legible on every tab strip: 3:1 against Chrome's inactive DARK tab (#35363a)
+ * needs relative luminance >= 0.214, against its inactive LIGHT tab (#dee1e6)
+ * <= 0.207. Empty interval — no flat palette satisfies both (DRY-86). On the
+ * plate the mark clears 4.06:1 (dock) and 9.07:1 (hull) everywhere.
+ */
+function drawPlate(ctx: CanvasRenderingContext2D): void {
   ctx.beginPath();
-  ctx.moveTo(5, 12);
-  ctx.lineTo(5, 20);
-  ctx.quadraticCurveTo(5, 25, 11, 25);
-  ctx.lineTo(38, 25);
-  ctx.lineTo(46, 16);
-  ctx.lineTo(46, 13);
-  ctx.lineTo(11, 13);
-  ctx.closePath();
-  if (fill) {
-    ctx.fillStyle = fill;
-    ctx.fill();
-  }
-  ctx.stroke();
-  // Mast, so the outline reads as a ship rather than a wedge.
-  ctx.beginPath();
-  ctx.moveTo(22, 13);
-  ctx.lineTo(22, 4);
-  ctx.stroke();
+  ctx.roundRect(0, 0, SIZE, SIZE, 6);
+  ctx.fillStyle = PLATE;
+  ctx.fill();
 }
 
-/** A filled disc carrying one glyph — deliberately NOT hull-shaped. */
-function drawDisc(ctx: CanvasRenderingContext2D, color: string, glyph: string): void {
+/**
+ * The Drydock mark: a ship in a graving dock. In 16-unit coordinates — the
+ * caller has already scaled the context.
+ *
+ * `water` is how far the basin is flooded, in units up from the dock floor. It
+ * is drawn UNDER the ship so the hull sits on it, and it is what distinguishes
+ * a run in progress from an idle desk by shape rather than by colour alone.
+ */
+function drawMark(
+  ctx: CanvasRenderingContext2D,
+  dock: string,
+  ship: string,
+  water = 0,
+): void {
+  ctx.fillStyle = dock;
+  ctx.fill(new Path2D(DOCK_PATH));
+  if (water > 0) {
+    ctx.fillStyle = WATER;
+    ctx.fillRect(3, 12 - water, 10, water);
+  }
+  ctx.fillStyle = ship;
+  ctx.fill(new Path2D(HULL_PATH));
+  ctx.fill(new Path2D(HOUSE_PATH));
+  ctx.fill(new Path2D(MAST_PATH));
+}
+
+/**
+ * A filled disc carrying one glyph — deliberately NOT mark-shaped, since these
+ * are the two states that want a person and have to differ at a glance.
+ *
+ * The glyphs are drawn as geometry rather than as text. `fillText` at this size
+ * depends on whatever `system-ui` resolves to, antialiases against a coloured
+ * disc, and lands differently on every OS; two rectangles and two strokes are
+ * the same everywhere and stay crisp at 16px, which is the whole lesson of
+ * DRY-86.
+ */
+function drawDisc(ctx: CanvasRenderingContext2D, color: string, glyph: "!" | "x"): void {
   ctx.beginPath();
-  ctx.arc(24, 24, 21, 0, Math.PI * 2);
+  ctx.arc(8, 8, 6.5, 0, Math.PI * 2);
   ctx.fillStyle = color;
   ctx.fill();
   ctx.fillStyle = "#12100b";
-  ctx.font = "bold 30px system-ui, sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(glyph, 24, 25);
+  if (glyph === "!") {
+    ctx.fillRect(7.5, 4, 1, 5);
+    ctx.fillRect(7.5, 10.5, 1, 1.5);
+  } else {
+    ctx.strokeStyle = "#12100b";
+    ctx.lineWidth = 1.5;
+    ctx.lineCap = "square";
+    ctx.beginPath();
+    ctx.moveTo(5.5, 5.5);
+    ctx.lineTo(10.5, 10.5);
+    ctx.moveTo(10.5, 5.5);
+    ctx.lineTo(5.5, 10.5);
+    ctx.stroke();
+  }
 }
 
 function faviconFor(state: AttentionState): string | null {
   const canvas = document.createElement("canvas");
-  canvas.width = 48;
-  canvas.height = 48;
+  canvas.width = SIZE;
+  canvas.height = SIZE;
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
+  drawPlate(ctx);
+  // Everything past here is in the mark's 16-unit space.
+  ctx.scale(SIZE / 16, SIZE / 16);
   switch (state) {
     case "gate":
       drawDisc(ctx, "#e0a33c", "!");
       break;
     case "failed":
-      drawDisc(ctx, "#d5695c", "✕");
+      drawDisc(ctx, "#d5695c", "x");
       break;
     case "finished":
-      drawHull(ctx, "#5fb98a", "#5fb98a");
+      drawMark(ctx, DONE_DOCK, DONE_SHIP);
       break;
     case "running":
-      drawHull(ctx, null, "#7aa6cc");
-      ctx.fillStyle = "#3f7fb8";
-      ctx.fillRect(4, 30, 40, 4);
+      drawMark(ctx, DOCK, SHIP, 3);
       break;
     default:
-      drawHull(ctx, null, "#5b7794");
+      drawMark(ctx, DOCK, SHIP);
   }
   return canvas.toDataURL("image/png");
 }

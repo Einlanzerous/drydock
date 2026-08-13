@@ -1,19 +1,53 @@
-<!-- The topbar/docs crane logo (48x34), centered on the app background in a
-     rounded square so it reads at tab size (DRY-44). -->
-<svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 48 48">
-  <rect width="48" height="48" rx="9" fill="#0e1116" />
-  <g transform="translate(0 7)">
-    <g stroke="#3f5468" stroke-width="1" fill="none" stroke-linecap="round">
-      <path d="M5 6 V20 H2 V28 H46 V20 H43 V6" />
-      <line x1="2" y1="28" x2="46" y2="28" />
-    </g>
-    <g fill="#5b7794">
-      <rect x="13" y="25" width="3" height="3" />
-      <rect x="22" y="25" width="3" height="3" />
-      <rect x="31" y="25" width="3" height="3" />
-    </g>
-    <path fill="#7aa6cc" d="M9 15 L9 21 Q9 25 13 25 L34 25 L41 18 L41 16 L13 16 Z" />
-    <path fill="#7aa6cc" d="M19 16 L19 9 L22 9 L22 16 Z M24 16 L24 11 L29 11 L29 16 Z" />
-    <line x1="20.5" y1="9" x2="20.5" y2="4" stroke="#7aa6cc" stroke-width="1" />
-  </g>
+<!-- The tab mark (DRY-86). Deliberately NOT the topbar logo scaled down, and
+     deliberately a FIXED palette on a plate. Both halves were found the hard
+     way; the second one shipped wrong in this file's first version.
+
+     1. THE GEOMETRY. That logo is drawn in a 48-unit box, so at 16px its
+     1-unit dock strokes land on a third of a device pixel and antialias away
+     to nothing. What survived was the hull fill alone — the mark lost the dock
+     it is named after and read as a rowboat. Scaling the source does not help:
+     a viewBox is a coordinate system, not a size, so doubling every number
+     doubles the strokes too and rasterizes to identical pixels (measured —
+     48-unit, 96-unit and width="512" all give the same sha256 at 16px). Hence
+     a separate drawing in a 16-unit box, every edge on a whole-pixel boundary,
+     nothing thinner than one unit. The mast is the same 1px hairline that
+     failed above; it works here only because the box is 16 and not 48.
+
+     2. THE PLATE IS LOAD-BEARING, and no media query can replace it. A
+     background-less icon must be legible against every tab strip it lands on,
+     and those contradict each other: 3:1 against Chrome's inactive DARK tab
+     (#35363a) needs relative luminance >= 0.214, while 3:1 against its
+     inactive LIGHT tab (#dee1e6) needs <= 0.207. No flat colour satisfies
+     both, so there is no palette that works unplated — arithmetic, not taste.
+     On the plate the shapes clear 4.06:1 (dock) and 9.07:1 (hull) on every
+     strip, because their background is now fixed. The first version dropped
+     the plate on the grounds that it showed as a dark chip on a light strip;
+     that is simply what an app icon looks like, and it cost the mark its only
+     guarantee of contrast.
+
+     3. NO prefers-color-scheme, because one engine cannot honour it.
+     FIREFOX RESOLVES prefers-color-scheme INSIDE AN SVG IMAGE TO LIGHT,
+     ALWAYS, independent of the actual scheme — measured against Firefox 153,
+     with the page itself correctly reporting dark. So the first version's
+     light-scheme override painted the dock #2f4152 on a dark Firefox tab
+     strip: near-black on near-black, the dock vanished, and the mark read as
+     the rowboat again by a completely different mechanism than the one this
+     ticket set out to fix. A fixed palette rasterizes identically in every
+     engine and scheme, which is the property worth having in a file that gets
+     no page CSS and cannot be inspected once it is in the tab.
+
+     Check any change at 16px against a real tab strip, ACTIVE AND INACTIVE,
+     in BOTH engines — an inactive tab is dimmed, and that is where a hairline
+     dies. None of this is visible at 48px, which is how it shipped. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16">
+  <rect width="16" height="16" rx="3" fill="#0e1116" />
+  <!-- The graving dock: two walls and a floor, inset one unit so the plate's
+       rounded corners never clip it. A step dimmer than the hull so the two
+       read apart at 16px instead of merging into one blob. -->
+  <path fill="#5b7794" d="M1 4h2v8h10V4h2v10H1Z" />
+  <!-- Hull, wide and flat. The width is what reads as a ship at this size; an
+       earlier draft was taller and squarer and came out as a bathtub. -->
+  <path fill="#8fb8dd" d="M4 8h8l-1 4H5Z" />
+  <path fill="#8fb8dd" d="M6 6h3v2H6Z" />
+  <path fill="#8fb8dd" d="M7 3h1v3H7Z" />
 </svg>
