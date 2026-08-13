@@ -728,6 +728,46 @@ The traps:
    the first sweep, and a bare `=== false` stays quiet on exactly the tier the
    notice exists for.
 
+## The terminal's clipboard keys (DRY-71)
+
+`Ctrl+Shift+C` copies, `Ctrl+Shift+V` pastes, and `Ctrl+C` is still SIGINT.
+One `attachCustomKeyEventHandler` in `TerminalPane.vue`, which is the only
+place a `Terminal` is constructed. Harness: `scripts/verify/clipboard.mts`,
+rig in its README — a browser, about 30 seconds.
+
+1. **`navigator.clipboard` is not available where this runs.** It needs a
+   secure context; prod is `http://<host>:5321` (docs/deploy.md). Anything
+   written against it works on a dev box at localhost and silently does nothing
+   in prod, which is the worst split available. Use clipboard EVENTS —
+   `document.execCommand("copy")` dispatches a real `copy` at the focused
+   helper textarea and xterm's own listener answers it with the selection.
+   The harness takes the API away from the page so this can't regress quietly.
+2. **A Linux dev box hides the case that matters.** xterm mirrors a MOUSE
+   selection into that textarea to feed X11's PRIMARY selection, guarded by
+   `Browser.isLinux` (`SelectionService.refresh`), so on Linux there is always
+   a DOM selection lying about and `queryCommandEnabled("copy")` is true for
+   reasons that have nothing to do with the terminal. On Windows there is none
+   and it is false. Test it by forcing `navigator.platform` to `Win32` before
+   the app loads — and assert the override TOOK (no DOM selection after a
+   double-click), or every check under it is vacuous. Measured on Chromium and
+   Firefox: the `copy` event fires either way, which is why the fix needs no
+   off-screen relay textarea to lean on.
+3. **Most of what the ticket described as broken already worked.** Measured
+   against xterm 5.5.0: `Ctrl+Shift+V` and `Shift+Insert` pasted, `Ctrl+Insert`
+   copied. xterm's ctrl branch requires `!ev.shiftKey` and the `ev.key &&
+   ctrlKey` fallback maps only `_` and `@`, so ctrl+shift+letter produces no
+   key and `_keyDown` returns before `cancel()` — the obvious fix of returning
+   `false` for those two is a **no-op that reads like the fix**. Only
+   `Ctrl+Shift+C` was ever broken, because no browser generates a `copy` event
+   for it. Don't add a handler for a key without first pressing it.
+4. **The handler runs for keyup and keypress too**, and `_keyUp` reads a
+   `false` as "don't refocus" — so a handler that answers every phase copies
+   three times and leaves the terminal blurred. Guard on `ev.type`.
+5. `Ctrl+V` stays SYN and `Ctrl+C` stays SIGINT on purpose, so the harness
+   asserts both POSITIVELY. Seeing the `^V` needs `stty lnext undef` in the
+   probe shell, or the line discipline's literal-next eats it and the check
+   passes against anything.
+
 ## Verifying the ticket brief (DRY-53)
 
 What a spawned agent is told about its ticket: `tracker/context.ts` turns a

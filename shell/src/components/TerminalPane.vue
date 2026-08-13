@@ -64,6 +64,75 @@ function registerMdLinks(t: Terminal): void {
   });
 }
 
+// DRY-71: the terminal's clipboard keys.
+//
+// Off macOS — where Cmd+C/Cmd+V fall through untouched, since xterm's ctrl
+// branch requires `!ev.metaKey` — the only copy keystroke a pane had was
+// Ctrl+Insert. Ctrl+Shift+C reached no handler at all: Chromium's
+// editing-command table has no entry for it (Ctrl+Insert is the Windows/Linux
+// copy accelerator), so no `copy` event was ever generated for the browser's
+// own listeners, xterm's included, to answer.
+//
+// Ctrl+C stays SIGINT and Ctrl+V stays SYN. Both are what a Linux terminal
+// does, and the interrupt in particular is worth more than a copy shortcut: on
+// a desk full of agents, a stale selection quietly turning an interrupt into a
+// copy is a bad trade for a selection that is easy to leave behind.
+//
+// `navigator.clipboard` is not the way out. It needs a secure context and is
+// simply absent on `http://<host>:5321`, which is how prod is served
+// (docs/deploy.md). A fix written against it works on a dev box at localhost
+// and silently does nothing where this actually runs.
+const COPY_KEY = { key: "c", code: "KeyC" };
+const PASTE_KEY = { key: "v", code: "KeyV" };
+
+/** Layout-tolerant: the letter you typed, or failing that the key you pressed. */
+function pressed(ev: KeyboardEvent, k: { key: string; code: string }): boolean {
+  return ev.key.toLowerCase() === k.key || ev.code === k.code;
+}
+
+function attachClipboardKeys(t: Terminal): void {
+  t.attachCustomKeyEventHandler((ev) => {
+    // keydown only. The handler also runs for keypress and keyup, and `_keyUp`
+    // reads a false as "don't refocus" — so answering every phase would copy
+    // three times over and leave the terminal blurred afterwards.
+    if (ev.type !== "keydown" || !ev.ctrlKey || !ev.shiftKey || ev.altKey || ev.metaKey) {
+      return true;
+    }
+    if (pressed(ev, COPY_KEY)) {
+      // Claimed whether or not anything is selected: while the keyboard is in a
+      // terminal this key means copy, and passing it on for an empty selection
+      // would hand a gesture aimed at the pane to the browser, where it is
+      // Chrome's inspect-element accelerator.
+      ev.preventDefault();
+      // `execCommand` dispatches a real `copy` event at the focused element —
+      // xterm's helper textarea — and xterm's own listener answers it by
+      // putting the selection in `clipboardData`. That is the whole mechanism,
+      // and it is deliberately the same listener the right-click menu's Copy
+      // reaches, so the two gestures cannot drift apart.
+      //
+      // It survives having no DOM selection to copy, which is the case that
+      // matters and the one a Linux dev box hides: xterm mirrors a MOUSE
+      // selection into that textarea for X11's PRIMARY selection, guarded by
+      // `Browser.isLinux`, so on Linux a real selection is always lying about
+      // and on Windows there is none. Measured on Chromium and Firefox with
+      // `navigator.platform` forced to Win32 — `queryCommandEnabled("copy")`
+      // goes false, the event fires anyway. `scripts/verify/clipboard.mts`
+      // pins it, since a copy that quietly stopped working on half the
+      // platforms in this ticket's title would look identical here.
+      if (t.hasSelection()) document.execCommand("copy");
+      return false;
+    }
+    // Insurance, not the fix: Ctrl+Shift+V already reaches the browser in xterm
+    // 5.5.0, because the ctrl branch of its keymap requires `!shiftKey` and the
+    // `ev.key && ctrlKey` fallback maps only `_` and `@` — so no key is
+    // produced and `_keyDown` returns before `cancel()`. Stated here so an
+    // xterm bump that starts claiming ctrl+shift+letter can't quietly take
+    // paste away again, which is exactly how Ctrl+V behaves today.
+    if (pressed(ev, PASTE_KEY)) return false;
+    return true;
+  });
+}
+
 const termEl = ref<HTMLDivElement | null>(null);
 const term = shallowRef<Terminal | null>(null);
 const fit = shallowRef<FitAddon | null>(null);
@@ -285,6 +354,9 @@ onMounted(async () => {
     if (!props.readOnly) sendWs({ type: "input", data });
   });
   registerMdLinks(t);
+  // Copy stays available to a spectator (DRY-27): reading somebody else's run
+  // is the whole point of a public one. A paste is dropped by the guard above.
+  attachClipboardKeys(t);
   term.value = t;
   fit.value = f;
 

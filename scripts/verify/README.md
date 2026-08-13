@@ -56,6 +56,12 @@ Nothing here runs in CI or on install. Three groups:
   minute; no daemon config beyond a spare port. Run it when touching
   `GatePanel.vue`, or the rail's `measureGateRoom` / anything that changes the
   panel's width, height or anchoring.
+- **The terminal's clipboard keys (DRY-71)** —
+  [its own section](#the-terminals-clipboard-keys-dry-71). A browser, about
+  30 seconds; no daemon config beyond a spare port. Run it when touching
+  `attachClipboardKeys` in `TerminalPane.vue`, anything else that reaches
+  `attachCustomKeyEventHandler`, or an xterm bump — the keymap this depends on
+  is xterm's, and it is what decides whether paste reaches the browser at all.
 
 ## The ticket brief (DRY-53)
 
@@ -591,6 +597,71 @@ Same technique for the vertical half, which `main` also can't discriminate for
 the same reason: drop `overflow: hidden auto` and the sticky positioning from
 `.actions`, and the four-edge check reports the row spilling 9-85px past the
 panel's bottom at the short viewports.
+
+## The terminal's clipboard keys (DRY-71)
+
+Self-contained: a throwaway daemon, a vite, and a browser. No tracker, no
+database, no `claude` — the panes are `/bin/sh`. About 30 seconds.
+
+```sh
+npm i playwright --prefix scripts/verify     # ad-hoc; not a repo dependency
+mkdir -p /tmp/dry71-alpha /tmp/dry71-bravo /tmp/dry71-interrupt /tmp/dry71-notlinux
+
+(cd daemon && DRYDOCK_PORT=4371 DRYDOCK_HOST=127.0.0.1 DRYDOCK_SESSIONS_DIR=/tmp/dry71 \
+   DRYDOCK_STATE_FILE=/tmp/dry71-state.json DRYDOCK_TRACKER=fixture \
+   node --import tsx src/index.ts &)
+(cd shell && VITE_DAEMON_URL=http://127.0.0.1:4371 bunx vite --port 5371 --strictPort &)
+
+(cd daemon && node --import tsx ../scripts/verify/clipboard.mts)
+```
+
+The four `/tmp` directories are how panes are told apart: a window's title comes
+from its COMMAND, so three `/bin/sh` panes are identical in the bar, and the
+`~/<cwd>` chip beside it is the only thing about a spawn the desk renders that
+the caller picks.
+
+| harness | what it holds down |
+|---|---|
+| `clipboard.mts` | Copy and paste from the keyboard, in both directions and between two panes, plus the two keys that must NOT change: `Ctrl+C` still raises SIGINT and `Ctrl+V` still sends SYN. Also that the shell never reaches for `navigator.clipboard`, which is absent on the plain-HTTP origin prod is served from. |
+
+Four things about it are deliberate.
+
+**It presses the keys for real and asserts on the PTY's echo.** Dispatching a
+`paste` ClipboardEvent from the harness proves xterm's listener works, which was
+never in doubt — the bug is that the listener is *unreachable*. `page.keyboard`
+goes through Chromium's input pipeline and therefore through its
+editing-command table, which is the half under test, and characters appearing in
+`.xterm-rows` are something only a real paste could have put there.
+
+**The panes run `stty lnext undef`.** Without it a `^V` reaching the tty is
+swallowed by the line discipline's literal-next and echoes nothing — so the SYN
+this ticket is named for is invisible at the only surface the harness can see,
+and the check that it is *deliberately still there* would pass against anything.
+
+**It takes `navigator.clipboard` away from the page** (`addInitScript` stashes
+the real object on `window.__clip` for the harness's own seeding and reading,
+and leaves the page a throwing stub). 127.0.0.1 is a secure context, so that API
+works here and does not exist in prod; without this, a fix written against it
+passes every check and does nothing on the box it ships to.
+
+**Section (f) runs the copy checks again with `navigator.platform` forced to
+`Win32`.** This is the half a Linux box structurally cannot show you: xterm
+mirrors a *mouse* selection into its helper textarea to feed X11's PRIMARY
+selection, guarded by `Browser.isLinux`, so on Linux there is always a DOM
+selection lying about and `queryCommandEnabled("copy")` is true for reasons that
+have nothing to do with the terminal. The check above it — that the double-click
+left no DOM selection behind — is what proves the override took; if that ever
+reports otherwise, everything after it is vacuous.
+
+Confirm it discriminates by pointing it at the unpatched pane (stash
+`shell/src/components/TerminalPane.vue` and let vite reload) — it fails 3 of 21:
+both `Ctrl+Shift+C` checks and the round trip between two panes. Note what does
+*not* move, because it is the ticket's premise and it was wrong: `Ctrl+Shift+V`
+and `Shift+Insert` already pasted before this change, and `Ctrl+Insert` already
+copied. xterm's ctrl branch requires `!shiftKey`, so it never claimed
+ctrl+shift+letter and `_keyDown` returned before `cancel()` — the proposed fix
+of returning `false` for those two would have been a no-op. Copy was the only
+gap, and only on `Ctrl+Shift+C`, which no browser generates a `copy` event for.
 
 ## Workspace store: why a proxy and not `docker stop`
 
