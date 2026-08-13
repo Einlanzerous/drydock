@@ -7,7 +7,7 @@
 // nothing in the desk goes red, and the one surface that went quiet is the one
 // the ticket is about.
 //
-// Deliberately narrower than proxy-http.mjs, which breaks the state store.
+// Deliberately narrower than proxy-http.mts, which breaks the state store.
 // Sharing one proxy would mean either a path parameter on a harness three other
 // scripts depend on, or a mode matrix where the two outages are independent.
 // They're separate concerns, and the modes below aren't the same modes.
@@ -38,6 +38,9 @@
 //         on a host running Jira.
 //
 // Control: POST /__break?mode=502|hang|huge|skew , POST /__heal , GET /__state
+//
+// Run from `daemon/`, where tsx resolves (DRY-80):
+//   (cd daemon && node --import tsx ../scripts/verify/proxy-tracker.mts)
 import http from "node:http";
 import net from "node:net";
 
@@ -45,11 +48,31 @@ const LISTEN = Number(process.env.PROXY_PORT ?? 4375);
 const TARGET = Number(process.env.TARGET_PORT ?? 4374);
 const BREAK_PATH = process.env.BREAK_PATH ?? "/api/tracker/tickets";
 
-let mode = "ok"; // "ok" | "502" | "hang" | "huge" | "skew"
-let blocked = 0;
-const held = new Set(); // sockets parked by "hang", released on heal
+export type Mode = "ok" | "502" | "hang" | "huge" | "skew";
 
-const cors = {
+/**
+ * `GET /__state`. Exported so the harnesses driving this proxy name the shape
+ * it actually serves rather than each keeping a copy (DRY-80) — `import type`
+ * erases, so naming it does not start a proxy.
+ */
+export interface ProxyTrackerState {
+  mode: Mode;
+  /**
+   * Requests this proxy refused or parked. The answer to "was it never SENT, or
+   * sent and rejected" — only one of those is a product bug, and the DOM alone
+   * cannot tell them apart.
+   */
+  blocked: number;
+  /** Sockets parked by "hang" and not yet released. */
+  held: number;
+}
+
+let mode: Mode = "ok";
+let blocked = 0;
+/** Sockets parked by "hang", released on heal. */
+const held = new Set<net.Socket>();
+
+const cors: Record<string, string> = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type",
@@ -57,7 +80,7 @@ const cors = {
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://x");
-  const json = (code, body) => {
+  const json = (code: number, body: unknown) => {
     res.writeHead(code, { "Content-Type": "application/json", ...cors });
     res.end(JSON.stringify(body));
   };
@@ -74,14 +97,14 @@ const server = http.createServer((req, res) => {
     held.clear();
     return json(200, { mode });
   }
-  // `blocked` is the answer to "was the request never SENT, or sent and
-  // rejected" — only one of those is a product bug, and the harness asserts on
-  // it rather than inferring from the DOM alone.
-  if (url.pathname === "/__state") return json(200, { mode, blocked, held: held.size });
+  if (url.pathname === "/__state") {
+    const state: ProxyTrackerState = { mode, blocked, held: held.size };
+    return json(200, state);
+  }
 
   // Answered whatever the mode. A partitioned tracker does not break the
   // daemon's CORS negotiation, and failing the preflight would stop the browser
-  // ever sending the request — see proxy-http.mjs, which paid a debugging
+  // ever sending the request — see proxy-http.mts, which paid a debugging
   // session for this.
   if (req.method === "OPTIONS") {
     res.writeHead(204, cors);

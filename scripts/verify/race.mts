@@ -12,7 +12,14 @@
 //    (a failed DELETE raises the notice and queues nothing) the attempt used to
 //    fall through to noteRecovered() without touching the network: notice
 //    cleared, "layout persistence restored" logged, store still dead.
-import { chromium } from "playwright";
+//
+// Run from `daemon/`, where tsx resolves (DRY-80):
+//   (cd daemon && node --import tsx ../scripts/verify/race.mts)
+import { chromium, type Page } from "playwright";
+import { deskWindows, type Detail, type SessionsResponse, type WorkspaceResponse } from "./api.mjs";
+// The proxy's own declaration of what it serves, rather than a copy of it here
+// (DRY-80). `import type` erases, so this does not start a second proxy.
+import type { ProxyHttpState } from "./proxy-http.mjs";
 
 const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5370";
 const DAEMON = process.env.DAEMON ?? "http://127.0.0.1:4370";
@@ -22,24 +29,31 @@ const PROXY = process.env.PROXY ?? "http://127.0.0.1:4371";
 // silently change what is being tested rather than fail.
 const DELAY_MS = Number(process.env.DELAY_MS ?? 6000);
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const j = async (u, i) => (await fetch(u, i)).json();
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// The trailing comma is required in a `.mts` file: `<T>` alone at the start of
+// an arrow is reserved syntax there (it would be a JSX tag in `.tsx`).
+const j = async <T,>(u: string, i?: RequestInit): Promise<T> =>
+  (await fetch(u, i)).json() as Promise<T>;
 let failures = 0;
-const check = (n, ok, d = "") => {
+const check = (n: string, ok: boolean, d: Detail = "") => {
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${n}${d ? ` — ${d}` : ""}`);
   if (!ok) failures++;
 };
-const noticed = (page) => page.locator(".notice").count().then((n) => n > 0);
-const local = async (page) => {
+const noticed = (page: Page) => page.locator(".notice").count().then((n) => n > 0);
+
+/** Window x-positions keyed by id, as one side or the other holds them. */
+type Desk = Record<string, number>;
+
+const local = async (page: Page): Promise<Desk> => {
   const raw = await page.evaluate((k) => localStorage.getItem(k), `drydock.layout.${PROXY}`);
-  const p = raw ? JSON.parse(raw) : null;
-  return Object.fromEntries((p?.windows ?? []).map((w) => [w.id, Math.round(w.x)]));
+  const p = raw ? (JSON.parse(raw) as WorkspaceResponse["workspace"]) : null;
+  return Object.fromEntries(deskWindows(p).map((w) => [w.id, Math.round(w.x)]));
 };
-const stored = async () => {
-  const { workspace } = await j(`${DAEMON}/api/workspace`);
-  return Object.fromEntries((workspace?.windows ?? []).map((w) => [w.id, Math.round(w.x)]));
+const stored = async (): Promise<Desk> => {
+  const { workspace } = await j<WorkspaceResponse>(`${DAEMON}/api/workspace`);
+  return Object.fromEntries(deskWindows(workspace).map((w) => [w.id, Math.round(w.x)]));
 };
-async function waitFor(fn, ms = 60000) {
+async function waitFor(fn: () => Promise<boolean>, ms = 60000): Promise<number | null> {
   const t0 = Date.now();
   while (Date.now() - t0 < ms) {
     if (await fn()) return Math.round((Date.now() - t0) / 100) / 10;
@@ -47,8 +61,11 @@ async function waitFor(fn, ms = 60000) {
   }
   return null;
 }
-async function drag(page, dx, dy) {
+async function drag(page: Page, dx: number, dy: number): Promise<void> {
   const b = await page.locator(".frame .bar").first().boundingBox();
+  // A missing box means no window was on the desk to drag, which invalidates
+  // everything after it — said out loud rather than as a TypeError on `b.x`.
+  if (!b) throw new Error("no .frame .bar on the desk to drag");
   await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
   await page.mouse.down();
   await page.mouse.move(b.x + b.width / 2 + dx, b.y + b.height / 2 + dy, { steps: 8 });
@@ -56,7 +73,7 @@ async function drag(page, dx, dy) {
 }
 
 await j(`${PROXY}/__heal`, { method: "POST" });
-for (const s of (await j(`${DAEMON}/api/sessions`)).sessions) {
+for (const s of (await j<SessionsResponse>(`${DAEMON}/api/sessions`)).sessions) {
   await fetch(`${DAEMON}/api/sessions/${s.id}/kill`, { method: "POST" });
 }
 await fetch(`${DAEMON}/api/workspace`, { method: "DELETE" });
@@ -96,7 +113,7 @@ console.log("\n1. a drag landing mid-recovery is not swallowed");
   // tell which one it was meant to be checking.
   await j(`${PROXY}/__break?mode=delay`, { method: "POST" });
   const t0 = Date.now();
-  await waitFor(async () => (await j(`${PROXY}/__state`)).delayed > 0, 40000);
+  await waitFor(async () => (await j<ProxyHttpState>(`${PROXY}/__state`)).delayed > 0, 40000);
   console.log(`      recovery push held after ${Math.round((Date.now() - t0) / 100) / 10}s`);
 
   // Inside that hold: a new arrangement, whose own push 503s immediately and
@@ -180,7 +197,7 @@ console.log("\n2. recovery does not announce a health it never checked");
   await ctx2.close();
 }
 
-const { sessions } = await j(`${DAEMON}/api/sessions`);
+const { sessions } = await j<SessionsResponse>(`${DAEMON}/api/sessions`);
 check("sessions stayed live", sessions.length === 2 && sessions.every((x) => x.status === "running"));
 
 await browser.close();

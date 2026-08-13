@@ -12,6 +12,9 @@
 // would be another instant failure.
 //
 // Control: POST /__break, POST /__heal, GET /__state on CONTROL_PORT.
+//
+// Run from `daemon/`, where tsx resolves (DRY-80):
+//   (cd daemon && node --import tsx ../scripts/verify/proxy-tcp.mts)
 import http from "node:http";
 import net from "node:net";
 
@@ -19,9 +22,30 @@ const LISTEN = Number(process.env.PG_PROXY_PORT ?? 5456);
 const TARGET = Number(process.env.PG_PORT ?? 5455);
 const CONTROL = Number(process.env.CONTROL_PORT ?? 5457);
 
+/** One client↔upstream pair, held so `/__break` can freeze both halves. */
+interface Pair {
+  client: net.Socket;
+  up: net.Socket;
+}
+
+/**
+ * What the control port answers. Exported so a harness names the shape this
+ * file serves rather than keeping its own copy (DRY-80); `import type` erases,
+ * so naming it does not start a proxy.
+ */
+export interface ProxyTcpState {
+  partitioned: boolean;
+  /** Connections accepted while partitioned and never served. */
+  parked: number;
+  /** Established pairs currently held (frozen, if partitioned). */
+  live: number;
+}
+
 let partitioned = false;
-const parked = new Set(); // connections accepted while partitioned, never served
-const live = new Set(); // established pairs, frozen on break
+/** Connections accepted while partitioned, never served. */
+const parked = new Set<net.Socket>();
+/** Established pairs, frozen on break. */
+const live = new Set<Pair>();
 
 net
   .createServer((client) => {
@@ -33,7 +57,7 @@ net
       return;
     }
     const up = net.connect(TARGET, "127.0.0.1");
-    const pair = { client, up };
+    const pair: Pair = { client, up };
     live.add(pair);
     const drop = () => {
       live.delete(pair);
@@ -81,7 +105,8 @@ http
         pair.up.destroy();
       }
     }
+    const state: ProxyTcpState = { partitioned, parked: parked.size, live: live.size };
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ partitioned, parked: parked.size, live: live.size }));
+    res.end(JSON.stringify(state));
   })
   .listen(CONTROL, "127.0.0.1");

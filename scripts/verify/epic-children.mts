@@ -34,7 +34,15 @@
 //       they have stopped trusting the screen must not freshen every row except
 //       the ones they opened on purpose — those are the rows an agent gets
 //       spawned from.
-import { chromium } from "playwright";
+//
+// Run from `daemon/`, where tsx resolves (DRY-80):
+//   (cd daemon && node --import tsx ../scripts/verify/epic-children.mts)
+import { chromium, type Page } from "playwright";
+// The stub's own declarations of what it serves (DRY-80). `/__reset` answers
+// the COUNTERS and `/__state` the full envelope — typing both as the envelope
+// is a guess a typecheck blesses rather than catches.
+import type { StubCounts, StubState } from "./stub-tracker.mjs";
+import type { Detail } from "./api.mjs";
 
 const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5395";
 const STUB = process.env.STUB_URL ?? "http://127.0.0.1:4396";
@@ -45,20 +53,25 @@ const OPEN_KIDS = (process.env.OPEN_KIDS ?? "DRY-11,DRY-12").split(",");
 const CLOSED_KID = process.env.CLOSED_KID ?? "DRY-13";
 
 let failures = 0;
-function check(name, ok, extra = "") {
+function check(name: string, ok: boolean, extra: Detail = ""): void {
   if (!ok) failures++;
   console.log(`${ok ? "  ok  " : "FAIL  "}${name}${extra ? ` — ${extra}` : ""}`);
 }
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const stubState = () => fetch(`${STUB}/__state`).then((r) => r.json());
-const stubReset = () => fetch(`${STUB}/__reset`, { method: "POST" }).then((r) => r.json());
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const stubState = (): Promise<StubState> =>
+  fetch(`${STUB}/__state`).then((r) => r.json() as Promise<StubState>);
+// `/__reset` answers the counters ALONE — no mode, no latencyMs, no inflight.
+// Typed as the full envelope it would be a shape this file never receives, and
+// the typecheck would bless the guess instead of catching it.
+const stubReset = (): Promise<StubCounts> =>
+  fetch(`${STUB}/__reset`, { method: "POST" }).then((r) => r.json() as Promise<StubCounts>);
 
 /**
  * Poll until `fn` holds. Fixed sleeps are what make a browser harness flaky —
  * the ticket poll is on its own clock and a fetch takes as long as it takes, so
  * any constant is either a stall or a race.
  */
-async function waitFor(fn, ms = 20_000) {
+async function waitFor(fn: () => Promise<boolean>, ms = 20_000): Promise<number | null> {
   const t0 = Date.now();
   while (Date.now() - t0 < ms) {
     if (await fn()) return Math.round((Date.now() - t0) / 100) / 10;
@@ -67,61 +80,93 @@ async function waitFor(fn, ms = 20_000) {
   return null;
 }
 
+/** One rendered sidebar row. `child` means nested under an epic. */
+interface Row {
+  key: string | null;
+  epic: boolean;
+  child: boolean;
+  status: string | null;
+}
+/** The epic row under test, or null when it isn't on screen at all. */
+interface EpicRow {
+  inert: boolean;
+  chevron: boolean;
+  open: boolean;
+  title: string | null;
+}
+interface Snapshot {
+  groups: number;
+  count: string | null;
+  backlogOn: boolean;
+  rows: Row[];
+  notes: string[];
+  epic: EpicRow | null;
+}
+
 /**
- * What the sidebar is showing.
+ * What the sidebar is showing — a FUNCTION body, with the `txt` and `epicRow`
+ * helpers it used to have written out at each site (DRY-80).
+ *
+ * Those helpers are the shape tsx breaks: its esbuild transform wraps
+ * NAME-BOUND functions in a `__name(...)` helper (keepNames), and Playwright
+ * ships an evaluate body to the browser as SOURCE, where that helper does not
+ * exist — so the page throws `ReferenceError: __name is not defined` at a line
+ * that reads perfectly well. Passing the body as a string avoids that and is
+ * what auth.mts does, but a string is opaque to tsc, which would exempt this
+ * body from the very typecheck the conversion added. Written out instead.
+ *
+ * The epic key arrives as an ARGUMENT rather than through a `window.__EPIC__`
+ * planted by `addInitScript` — the arg is typed, and a string body could not
+ * take one.
  *
  * Rows are read as KEYS rather than counted. A count can be satisfied by the
  * wrong rows — and the failure mode here is specifically "the wrong set of
  * children", so the identities are the assertion.
  */
-function snap(page) {
-  return page.evaluate(() => {
-    const txt = (el) => el?.textContent?.trim() ?? null;
-    const epicRow = (key) =>
-      [...document.querySelectorAll(".sidebar .row.epic")].find(
-        (r) => txt(r.querySelector(".key")) === key,
-      );
-    const rows = [...document.querySelectorAll(".sidebar .row")];
+function snap(page: Page): Promise<Snapshot> {
+  return page.evaluate((epicKey: string): Snapshot => {
+    const epicEl = [...document.querySelectorAll(".sidebar .row.epic")].find(
+      (r) => (r.querySelector(".key")?.textContent?.trim() ?? null) === epicKey,
+    );
     return {
       groups: document.querySelectorAll(".sidebar .grp").length,
       // The header's "shown/total", which describes the PULL. An expansion that
       // leaked into it would be the backlog toggle wearing a chevron.
-      count: txt(document.querySelector(".sidebar .count")),
+      count: document.querySelector(".sidebar .count")?.textContent?.trim() ?? null,
       backlogOn: !!document.querySelector(".sidebar .backlog input:checked"),
       // Every row on screen, in order, tagged by whether it is nested under an
       // epic — order matters (active work is meant to sort above dormant).
-      rows: rows.map((r) => ({
-        key: txt(r.querySelector(".key")),
+      rows: [...document.querySelectorAll(".sidebar .row")].map((r) => ({
+        key: r.querySelector(".key")?.textContent?.trim() ?? null,
         epic: r.classList.contains("epic"),
         child: r.classList.contains("child"),
-        status: txt(r.querySelector(".slabel")),
+        status: r.querySelector(".slabel")?.textContent?.trim() ?? null,
       })),
-      notes: [...document.querySelectorAll(".sidebar .child-note")].map((n) => n.textContent.trim()),
-      epic: (() => {
-        const r = epicRow(window.__EPIC__);
-        if (!r) return null;
-        return {
-          inert: r.classList.contains("inert"),
-          // The chevron is a <button> when there is something to reveal and a
-          // bare <span class="empty"> when there isn't, so its presence — not
-          // just the element — is the honest probe.
-          chevron: !!r.querySelector("button.epic-chev"),
-          open: !!r.querySelector("button.epic-chev.open"),
-          title: r.getAttribute("title"),
-        };
-      })(),
+      notes: [...document.querySelectorAll(".sidebar .child-note")].map((n) =>
+        (n.textContent ?? "").trim(),
+      ),
+      epic: epicEl
+        ? {
+            inert: epicEl.classList.contains("inert"),
+            // The chevron is a <button> when there is something to reveal and a
+            // bare <span class="empty"> when there isn't, so its presence — not
+            // just the element — is the honest probe.
+            chevron: !!epicEl.querySelector("button.epic-chev"),
+            open: !!epicEl.querySelector("button.epic-chev.open"),
+            title: epicEl.getAttribute("title"),
+          }
+        : null,
     };
-  });
+  }, EPIC);
 }
 
-const keysOf = (s) => s.rows.filter((r) => !r.epic).map((r) => r.key);
-const childrenOf = (s) => s.rows.filter((r) => r.child).map((r) => r.key);
+const keysOf = (s: Snapshot) => s.rows.filter((r) => !r.epic).map((r) => r.key);
+const childrenOf = (s: Snapshot) => s.rows.filter((r) => r.child).map((r) => r.key);
 
-async function main() {
+async function main(): Promise<void> {
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1500, height: 900 } });
   page.on("pageerror", (e) => check(`no page error (${e.message})`, false));
-  await page.addInitScript(`window.__EPIC__ = ${JSON.stringify(EPIC)}`);
   await page.goto(SHELL, { waitUntil: "domcontentloaded" });
 
   // ---- (a) the epic row offers an expansion at all -------------------------
@@ -283,7 +328,7 @@ async function main() {
   // re-pull that drops what it has empties the epic for the length of a round
   // trip and fills it again: nothing is wrong, and the list blinks out anyway.
   // Reading once at the end cannot see that; it lands after the rows are back.
-  let vanished = null;
+  let vanished: string | null = null;
   const watch = (async () => {
     for (let i = 0; i < 60; i++) {
       const seen = childrenOf(await snap(page));

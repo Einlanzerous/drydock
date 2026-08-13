@@ -3,7 +3,12 @@
 There are no automated tests in this repo; CLAUDE.md's curls are the regression
 suite. These are the part of that suite the curls can't express.
 
-Nothing here runs in CI or on install. Three groups:
+None of these RUNS in CI or on install. Since DRY-80 they are all
+**typechecked** there — see [Running these](#running-these) — which is a
+different claim and a much weaker one: green means the harness compiles, never
+that it still asserts anything.
+
+Three groups:
 
 - **The workspace store's partition harnesses (DRY-58)** — everything from
   [Setup](#setup) down, because the claims are about **latency and recovery**,
@@ -24,7 +29,7 @@ Nothing here runs in CI or on install. Three groups:
   counting stub tracker, since the claims are about upstream requests that
   didn't happen). A browser, about a minute. Run it when touching
   `daemon/src/tracker/cache.ts`, either provider's `attachChildStats`, or the
-  ticket poll's scheduling in `App.vue`. **Run `sidebar.mjs` too** — the two
+  ticket poll's scheduling in `App.vue`. **Run `sidebar.mts` too** — the two
   overlap on who reports a tracker outage, and DRY-72 moved that decision from
   the browser to the daemon. There is also an
   [in-process suite](#the-caches-own-semantics-in-process) for the cache's
@@ -33,7 +38,7 @@ Nothing here runs in CI or on install. Three groups:
   [its own section](#expanding-an-epic-to-its-children-dry-83). Reuses DRY-72's
   counting stub with `STUB_DORMANT_EPIC=1`. A browser, well under a minute. Run
   it when touching the sidebar's epic rows, `listEpicChildren`, `TicketQuery.parent`,
-  or either provider's handling of it. **Run `tracker-cache.mjs` too** — the
+  or either provider's handling of it. **Run `tracker-cache.mts` too** — the
   stub is shared, and an epic added to it changes the child-stats counts that
   harness pins exactly.
 - **The tombstone's resume button (DRY-62)** —
@@ -63,6 +68,81 @@ Nothing here runs in CI or on install. Three groups:
   `attachCustomKeyEventHandler`, or an xterm bump — the keymap this depends on
   is xterm's, and it is what decides whether paste reaches the browser at all.
 
+## Running these
+
+Everything in this directory is TypeScript run through `tsx`, and every
+invocation below has the same shape:
+
+```sh
+(cd daemon && node --import tsx ../scripts/verify/<name>.mts)
+```
+
+The `cd daemon` is now convention rather than necessity. `tsx` used to be a
+**daemon**-workspace dependency only, so `node --import tsx` did not resolve
+from the repo root at all; DRY-80 made it a root devDependency too (the launcher
+needs it — see the note in `scripts/up.mts`), so `node --import tsx
+scripts/verify/<name>.mts` from the root works identically. The blocks below
+keep the subshell form because every harness's own header comment gives it, and
+because a subshell means the whole section still copy-pastes in sequence.
+
+The browser harnesses need Playwright. The library itself is an ordinary
+devDependency now (DRY-80) — `bun install` at the repo root is enough — but the
+browser binary is not: Bun doesn't run untrusted packages' install scripts, so
+nothing downloads ~150MB of Chromium behind your back. Once per machine:
+
+```sh
+bunx playwright install chromium
+```
+
+If a launch fails with "Executable doesn't exist", that is the line you missed.
+
+**These are typechecked in CI, and that proves almost nothing.** `bun run
+typecheck:scripts` (the `scripts typecheck` step in `pr-checks.yml`) runs two
+projects — `scripts/tsconfig.json` for the Node half and
+`scripts/tsconfig.browser.json` for the Playwright half, split so that daemon
+source reached by the in-process harnesses is never checked under the DOM lib as
+well as its own. **Both always run**, and the exit code is the worse of the two:
+joining them with `&&` means a failure in the first hides the second entirely,
+so you fix everything you were shown, push, and meet a second wave. That was a
+real off-by-two while this was being written — seven errors reported where there
+were nine. Between them they hold down what tsc can see: that a harness
+compiles, that it agrees with the daemon's own `SessionInfo` / `SessionRecord` /
+`Ticket` (imported through `api.mts` rather than re-declared) and with each
+proxy's own `/__state` shape (imported from the proxy, likewise), and that the
+DOM calls in a `page.evaluate` body are real. It cannot see a selector, or an
+assertion that has quietly stopped discriminating. Everything in
+[Making sure a harness still discriminates](#making-sure-a-harness-still-discriminates)
+is still done by hand and still the part that matters.
+
+**A `page.evaluate` body may not bind a NAME to a function.** `tsx`'s esbuild
+transform wraps name-bound functions in a `__name(...)` helper (keepNames), and
+Playwright ships an evaluate body to the browser as source, where that helper
+doesn't exist — so `const q = (s) => …` inside a body fails as
+`ReferenceError: __name is not defined` from inside the page, pointing at a line
+that reads perfectly well. An anonymous inline arrow crosses intact, which is
+what makes the rule look optional.
+
+Passing the body as a STRING also dodges it, and `auth.mts`,
+`backlog-toggle.mts` and `clipboard.mts` take that route — but a string is
+opaque to tsc, so it buys the workaround by giving up exactly the checking this
+directory was converted for. Prefer writing the helper out: `sidebar.mts` and
+`epic-children.mts` spell `document.querySelector` in full for that reason, and
+`surface.mts` swapped a `get:` accessor for a `value:`. Verbosity is the cheaper
+price.
+
+**So the gate's coverage is uneven, and worth knowing per file.** `clipboard.mts`
+is the extreme: all six of its page bodies are template strings, ~69 of its 548
+lines, so it compiles under either project without a single DOM reference for
+tsc to check — it passes, and that fact says almost nothing. Converting those
+bodies is a job for whoever next touches DRY-71's harness, since several of them
+interpolate values (`${FRAME_JS(dir)}`) and would need to become functions
+taking arguments rather than a mechanical unquoting.
+
+`drift.sh` is the one file here that isn't TypeScript, and that is a decision
+rather than an oversight (DRY-80, trap 5): it is `docker exec` and `psql` and
+heredoc SQL end to end, so the parts a type system would check are the parts it
+doesn't have. It stays shell.
+
 ## The ticket brief (DRY-53)
 
 ```sh
@@ -89,19 +169,19 @@ Self-contained — its own daemon, proxy and vite, so touching the sidebar
 doesn't mean standing up the workspace-store rig below. From the repo root:
 
 ```sh
-npm i playwright --prefix scripts/verify     # ad-hoc; not a repo dependency
+bunx playwright install chromium             # once per machine; see "Running these"
 
 (cd daemon && DRYDOCK_PORT=4374 DRYDOCK_HOST=127.0.0.1 DRYDOCK_TRACKER=fixture \
    DRYDOCK_STATE_FILE=/tmp/dry55-state.json node --import tsx src/index.ts &)
-node scripts/verify/proxy-tracker.mjs &                   # :4375 → :4374
+(cd daemon && node --import tsx ../scripts/verify/proxy-tracker.mts &)   # :4375 → :4374
 (cd shell && VITE_DAEMON_URL=http://127.0.0.1:4375 bunx vite --port 5375 --strictPort &)
 
-node scripts/verify/sidebar.mjs
+(cd daemon && node --import tsx ../scripts/verify/sidebar.mts)
 ```
 
 | harness | what it holds down |
 |---|---|
-| `sidebar.mjs` | A tracker outage names itself. Before DRY-55 a first load with the tracker down rendered "No tickets match." — true of a healthy tracker with nothing in scope, and with the scope chips (DRY-30) in the same panel it reads as a filter you got wrong rather than an outage. Asserts the empty case, the **stale** case, the **hang** case and a shell newer than its daemon separately, plus that all of them end without a reload. |
+| `sidebar.mts` | A tracker outage names itself. Before DRY-55 a first load with the tracker down rendered "No tickets match." — true of a healthy tracker with nothing in scope, and with the scope chips (DRY-30) in the same panel it reads as a filter you got wrong rather than an outage. Asserts the empty case, the **stale** case, the **hang** case and a shell newer than its daemon separately, plus that all of them end without a reload. |
 
 The hang case is the one worth explaining. A tracker that refuses connections
 fails fast; a tracker that accepts and then goes silent doesn't fail at all —
@@ -118,14 +198,14 @@ perfectly clear error body, which is the exact state in which this shipped. The
 claim is about what the sidebar SAYS, and only a rendered page can tell "we
 couldn't ask" from "we asked and there are none".
 
-Why a second proxy rather than a mode on `proxy-http.mjs`: that one breaks the
+Why a second proxy rather than a mode on `proxy-http.mts`: that one breaks the
 state store, and the two outages are independent conditions — sharing it would
 mean a path parameter on a harness three other scripts depend on.
 
 ### The backlog control (DRY-85)
 
 Same rig — daemon, proxy and vite exactly as above — so run it beside
-`sidebar.mjs` rather than standing anything else up. Run from `daemon/`, which
+`sidebar.mts` rather than standing anything else up. Run from `daemon/`, which
 is where `tsx` is installed:
 
 ```sh
@@ -159,16 +239,16 @@ selector half way through is one you cannot read the discrimination off.
 ## The tracker cache (DRY-72)
 
 Also self-contained, and it needs a tracker the daemon can really talk to —
-`stub-tracker.mjs`, a Switchyard-shaped origin that **counts what arrives**.
+`stub-tracker.mts`, a Switchyard-shaped origin that **counts what arrives**.
 That counter is the whole point: every claim here is about requests that didn't
 happen, and `curl /api/tracker/tickets` returns the same 200 with the same body
 whether the daemon answered from memory or spent six seconds re-walking a
 corporate Jira. Which is the state the bug shipped in.
 
 ```sh
-npm i playwright --prefix scripts/verify     # ad-hoc; not a repo dependency
+bunx playwright install chromium             # once per machine; see "Running these"
 
-node scripts/verify/stub-tracker.mjs &                    # :4386, counting
+(cd daemon && node --import tsx ../scripts/verify/stub-tracker.mts &)    # :4386, counting
 (cd daemon && DRYDOCK_PORT=4385 DRYDOCK_HOST=127.0.0.1 \
    DRYDOCK_TRACKER=switchyard DRYDOCK_SWITCHYARD_URL=http://127.0.0.1:4386 \
    DRYDOCK_TRACKER_PROJECTS=DRY \
@@ -178,19 +258,19 @@ node scripts/verify/stub-tracker.mjs &                    # :4386, counting
    DRYDOCK_SESSIONS_DIR=/tmp/dry72-sessions node --import tsx src/index.ts &)
 (cd shell && VITE_DAEMON_URL=http://127.0.0.1:4385 bunx vite --port 5385 --strictPort &)
 
-node scripts/verify/tracker-cache.mjs
+(cd daemon && node --import tsx ../scripts/verify/tracker-cache.mts)
 ```
 
 | harness | what it holds down |
 |---|---|
-| `tracker-cache.mjs` | Six concurrent pulls cost ONE fan-out upstream, not six. The child-stats query — the unbounded half, since it spans every status — doesn't repeat with each list refresh. A 2500ms tracker doesn't make a 2500ms sidebar, while Refresh still overrules the cache and waits. A dead tracker leaves the daemon serving last-good with `stale` set (200, not 502) while a key it has never fetched still 502s. And the surface section re-proves DRY-55 end-to-end. |
+| `tracker-cache.mts` | Six concurrent pulls cost ONE fan-out upstream, not six. The child-stats query — the unbounded half, since it spans every status — doesn't repeat with each list refresh. A 2500ms tracker doesn't make a 2500ms sidebar, while Refresh still overrules the cache and waits. A dead tracker leaves the daemon serving last-good with `stale` set (200, not 502) while a key it has never fetched still 502s. And the surface section re-proves DRY-55 end-to-end. |
 
 **Turn the TTLs down, and the harness insists on it.** 20s is the right default
 and a terrible test — the same trap DRY-49's timeout and DRY-60's sweep delay
 have — so section (c) measures the TTL it actually observes and fails if it took
 15s or more, rather than passing by waiting.
 
-The rig deliberately does NOT reuse `proxy-tracker.mjs`. That one sits between
+The rig deliberately does NOT reuse `proxy-tracker.mts`. That one sits between
 the *browser* and the daemon, so it can break `/api/tracker/tickets` but can
 never see what the daemon does upstream — which is the only place any of these
 claims live. Different position, different question, different file.
@@ -252,13 +332,13 @@ the exclusion, DRY-13), the work under it does not, and before DRY-83 the row
 went inert with "no children to expand here".
 
 `STUB_DORMANT_EPIC=1` is **opt-in**, and must stay that way: every epic in the
-set costs one more child-stats request, and `tracker-cache.mjs` asserts
+set costs one more child-stats request, and `tracker-cache.mts` asserts
 `children <= 1` exactly.
 
 ```sh
-npm i playwright --prefix scripts/verify     # ad-hoc; not a repo dependency
+bunx playwright install chromium             # once per machine; see "Running these"
 
-STUB_PORT=4396 STUB_DORMANT_EPIC=1 node scripts/verify/stub-tracker.mjs &
+(cd daemon && STUB_PORT=4396 STUB_DORMANT_EPIC=1 node --import tsx ../scripts/verify/stub-tracker.mts &)
 (cd daemon && DRYDOCK_PORT=4395 DRYDOCK_HOST=127.0.0.1 \
    DRYDOCK_TRACKER=switchyard DRYDOCK_SWITCHYARD_URL=http://127.0.0.1:4396 \
    DRYDOCK_TRACKER_PROJECTS=DRY \
@@ -269,7 +349,7 @@ STUB_PORT=4396 STUB_DORMANT_EPIC=1 node scripts/verify/stub-tracker.mjs &
    DRYDOCK_SESSIONS_DIR=/tmp/dry83-sessions node --import tsx src/index.ts &)
 (cd shell && VITE_DAEMON_URL=http://127.0.0.1:4395 bunx vite --port 5395 --strictPort &)
 
-node scripts/verify/epic-children.mjs
+(cd daemon && node --import tsx ../scripts/verify/epic-children.mts)
 ```
 
 **Clear `DRYDOCK_DATABASE_URL` and `DRYDOCK_AUTH_PASSWORD` explicitly**, as
@@ -280,7 +360,7 @@ empty string counts as set.
 
 | harness | what it holds down |
 |---|---|
-| `epic-children.mjs` | An epic with no children in the pull can still be expanded, and expands to its OPEN children — not its closed ones, and not by touching the backlog toggle, which is the control that widens the pull. Fetched rows survive a filter that matches only them (they go through `groupTickets`, so anything filtering off the pull alone deletes them), and a filter must not fan out one child query per epic per keystroke — measured on UPSTREAM counts, because the daemon's cache hides it from the route. An epic the pull already covers issues no query at all. Refresh reaches the expanded epic (forced past that cache, or it re-reads the memory that made it stale) **and the rows never leave the screen while it does** — sampled across the refresh, since a check that reads once at the end lands after they are back. |
+| `epic-children.mts` | An epic with no children in the pull can still be expanded, and expands to its OPEN children — not its closed ones, and not by touching the backlog toggle, which is the control that widens the pull. Fetched rows survive a filter that matches only them (they go through `groupTickets`, so anything filtering off the pull alone deletes them), and a filter must not fan out one child query per epic per keystroke — measured on UPSTREAM counts, because the daemon's cache hides it from the route. An epic the pull already covers issues no query at all. Refresh reaches the expanded epic (forced past that cache, or it re-reads the memory that made it stale) **and the rows never leave the screen while it does** — sampled across the refresh, since a check that reads once at the end lands after they are back. |
 
 `DRY-13` in the stub is a closed child, deliberately: expandability is derived
 from `childStats.total - done`, so an epic with a done child is what tells that
@@ -314,7 +394,7 @@ Needs a **database tier** — tombstones are drawn from session history, and onl
 Postgres retains it. Throwaway container, throwaway everything:
 
 ```sh
-npm i playwright --prefix scripts/verify     # ad-hoc; not a repo dependency
+bunx playwright install chromium             # once per machine; see "Running these"
 
 docker run -d --name dry62-db -e POSTGRES_PASSWORD=dry62pw -e POSTGRES_USER=drydock \
   -e POSTGRES_DB=drydock -p 127.0.0.1:55462:5432 postgres:16-alpine
@@ -325,7 +405,7 @@ docker run -d --name dry62-db -e POSTGRES_PASSWORD=dry62pw -e POSTGRES_USER=dryd
    node --import tsx src/index.ts &)
 (cd shell && VITE_DAEMON_URL=http://127.0.0.1:4392 bunx vite --port 5392 --strictPort &)
 
-CLAUDE_CONFIG_DIR=/tmp/dry62-claude node scripts/verify/tombstone.mjs   # from the repo root
+(cd daemon && CLAUDE_CONFIG_DIR=/tmp/dry62-claude node --import tsx ../scripts/verify/tombstone.mts)
 ```
 
 `CLAUDE_CONFIG_DIR` must be the same value in both places: the harness plants
@@ -335,7 +415,7 @@ the harness will `chmod 000` your real one for six seconds.
 
 | harness | what it holds down |
 |---|---|
-| `tombstone.mjs` | A tombstone's button tells the truth about the conversation behind it. The gate was `command === "claude" && agentSessionId`, and an id is not a transcript: the SessionStart hook reports one whether or not the CLI is persisting anything, so every session a pre-DRY-59 daemon spawned recorded an id pointing at nothing. Asserts the label BOTH ways, that the click's args agree with the label, and that a daemon which cannot read the transcript directory says nothing rather than stripping Resume from every card on the desk. |
+| `tombstone.mts` | A tombstone's button tells the truth about the conversation behind it. The gate was `command === "claude" && agentSessionId`, and an id is not a transcript: the SessionStart hook reports one whether or not the CLI is persisting anything, so every session a pre-DRY-59 daemon spawned recorded an id pointing at nothing. Asserts the label BOTH ways, that the click's args agree with the label, and that a daemon which cannot read the transcript directory says nothing rather than stripping Resume from every card on the desk. |
 
 Why a browser and not curl: `/api/sessions/history` shows the flag either way.
 The claim is which word the button shows and which args the click sends — and
@@ -356,7 +436,7 @@ where a swept session's scrollback was the only copy there ever was. It reads
 the tier from `/healthz` and flips the notice assertion accordingly.
 
 ```sh
-npm i playwright --prefix scripts/verify     # ad-hoc; not a repo dependency
+bunx playwright install chromium             # once per machine; see "Running these"
 
 (cd daemon && DRYDOCK_PORT=4360 DRYDOCK_HOST=127.0.0.1 DRYDOCK_SESSIONS_DIR=/tmp/d60 \
    DRYDOCK_STATE_FILE=/tmp/dry60-state.json DRYDOCK_RUNS_ROOT=/tmp/dry60-runs \
@@ -364,7 +444,7 @@ npm i playwright --prefix scripts/verify     # ad-hoc; not a repo dependency
    node --import tsx src/index.ts &)
 (cd shell && VITE_DAEMON_URL=http://127.0.0.1:4360 bunx vite --port 5360 --strictPort &)
 
-node scripts/verify/sweep.mjs                # from the repo root
+(cd daemon && node --import tsx ../scripts/verify/sweep.mts)
 
 # then again on the database tier — same shell, same harness
 docker run -d --name dry60-db -e POSTGRES_PASSWORD=dry60pw -e POSTGRES_USER=drydock \
@@ -379,7 +459,7 @@ real delay and calling it a pass.
 
 | harness | what it holds down |
 |---|---|
-| `sweep.mjs` | Finished sessions clear themselves and **nothing else does**. Four rounds: **A** the rail (a run that ended while you were in another tab is still there when you come back, never having counted down to nobody; the finished card announces itself before it goes; the failed one never does either; plus the tier's own line — raised on the file store once the sweep has actually cost something, absent before that and absent entirely on Postgres). **B** the desk (an unfocused finished window clears, the focused one doesn't, a running session and a workspace whose zsh is still alive are both left, `Clear finished` counts only what it would take and takes nothing that was running). **C** a crowded rail — ten runs, every countdown still rendered, still fitting its card, and still costing that card no width (the lane is one non-wrapping scrolling row, so a wider card is one pushed off the end). **D** the dock and synthetic focus: a docked window is never swept, and two windows nobody has clicked both clear. |
+| `sweep.mts` | Finished sessions clear themselves and **nothing else does**. Four rounds: **A** the rail (a run that ended while you were in another tab is still there when you come back, never having counted down to nobody; the finished card announces itself before it goes; the failed one never does either; plus the tier's own line — raised on the file store once the sweep has actually cost something, absent before that and absent entirely on Postgres). **B** the desk (an unfocused finished window clears, the focused one doesn't, a running session and a workspace whose zsh is still alive are both left, `Clear finished` counts only what it would take and takes nothing that was running). **C** a crowded rail — ten runs, every countdown still rendered, still fitting its card, and still costing that card no width (the lane is one non-wrapping scrolling row, so a wider card is one pushed off the end). **D** the dock and synthetic focus: a docked window is never swept, and two windows nobody has clicked both clear. |
 
 Why a browser and not curl: at the API all four of round B's sessions look
 identical — `status: "exited"`. Which one gets swept turns on what is on the
@@ -427,7 +507,7 @@ vite start, so a daemon needs its own server). The multi-user one needs a
 database, because that is the whole point: no Postgres, no accounts.
 
 ```sh
-npm i playwright --prefix scripts/verify     # ad-hoc; not a repo dependency
+bunx playwright install chromium             # once per machine; see "Running these"
 
 # The harness reads these two and has NO defaults, so the password a daemon is
 # started with and the one the browser types cannot drift apart. Both 8+ chars —
@@ -518,19 +598,19 @@ Needs no tracker, no database and no `claude`: the row is driven by posting a
 hook payload with whatever `tool_name` you like.
 
 ```sh
-npm i playwright --prefix scripts/verify     # ad-hoc; not a repo dependency
+bunx playwright install chromium             # once per machine; see "Running these"
 
 (cd daemon && DRYDOCK_PORT=4378 DRYDOCK_HOST=127.0.0.1 DRYDOCK_SESSIONS_DIR=/tmp/dry78 \
    DRYDOCK_STATE_FILE=/tmp/dry78-state.json DRYDOCK_TRACKER=fixture \
    node --import tsx src/index.ts &)
 (cd shell && VITE_DAEMON_URL=http://127.0.0.1:4378 bunx vite --port 5378 --strictPort &)
 
-node scripts/verify/gate-actions.mjs         # from the repo root
+(cd daemon && node --import tsx ../scripts/verify/gate-actions.mts)
 ```
 
 | harness | what it holds down |
 |---|---|
-| `gate-actions.mjs` | Every control in the gate's action row is inside the panel on all four edges, inside the viewport, and lands its own hit test — across seven viewports, both modes (the answers and the deny row are different controls at different widths), and three arguments. Plus the two things the row's width and height cost elsewhere: the line naming the tool in full must not be cut, and the panel must not be pushed off the top of the desk. |
+| `gate-actions.mts` | Every control in the gate's action row is inside the panel on all four edges, inside the viewport, and lands its own hit test — across seven viewports, both modes (the answers and the deny row are different controls at different widths), and three arguments. Plus the two things the row's width and height cost elsewhere: the line naming the tool in full must not be cut, and the panel must not be pushed off the top of the desk. |
 
 **Drive it with a long MCP tool name, not `Bash`.** One button's width is data —
 `Always allow {{ gate.tool }}` — and an MCP name is a single unbreakable token
@@ -697,7 +777,7 @@ ECONNREFUSED and every latency bug hides. A real partition is host-up,
 packets-dropped: the connect ACKs and nothing comes back. Three separate bugs
 were only visible under the latter — see CLAUDE.md, "Verifying workspace state".
 
-`proxy-tcp.mjs` also **freezes connections it has already established** rather
+`proxy-tcp.mts` also **freezes connections it has already established** rather
 than only refusing new ones. The pool keeps clients idle for 30s, so a proxy
 that blocks new connects alone never partitions anything at all.
 
@@ -707,17 +787,26 @@ Every block below runs from the **repo root** and returns there — the `cd`s ar
 in subshells on purpose, so the whole section copy-pastes in sequence.
 
 ```sh
-npm i playwright --prefix scripts/verify     # ad-hoc; not a repo dependency
+bunx playwright install chromium             # once per machine; see "Running these"
 
 # Throwaway daemon — file store (the default tier, the one that gets forgotten)
 (cd daemon && DRYDOCK_PORT=4370 DRYDOCK_HOST=127.0.0.1 \
    DRYDOCK_STATE_FILE=/tmp/dry58-state.json DRYDOCK_TRACKER=fixture \
    node --import tsx src/index.ts &)
 
-# HTTP partition proxy in front of it, and the dev shell pointed at the PROXY
-node scripts/verify/proxy-http.mjs &                      # :4371 → :4370
+# HTTP partition proxy in front of it, and the dev shell pointed at the PROXY.
+# The two ports are PASSED, not implied: proxy-http defaults to :4398 → :4399,
+# which is nothing this rig runs, while every harness here defaults to
+# PROXY=:4371 and DAEMON=:4370. This block used to omit them and carry a
+# `# :4371 → :4370` comment describing ports the proxy was not listening on, so
+# it could not work as pasted — the harnesses reported a dead proxy.
+(cd daemon && PROXY_PORT=4371 TARGET_PORT=4370 \
+   node --import tsx ../scripts/verify/proxy-http.mts &)
 (cd shell && VITE_DAEMON_URL=http://127.0.0.1:4371 bunx vite --port 5370 --strictPort &)
 ```
+
+`proxy-tcp` and `proxy-tracker` need no such override — their defaults already
+match the ports their rigs use.
 
 For the Postgres tier, add a throwaway database behind the TCP proxy and a
 second daemon in front of it:
@@ -725,14 +814,14 @@ second daemon in front of it:
 ```sh
 docker run -d --name dry58-pg -e POSTGRES_PASSWORD=dry58 -e POSTGRES_DB=drydock \
   -p 127.0.0.1:5455:5432 postgres:16
-node scripts/verify/proxy-tcp.mjs &                       # :5456 → :5455, control :5457
+(cd daemon && node --import tsx ../scripts/verify/proxy-tcp.mts &)   # :5456 → :5455, control :5457
 
 (cd daemon && DRYDOCK_PORT=4372 DRYDOCK_HOST=127.0.0.1 DRYDOCK_TRACKER=fixture \
    DRYDOCK_DATABASE_URL='postgres://postgres:dry58@127.0.0.1:5456/drydock' \
    node --import tsx src/index.ts &)
 ```
 
-Then point `proxy-http.mjs` at it (`TARGET_PORT=4372`) and pass
+Then point `proxy-http.mts` at it (`TARGET_PORT=4372`) and pass
 `DAEMON=http://127.0.0.1:4372` to the browser harnesses. **Run them against both
 tiers** — the file store is what a fresh clone runs.
 
@@ -740,40 +829,70 @@ tiers** — the file store is what a fresh clone runs.
 
 | | asserts |
 |---|---|
-| `roam.mjs` | Roaming resumes with no reload, for an outage starting before *and* after the first read. Includes the conflict rule as a pair: an untouched client adopts the daemon's desk live, a client that dragged keeps its own. |
-| `hang.mjs` | The accept-then-silence partition. A push that never settles must still raise the notice and leave recovery alive. |
-| `surface.mjs` | DRY-28's surface claims (wipe localStorage → reload → desk intact; a fresh profile gets the same desk) plus how the notice presents: once, no focus steal, self-clearing, and a hidden tab still recovers. |
-| `timings.mjs` | Postgres only. Timings, not status codes: one request per window pays the timeout, the rest return in ms, the window widens 10 → 20 → 30 and stops, `/healthz` answers instantly while cooling and resets after a heal. |
+| `roam.mts` | Roaming resumes with no reload, for an outage starting before *and* after the first read. Includes the conflict rule as a pair: an untouched client adopts the daemon's desk live, a client that dragged keeps its own. |
+| `hang.mts` | The accept-then-silence partition. A push that never settles must still raise the notice and leave recovery alive. |
+| `surface.mts` | DRY-28's surface claims (wipe localStorage → reload → desk intact; a fresh profile gets the same desk) plus how the notice presents: once, no focus steal, self-clearing, and a hidden tab still recovers. |
+| `timings.mts` | Postgres only. Timings, not status codes: one request per window pays the timeout, the rest return in ms, the window widens 10 → 20 → 30 and stops, `/healthz` answers instantly while cooling and resets after a heal. |
 | `drift.sh` | Postgres only. An edited applied migration 503s naming the file while the live PTY keeps running; reverting clears it; a null checksum is adopted and backfilled. |
-| `epic-children.mjs` | DRY-83. An epic with nothing under it in the pull expands to its open children, without widening the pull, without fanning out under a filter, and without the rows blinking out when Refresh re-pulls them. |
+| `epic-children.mts` | DRY-83. An epic with nothing under it in the pull expands to its open children, without widening the pull, without fanning out under a filter, and without the rows blinking out when Refresh re-pulls them. |
 
 Each exits non-zero on failure and prints one line per check.
 
 ## Making sure a harness still discriminates
 
 A green harness proves nothing if it would also be green against the bug. Check
-it the way these were checked:
+it the way these were checked.
+
+**`main` is no longer the pre-fix tree, and that silently defanged the three
+recipes below** (found while re-running them for DRY-80). They were written
+while their ticket was still a branch, so `main` really was the broken side;
+every one of them has since merged, and `git checkout main -- <those files>` is
+now a no-op that leaves the FIXED tree in place. The run that follows passes,
+and reads as "still discriminates" when nothing was reverted at all — the exact
+false green this section exists to prevent, one layer up.
+
+So each recipe names the commit before **its own** merge. **They cannot share
+one `PRE`**, which is the second half of the same trap: the merges are ordered
+(DRY-58 → DRY-55 → DRY-83), so DRY-55's parent already contains DRY-58's fix and
+reverting to it would leave `roam.mts` testing a tree that was never broken.
+`git merge-base --is-ancestor 3f1e228 c760181` is what that looks like when you
+check it rather than assume it.
+
+**Confirm the revert landed before trusting the run.** `git diff --stat` against
+the ref must be non-empty; a `checkout` that matched nothing is silent, and the
+green that follows is just the harness passing.
 
 ```sh
-git checkout main -- shell/src/composables/layoutStore.ts \
+# DRY-58 roaming — 3f1e228 is the merge, 4a6953b the commit before it
+git checkout 3f1e228~1 -- shell/src/composables/layoutStore.ts \
   shell/src/composables/useWindowManager.ts shell/src/App.vue
-node scripts/verify/roam.mjs        # expect 6 failures
+(cd daemon && node --import tsx ../scripts/verify/roam.mts)        # expect 6 failures
 git checkout HEAD -- shell/src/composables shell/src/App.vue
 
-git checkout main -- shell/src/App.vue shell/src/components/TrackerSidebar.vue \
+# DRY-55 the sidebar's outage copy — c760181 is the merge
+git checkout c760181~1 -- shell/src/App.vue shell/src/components/TrackerSidebar.vue \
   shell/src/lib/tracker.ts
-node scripts/verify/sidebar.mjs     # expect failures across (a), (c), (e), (f), (g)
+(cd daemon && node --import tsx ../scripts/verify/sidebar.mts)     # expect 19 failures, across (a), (c), (e), (f), (g)
 git checkout HEAD -- shell/src/App.vue shell/src/components/TrackerSidebar.vue \
   shell/src/lib/tracker.ts
 
 # DRY-83: revert only the SHELL half, so what's under test is the sidebar
 # having no way to ask rather than the daemon having no way to answer.
-git checkout main -- shell/src/components/TrackerSidebar.vue shell/src/lib/tracker.ts
-node scripts/verify/epic-children.mjs   # expect 5, incl. the row's own tooltip
+# 8b79ceb is the merge.
+git checkout 8b79ceb~1 -- shell/src/components/TrackerSidebar.vue shell/src/lib/tracker.ts
+(cd daemon && node --import tsx ../scripts/verify/epic-children.mts)   # expect 10, incl. the row's own tooltip
 git checkout HEAD -- shell/src/components/TrackerSidebar.vue shell/src/lib/tracker.ts
 ```
 
-`sweep.mjs` has no pre-DRY-60 file to check out — there was no sweep to break —
+The sidebar and epic-children counts are what DRY-80's re-run actually observed;
+`roam`'s 6 is inherited and was not re-measured. Note the two halves of this
+file disagreed about epic-children — 5 here, 10 in
+[its own section](#expanding-an-epic-to-its-children-dry-83) — and 10 is the
+right one. A count that drifts in the safe direction is how the next
+re-validation gets read as a regression, which is the same warning the `perl`
+recipes below carry.
+
+`sweep.mts` has no pre-DRY-60 file to check out — there was no sweep to break —
 so it was validated by breaking its load-bearing rules instead, a line each.
 Worth re-checking after any change to `sweepFinished` or the rail's density:
 
@@ -783,7 +902,7 @@ perl -0pi -e 's/return s\.status === "exited" && !s\.failure;/return s.status ==
   shell/src/composables/runState.ts
 perl -0pi -e 's/if \(visible\) finishedSeenAt\[session\.id\] \?\?= at;/finishedSeenAt[session.id] ??= at;/' \
   shell/src/App.vue
-node scripts/verify/sweep.mjs       # expect 4 failures, incl. the failed run being swept
+(cd daemon && node --import tsx ../scripts/verify/sweep.mts)       # expect 4 failures, incl. the failed run being swept
 git checkout HEAD -- shell/src/App.vue shell/src/composables/runState.ts
 
 # (2) the countdown's row, and both of the sweep's own exemptions
@@ -791,7 +910,7 @@ perl -0pi -e 's/\.card\.compact\.clearing \.meta,\n\.card\.tile\.clearing \.meta
   shell/src/components/RunRail.vue
 perl -0pi -e 's/if \(userFocusedId\.value === session\.id \|\| win\?\.minimized\) continue;/if (wm.focusedId.value === session.id) continue;/' \
   shell/src/App.vue
-node scripts/verify/sweep.mjs       # expect 4: C's fit check, and 3 of D's
+(cd daemon && node --import tsx ../scripts/verify/sweep.mts)       # expect 4: C's fit check, and 3 of D's
 git checkout HEAD -- shell/src/App.vue shell/src/components/RunRail.vue
 ```
 
@@ -822,10 +941,10 @@ what puts the index back, so nothing is left staged.
 ## Overrides
 
 `SHELL_URL`, `DAEMON`, `PROXY` for the browser harnesses; `PROXY_PORT` /
-`TARGET_PORT` for `proxy-http.mjs` and `proxy-tracker.mjs` (`BREAK_PATH` too, if
+`TARGET_PORT` for `proxy-http.mts` and `proxy-tracker.mts` (`BREAK_PATH` too, if
 some other route ever needs the same treatment); `PG_PROXY_PORT` / `PG_PORT` /
-`CONTROL_PORT` for `proxy-tcp.mjs`; `PG_URL` / `PG_CONTAINER` for `drift.sh`.
+`CONTROL_PORT` for `proxy-tcp.mts`; `PG_URL` / `PG_CONTAINER` for `drift.sh`.
 
-**`DAEMON` must point at whatever `proxy-http.mjs` forwards to.** Getting that
+**`DAEMON` must point at whatever `proxy-http.mts` forwards to.** Getting that
 wrong makes the harness assert against a different daemon than the browser is
 driving, which looks exactly like a product failure and isn't one.

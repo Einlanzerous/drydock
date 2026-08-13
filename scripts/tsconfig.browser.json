@@ -1,0 +1,42 @@
+{
+  // scripts/, the BROWSER half (DRY-80) — the Playwright harnesses, whose
+  // `page.evaluate` bodies are DOM code compiled here and shipped to Chromium.
+  //
+  // The DOM lib is the whole reason this is a second project rather than one
+  // more flag on tsconfig.json: see that file for why daemon source must not be
+  // reached from a DOM-enabled program.
+  //
+  // These bodies are FUNCTIONS, not strings, and that is what makes this config
+  // worth having. Passing an evaluate body as a string sidesteps tsx's
+  // `__name(...)` transform, but a string is opaque to tsc — so the workaround
+  // would exempt the largest DOM-reading code in the repo from the check this
+  // ticket exists to add. The constraint is on style instead: a body may bind no
+  // NAME to a function (`const q = (s) => …`), because esbuild's keepNames wraps
+  // those and the helper does not exist in the page.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"]
+  },
+  // Kept identical to tsconfig.json's `exclude` — the two files partition
+  // scripts/ between them. A harness added here and not removed there is
+  // checked twice, harmlessly; the reverse leaves it checked once, without DOM,
+  // which fails loudly rather than silently.
+  "include": [
+    "verify/auth.mts",
+    "verify/backlog-toggle.mts",
+    "verify/clipboard.mts",
+    "verify/epic-children.mts",
+    "verify/gate-actions.mts",
+    "verify/hang.mts",
+    "verify/race.mts",
+    "verify/roam.mts",
+    "verify/sidebar.mts",
+    "verify/surface.mts",
+    "verify/sweep.mts",
+    "verify/tombstone.mts",
+    "verify/tracker-cache.mts"
+  ],
+  // `exclude` is inherited through `extends` and would otherwise cancel every
+  // entry above.
+  "exclude": []
+}
