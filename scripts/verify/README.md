@@ -101,7 +101,11 @@ typecheck:scripts` (the `scripts typecheck` step in `pr-checks.yml`) runs two
 projects — `scripts/tsconfig.json` for the Node half and
 `scripts/tsconfig.browser.json` for the Playwright half, split so that daemon
 source reached by the in-process harnesses is never checked under the DOM lib as
-well as its own. Between them they hold down what tsc can see: that a harness
+well as its own. **Both always run**, and the exit code is the worse of the two:
+joining them with `&&` means a failure in the first hides the second entirely,
+so you fix everything you were shown, push, and meet a second wave. That was a
+real off-by-two while this was being written — seven errors reported where there
+were nine. Between them they hold down what tsc can see: that a harness
 compiles, that it agrees with the daemon's own `SessionInfo` / `SessionRecord` /
 `Ticket` (imported through `api.mts` rather than re-declared) and with each
 proxy's own `/__state` shape (imported from the proxy, likewise), and that the
@@ -118,12 +122,21 @@ doesn't exist — so `const q = (s) => …` inside a body fails as
 that reads perfectly well. An anonymous inline arrow crosses intact, which is
 what makes the rule look optional.
 
-Passing the body as a STRING also dodges it, and `auth.mts` and
-`backlog-toggle.mts` take that route — but a string is opaque to tsc, so it buys
-the workaround by giving up exactly the checking this directory was converted
-for. Prefer writing the helper out: `sidebar.mts` and `epic-children.mts` spell
-`document.querySelector` in full for that reason, and `surface.mts` swapped a
-`get:` accessor for a `value:`. Verbosity is the cheaper price.
+Passing the body as a STRING also dodges it, and `auth.mts`,
+`backlog-toggle.mts` and `clipboard.mts` take that route — but a string is
+opaque to tsc, so it buys the workaround by giving up exactly the checking this
+directory was converted for. Prefer writing the helper out: `sidebar.mts` and
+`epic-children.mts` spell `document.querySelector` in full for that reason, and
+`surface.mts` swapped a `get:` accessor for a `value:`. Verbosity is the cheaper
+price.
+
+**So the gate's coverage is uneven, and worth knowing per file.** `clipboard.mts`
+is the extreme: all six of its page bodies are template strings, ~69 of its 548
+lines, so it compiles under either project without a single DOM reference for
+tsc to check — it passes, and that fact says almost nothing. Converting those
+bodies is a job for whoever next touches DRY-71's harness, since several of them
+interpolate values (`${FRAME_JS(dir)}`) and would need to become functions
+taking arguments rather than a mechanical unquoting.
 
 `drift.sh` is the one file here that isn't TypeScript, and that is a decision
 rather than an oversight (DRY-80, trap 5): it is `docker exec` and `psql` and

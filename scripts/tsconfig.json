@@ -18,11 +18,20 @@
   // a red gate here on code the daemon's own gate calls fine. So daemon code is
   // only ever reached from THIS project, which has no DOM lib.
   //
-  // Drift is loud rather than silent, which is the other half of the point. The
-  // include is a recursive glob, so a new file anywhere under scripts/ is picked
-  // up automatically and lands here by default; if it turns out to be a browser
-  // harness it fails with "Cannot find name 'document'" and wants moving to the
-  // list in tsconfig.browser.json. Nothing new is silently unchecked.
+  // The include is a recursive glob, so a new file anywhere under scripts/ is
+  // picked up automatically and lands here by default. A browser harness that
+  // lands here USUALLY says so — "Cannot find name 'document'" — and wants
+  // moving to the list in tsconfig.browser.json.
+  //
+  // "Usually", not "always", and clipboard.mts (DRY-71) is the counterexample
+  // that landed the week this was written: it drives a browser, and it compiled
+  // here without the DOM lib, because every one of its six `page.evaluate`
+  // bodies is a TEMPLATE STRING. tsc never parses those, so there was no DOM
+  // reference to fail on — ~69 of its 548 lines are page code the typecheck
+  // cannot see at all. It is in the browser list below for correct
+  // classification, but do not read its green as coverage; the checking is only
+  // as wide as the code written as functions (see the note in
+  // tsconfig.browser.json).
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",
@@ -46,6 +55,7 @@
   "exclude": [
     "verify/auth.mts",
     "verify/backlog-toggle.mts",
+    "verify/clipboard.mts",
     "verify/epic-children.mts",
     "verify/gate-actions.mts",
     "verify/hang.mts",

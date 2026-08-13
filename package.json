@@ -15,7 +15,7 @@
     "daemon:local": "DRYDOCK_HOST=127.0.0.1 bun run --filter '@drydock/daemon' dev",
     "shell": "bun run --filter '@drydock/shell' dev",
     "dev": "bun run --filter '*' dev",
-    "typecheck:scripts": "tsc --noEmit -p scripts/tsconfig.json && tsc --noEmit -p scripts/tsconfig.browser.json",
+    "typecheck:scripts": "tsc --noEmit -p scripts/tsconfig.json; n=$?; tsc --noEmit -p scripts/tsconfig.browser.json; b=$?; exit $(( n > b ? n : b ))",
     "db:up": "node --import tsx scripts/up.mts --db-only",
     "db:down": "node --import tsx scripts/up.mts --db-down",
     "db:psql": "docker exec -it drydock-db psql -U drydock -d drydock"
