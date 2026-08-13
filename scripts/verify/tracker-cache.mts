@@ -5,7 +5,7 @@
 // how long one took. `curl /api/tracker/tickets` returns the same 200 with the
 // same body whether the daemon answered from memory or spent six seconds
 // re-walking a corporate Jira — which is exactly the state the bug shipped in.
-// So the harness counts at the origin (stub-tracker.mjs) and asserts on timings.
+// So the harness counts at the origin (stub-tracker.mts) and asserts on timings.
 //
 // The halves are separate tests and neither subsumes the other:
 //
@@ -21,32 +21,65 @@
 //                     the failure, so the surface section at the end re-proves
 //                     the stale marker end-to-end rather than trusting the field.
 //
-// Setup + overrides: see README.md.
+// The `page.evaluate` body in section (j) is a function rather than a string,
+// and that is checked rather than assumed: it binds no name to a function, so
+// it picks up none of tsx's `__name(...)` wrapping (see the note at the top of
+// surface.mts). A `const q = (s) => …` added inside it would break it.
+//
+// Setup + overrides: see README.md. Run from `daemon/`, where tsx resolves:
+//   (cd daemon && node --import tsx ../scripts/verify/tracker-cache.mts)
 import { chromium } from "playwright";
+import type { TicketsResponse } from "./api.mjs";
 
 const DAEMON = process.env.DAEMON_URL ?? "http://127.0.0.1:4385";
 const STUB = process.env.STUB_URL ?? "http://127.0.0.1:4386";
 const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5385";
 
+/** `stub-tracker.mts`'s `/__state` — the counters every claim here is about. */
+interface StubState {
+  mode: string;
+  latencyMs: number;
+  inflight: number;
+  list: number;
+  epicList: number;
+  children: number;
+  lookup: number;
+  total: number;
+}
+
 let failures = 0;
-function check(name, ok, extra = "") {
+function check(name: string, ok: boolean, extra: unknown = ""): void {
   if (!ok) failures++;
   console.log(`${ok ? "  ok  " : "FAIL  "}${name}${extra ? ` — ${extra}` : ""}`);
 }
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const ctl = (p) => fetch(`${STUB}${p}`, { method: "POST" }).then((r) => r.json());
-const stubState = () => fetch(`${STUB}/__state`).then((r) => r.json());
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const ctl = (p: string): Promise<StubState> =>
+  fetch(`${STUB}${p}`, { method: "POST" }).then((r) => r.json() as Promise<StubState>);
+const stubState = (): Promise<StubState> =>
+  fetch(`${STUB}/__state`).then((r) => r.json() as Promise<StubState>);
 
 /**
- * One sidebar pull, as the shell issues it. Returns {status, body, ms}.
+ * One sidebar pull, as the shell issues it.
  *
+ * `body` is a PARTIAL response plus an optional error: a cold-key 502 carries
+ * no `tickets` at all, and section (g) is precisely the assertion that it
+ * doesn't. Typing it as the full envelope would be the guess this file was
+ * converted to stop making.
+ */
+interface PullResult {
+  status: number;
+  body: Partial<TicketsResponse> & { error?: string };
+  ms: number;
+}
+
+/**
  * Budgeted, and that is not hygiene: section (h) exists precisely because a
  * daemon with no deadline of its own never answers a hung tracker, so an
  * unbudgeted probe there wouldn't fail — it would hang the whole run, which
  * reports as nothing at all. A blown budget is recorded as status 0 so every
  * later assertion still gets to speak.
  */
-async function pull({ fresh = false, backlog = false } = {}) {
+async function pull({ fresh = false, backlog = false } = {}): Promise<PullResult> {
   const params = new URLSearchParams({ open: "true" });
   if (fresh) params.set("fresh", "true");
   if (backlog) params.set("backlog", "true");
@@ -55,7 +88,7 @@ async function pull({ fresh = false, backlog = false } = {}) {
     const res = await fetch(`${DAEMON}/api/tracker/tickets?${params}`, {
       signal: AbortSignal.timeout(30_000),
     });
-    const body = await res.json().catch(() => ({}));
+    const body = (await res.json().catch(() => ({}))) as PullResult["body"];
     return { status: res.status, body, ms: Date.now() - t0 };
   } catch (e) {
     return { status: 0, body: { error: String(e) }, ms: Date.now() - t0 };
@@ -72,7 +105,7 @@ async function pull({ fresh = false, backlog = false } = {}) {
  * then lands mid-fan-out, which shows up later as an off-by-one nobody can
  * reproduce.
  */
-async function settle() {
+async function settle(): Promise<number> {
   let prev = -1;
   let stable = 0;
   for (let i = 0; i < 80; i++) {
@@ -83,6 +116,14 @@ async function settle() {
     await sleep(250);
   }
   return prev;
+}
+
+/** What the sidebar is saying, for section (j). */
+interface SidebarSnap {
+  groups: number;
+  stale: boolean;
+  unreachable: string | null;
+  notices: string[];
 }
 
 const browser = await chromium.launch();
@@ -97,7 +138,7 @@ try {
   await settle();
   let s = await stubState();
   check("every pull answered", burst.every((r) => r.status === 200), JSON.stringify(burst.map((r) => r.status)));
-  check("all six got the same list", new Set(burst.map((r) => r.body.tickets.length)).size === 1, `${burst.map((r) => r.body.tickets.length).join(",")}`);
+  check("all six got the same list", new Set(burst.map((r) => r.body.tickets?.length)).size === 1, `${burst.map((r) => r.body.tickets?.length).join(",")}`);
   check("the tracker saw ONE list query, not six", s.list === 1, `list=${s.list}`);
   // At MOST one fan-out, not exactly one: the child-stats TTL is minutes and
   // deliberately outlives a harness run, so a second run against the same daemon
@@ -110,7 +151,7 @@ try {
   check("and at most one child-stats query", s.children <= 1, `children=${s.children}`);
   // The counts being right is worthless if the data is wrong — a cache that
   // serves an empty list is also very efficient.
-  const epic = burst[0].body.tickets.find((t) => t.key === "DRY-1");
+  const epic = burst[0].body.tickets?.find((t) => t.key === "DRY-1");
   check("the epic's child stats survive the cache", epic?.childStats?.total === 2, JSON.stringify(epic?.childStats ?? null));
 
   console.log("\n(b) inside the TTL, nothing reaches the tracker at all");
@@ -135,7 +176,7 @@ try {
   }
   const ttlSeconds = Math.round((Date.now() - t0) / 100) / 10;
   check("the list does refresh once the TTL is out", refreshed, refreshed ? `after ${ttlSeconds}s` : "never in 20s");
-  // Same rule as sweep.mjs: 20s is the right default and a terrible test. A run
+  // Same rule as sweep.mts: 20s is the right default and a terrible test. A run
   // against the default would spend its life waiting and prove nothing about
   // the child-stats TTL sitting behind it.
   check(
@@ -153,7 +194,7 @@ try {
   await sleep(6000); // let the entry go stale under the turned-down TTL
   const quick = await pull();
   check("the pull answers immediately", quick.ms < 800, `${quick.ms}ms against a 2500ms tracker`);
-  check("and answers with real rows", quick.body.tickets?.length > 0, `${quick.body.tickets?.length} tickets`);
+  check("and answers with real rows", (quick.body.tickets?.length ?? 0) > 0, `${quick.body.tickets?.length} tickets`);
   check("not marked stale — nothing has failed", !quick.body.stale, JSON.stringify(quick.body.stale ?? null));
   await settle();
 
@@ -170,7 +211,7 @@ try {
   await ctl("/__break?mode=502");
   const broken = await pull({ fresh: true });
   check("still 200, not 502", broken.status === 200, `${broken.status}`);
-  check("the last-good list is retained", broken.body.tickets?.length > 0, `${broken.body.tickets?.length} tickets`);
+  check("the last-good list is retained", (broken.body.tickets?.length ?? 0) > 0, `${broken.body.tickets?.length} tickets`);
   check("and it says so", !!broken.body.stale, JSON.stringify(broken.body.stale ?? null));
   check("the reason is quoted", /502/.test(broken.body.stale?.error ?? ""), broken.body.stale?.error ?? "(none)");
   check("with an age", typeof broken.body.stale?.ageMs === "number", JSON.stringify(broken.body.stale ?? null));
@@ -195,13 +236,13 @@ try {
   check("the daemon gives up rather than hanging", hung.status === 200, `${hung.status} after ${hung.ms}ms`);
   check("within its request deadline", hung.ms < 10_000, `${hung.ms}ms`);
   check("and reports it as stale", !!hung.body.stale, JSON.stringify(hung.body.stale ?? null));
-  check("keeping the list", hung.body.tickets?.length > 0, `${hung.body.tickets?.length} tickets`);
+  check("keeping the list", (hung.body.tickets?.length ?? 0) > 0, `${hung.body.tickets?.length} tickets`);
 
   console.log("\n(i) the outage ends on its own");
   await ctl("/__heal");
   const healed = await pull({ fresh: true });
   check("stale clears", !healed.body.stale, JSON.stringify(healed.body.stale ?? null));
-  check("rows intact", healed.body.tickets?.length > 0, `${healed.body.tickets?.length} tickets`);
+  check("rows intact", (healed.body.tickets?.length ?? 0) > 0, `${healed.body.tickets?.length} tickets`);
 
   console.log("\n(j) at the surface — the sidebar still says when it's out of date");
   // The half that cannot be checked from here. Before DRY-72 a tracker outage
@@ -218,18 +259,18 @@ try {
   // kind of guard. The cache claims are (a)-(d), (f) and (h), and those fail
   // loudly against an uncached daemon; see README.md for the numbers.
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
-  const snap = () =>
+  const snap = (): Promise<SidebarSnap> =>
     page.evaluate(() => ({
       // Repo groups render collapsed, so `.row` counts nothing — same trap as
-      // sidebar.mjs. Assert on `.grp`.
+      // sidebar.mts. Assert on `.grp`.
       groups: document.querySelectorAll(".sidebar .grp").length,
       stale: !!document.querySelector(".sidebar .stale"),
       unreachable: document.querySelector(".sidebar .unreachable-head")?.textContent?.trim() ?? null,
       notices: [...document.querySelectorAll(".notice")]
-        .map((n) => n.textContent.trim())
+        .map((n) => (n.textContent ?? "").trim())
         .filter((t) => /Tickets aren't (loading|refreshing)/.test(t)),
     }));
-  const waitFor = async (fn, ms = 20_000) => {
+  const waitFor = async (fn: () => Promise<boolean>, ms = 20_000): Promise<boolean> => {
     const t = Date.now();
     while (Date.now() - t < ms) {
       if (await fn()) return true;

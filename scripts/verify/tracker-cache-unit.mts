@@ -50,15 +50,19 @@ function stub() {
       if (s.fail) throw new Error(s.fail);
       return [ticket(`GEN-${s.generation}`)];
     },
+    // Deliberately NOT an async function: an async fn converts a synchronous
+    // throw into a rejected promise, which is precisely the thing that made the
+    // old single-flight bug unreachable. This is the shape that reaches it.
+    //
+    // The explicit return annotation is load-bearing for a second reason: both
+    // of these close over `s` inside its own initializer, and without one
+    // TypeScript cannot break the inference cycle.
+    fetchMaybeSync: (): Promise<Ticket[]> => {
+      if (s.throwSynchronously) throw new Error("sync boom");
+      return s.fetch();
+    },
   };
-  // Deliberately NOT an async function: an async fn converts a synchronous throw
-  // into a rejected promise, which is precisely the thing that made the old
-  // single-flight bug unreachable. This is the shape that reaches it.
-  s.fetchMaybeSync = ((): Promise<Ticket[]> => {
-    if (s.throwSynchronously) throw new Error("sync boom");
-    return s.fetch();
-  }) as () => Promise<Ticket[]>;
-  return s as typeof s & { fetchMaybeSync: () => Promise<Ticket[]> };
+  return s;
 }
 
 console.log("\n(a) single-flight: concurrent misses share one fetch");
@@ -223,7 +227,15 @@ console.log("\n(j) ChildStatsCache: counts, the capped verdict, and expiry");
   const c = new ChildStatsCache(60);
   check("unknown epics say ask", c.peek("E-1") === undefined);
   c.put("E-1", { total: 3, byCategory: { done: 1, in_progress: 2 } });
-  check("counted epics come back", c.peek("E-1")?.total === 3, JSON.stringify(c.peek("E-1")));
+  // Narrowed rather than optional-chained: `peek` returns the counts, the
+  // string "capped", or undefined, and `?.total` silently reads as a miss for
+  // the capped case — which is the one distinction this section exists to draw.
+  const counted = c.peek("E-1");
+  check(
+    "counted epics come back",
+    counted !== undefined && counted !== "capped" && counted.total === 3,
+    JSON.stringify(counted),
+  );
   c.putCapped("E-2");
   check("a capped epic is a HIT, not a miss", c.peek("E-2") === "capped", String(c.peek("E-2")));
   await sleep(90);

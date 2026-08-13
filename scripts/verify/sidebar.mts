@@ -17,27 +17,37 @@
 //                     path entirely: nothing rejects, so the catch that powers
 //                     both cases above never runs unless the pull is budgeted.
 //
-// Setup + overrides: see README.md.
-import { chromium } from "playwright";
+// Setup + overrides: see README.md. Run from `daemon/`, where tsx resolves:
+//   (cd daemon && node --import tsx ../scripts/verify/sidebar.mts)
+import { chromium, type Page } from "playwright";
 
 const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5375";
 const PROXY = process.env.PROXY ?? "http://127.0.0.1:4375";
 
+/** `proxy-tracker.mts`'s control surface. `held` is sockets parked by "hang". */
+interface ProxyState {
+  mode: string;
+  blocked: number;
+  held: number;
+}
+
 let failures = 0;
-function check(name, ok, extra = "") {
+function check(name: string, ok: boolean, extra: unknown = ""): void {
   if (!ok) failures++;
   console.log(`${ok ? "  ok  " : "FAIL  "}${name}${extra ? ` — ${extra}` : ""}`);
 }
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const post = (p) => fetch(`${PROXY}${p}`, { method: "POST" }).then((r) => r.json());
-const state = () => fetch(`${PROXY}/__state`).then((r) => r.json());
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const post = (p: string): Promise<ProxyState> =>
+  fetch(`${PROXY}${p}`, { method: "POST" }).then((r) => r.json() as Promise<ProxyState>);
+const state = (): Promise<ProxyState> =>
+  fetch(`${PROXY}/__state`).then((r) => r.json() as Promise<ProxyState>);
 
 /**
  * Poll until `fn` holds. Fixed sleeps are what make a browser harness flaky:
  * the ticket poll runs every 20s and a pull takes as long as it takes, so any
  * constant is either a stall or a race. Returns seconds waited, or null.
  */
-async function waitFor(fn, ms = 30_000) {
+async function waitFor(fn: () => Promise<boolean>, ms = 30_000): Promise<number | null> {
   const t0 = Date.now();
   while (Date.now() - t0 < ms) {
     if (await fn()) return Math.round((Date.now() - t0) / 100) / 10;
@@ -46,37 +56,68 @@ async function waitFor(fn, ms = 30_000) {
   return null;
 }
 
-function snap(page) {
-  return page.evaluate(() => {
-    const q = (s) => document.querySelector(s);
-    const notices = [...document.querySelectorAll(".notice")].map((n) => n.textContent.trim());
-    return {
-      // Repo groups render COLLAPSED, so `.row` counts nothing until one is
-      // expanded — a `.row`-based check reads zero against a full sidebar and
-      // passes every assertion about an empty one for the wrong reason.
-      groups: document.querySelectorAll(".sidebar .grp").length,
-      count: q(".sidebar .count")?.textContent?.trim() ?? null,
-      unreachable: q(".sidebar .unreachable-head")?.textContent?.trim() ?? null,
-      why: q(".sidebar .unreachable-why")?.textContent?.trim() ?? null,
-      retry: !!q(".sidebar .retry"),
-      empty: q(".sidebar .empty")?.textContent?.trim() ?? null,
-      stale: !!q(".sidebar .stale"),
-      staleTitle: q(".sidebar .stale")?.getAttribute("title") ?? null,
-      dotDown: !!q(".sidebar .live.down"),
-      // The dot is a 6px empty span in a flex row: `flex: 0 0 auto` is the only
-      // thing keeping it from being the first casualty of an overflowing
-      // header, and a clamped one is invisible in exactly the case it's for.
-      dotWidth: q(".sidebar .live")?.getBoundingClientRect().width ?? 0,
-      staleWidth: q(".sidebar .stale")?.getBoundingClientRect().width ?? 0,
-      notices,
-      // Identified by its OWN copy, not by count. Any other notice in the strip
-      // (session-history, workspace-store) would otherwise fail "exactly one"
-      // and, worse, a run with zero tracker notices and one unrelated one would
-      // pass it.
-      trackerNotices: notices.filter((t) => /Tickets aren't (loading|refreshing)/.test(t)),
-      errors: [...document.querySelectorAll(".error")].map((n) => n.textContent.trim()),
-    };
-  });
+/** What the sidebar is saying right now. */
+interface Snapshot {
+  groups: number;
+  count: string | null;
+  unreachable: string | null;
+  why: string | null;
+  retry: boolean;
+  empty: string | null;
+  stale: boolean;
+  staleTitle: string | null;
+  dotDown: boolean;
+  dotWidth: number;
+  staleWidth: number;
+  notices: string[];
+  trackerNotices: string[];
+  errors: string[];
+}
+
+/**
+ * A STRING body, not a function — and this file is the reason the rule reads as
+ * mandatory rather than optional (DRY-80's trap 3). `tsx`'s esbuild transform
+ * wraps NAME-BOUND functions in a `__name(...)` helper (keepNames), and
+ * Playwright ships an evaluate body to the browser as SOURCE, where that helper
+ * does not exist. The `const q = (s) => …` below is exactly such a binding, so
+ * as a function this body arrives in the page as
+ * `ReferenceError: __name is not defined`, pointing at a line that reads fine.
+ * Strings are not transformed, so they cross intact. See auth.mts, which
+ * documents the same constraint at length.
+ */
+const SNAP_JS = `(() => {
+  const q = (s) => document.querySelector(s);
+  const notices = [...document.querySelectorAll(".notice")].map((n) => n.textContent.trim());
+  return {
+    // Repo groups render COLLAPSED, so \`.row\` counts nothing until one is
+    // expanded — a \`.row\`-based check reads zero against a full sidebar and
+    // passes every assertion about an empty one for the wrong reason.
+    groups: document.querySelectorAll(".sidebar .grp").length,
+    count: q(".sidebar .count")?.textContent?.trim() ?? null,
+    unreachable: q(".sidebar .unreachable-head")?.textContent?.trim() ?? null,
+    why: q(".sidebar .unreachable-why")?.textContent?.trim() ?? null,
+    retry: !!q(".sidebar .retry"),
+    empty: q(".sidebar .empty")?.textContent?.trim() ?? null,
+    stale: !!q(".sidebar .stale"),
+    staleTitle: q(".sidebar .stale")?.getAttribute("title") ?? null,
+    dotDown: !!q(".sidebar .live.down"),
+    // The dot is a 6px empty span in a flex row: \`flex: 0 0 auto\` is the only
+    // thing keeping it from being the first casualty of an overflowing
+    // header, and a clamped one is invisible in exactly the case it's for.
+    dotWidth: q(".sidebar .live")?.getBoundingClientRect().width ?? 0,
+    staleWidth: q(".sidebar .stale")?.getBoundingClientRect().width ?? 0,
+    notices,
+    // Identified by its OWN copy, not by count. Any other notice in the strip
+    // (session-history, workspace-store) would otherwise fail "exactly one"
+    // and, worse, a run with zero tracker notices and one unrelated one would
+    // pass it.
+    trackerNotices: notices.filter((t) => /Tickets aren't (loading|refreshing)/.test(t)),
+    errors: [...document.querySelectorAll(".error")].map((n) => n.textContent.trim()),
+  };
+})()`;
+
+function snap(page: Page): Promise<Snapshot> {
+  return page.evaluate<Snapshot>(SNAP_JS);
 }
 
 const browser = await chromium.launch();
@@ -170,7 +211,7 @@ try {
   check(
     "the rail reports it, capped",
     s.stale && (s.staleTitle ?? "").length < 500,
-    s.stale ? `${s.staleTitle.length} chars` : "no marker at all",
+    s.stale ? `${(s.staleTitle ?? "").length} chars` : "no marker at all",
   );
   await post("/__heal");
   await page.click(".sidebar .refresh");

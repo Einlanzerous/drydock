@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 // One command to bring Drydock up (DRY-28).
 //
 //   bun run up              daemon (:4317) + shell (:5320)
@@ -11,11 +10,16 @@
 // is exactly one way to start the thing regardless of how much of it you're
 // running today.
 //
-// It runs on Node, not Bun, for the same reason the daemon does (see
-// daemon/package.json): it ends up as the parent of a process tree containing
-// node-pty. It deliberately does NOT reimplement how each half starts — it
-// hands off to `bun run --filter '*' dev`, so the daemon's "must be real node"
-// invocation stays defined in one place.
+// It runs under BUN, not Node (DRY-80). That is a change from the `.mjs` this
+// replaced, and it is safe for the reason the daemon's own choice is not: this
+// process only ORCHESTRATES. It hands off to `bun run --filter '*' dev`, so the
+// daemon's "must be real node" invocation stays defined in one place
+// (daemon/package.json) and node-pty is never loaded in this process. The route
+// Node would have taken — `node --import tsx` — is not available here anyway:
+// tsx is a *daemon* workspace dependency and there is no `node_modules/.bin/tsx`
+// at the repo root, so it does not resolve from this directory at all.
+//
+// It deliberately does NOT reimplement how each half starts.
 import { spawn, spawnSync } from "node:child_process";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
@@ -26,7 +30,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const COMPOSE_FILE = path.join(ROOT, "deploy", "compose.db.yml");
 
 const args = process.argv.slice(2);
-const has = (flag) => args.includes(flag);
+const has = (flag: string) => args.includes(flag);
 
 /**
  * Load `.env` the same way the daemon does (daemon/src/env.ts): flat KEY=VALUE,
@@ -34,7 +38,7 @@ const has = (flag) => args.includes(flag);
  * TypeScript the daemon runs through tsx, and this launcher must work before
  * any of that is involved. ~15 lines is a cheaper dependency than a build step.
  */
-function loadEnv() {
+function loadEnv(): void {
   const file = path.join(ROOT, ".env");
   if (!fs.existsSync(file)) return;
   for (const raw of fs.readFileSync(file, "utf8").split("\n")) {
@@ -54,7 +58,7 @@ function loadEnv() {
 }
 
 /** Append `KEY=value` to the root `.env`, creating the file if it isn't there. */
-function appendEnv(key, value) {
+function appendEnv(key: string, value: string): void {
   const file = path.join(ROOT, ".env");
   const existing = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
   const sep = !existing || existing.endsWith("\n") ? "" : "\n";
@@ -76,7 +80,7 @@ function appendEnv(key, value) {
  * state lives — `bun run up`, `bun run daemon`, and a manually launched
  * verification instance included.
  */
-function ensureDbCredentials() {
+function ensureDbCredentials(): void {
   const port = process.env.DRYDOCK_DB_PORT ?? "5433";
   let generated = false;
   if (!process.env.DRYDOCK_DB_PASSWORD) {
@@ -88,7 +92,7 @@ function ensureDbCredentials() {
   if (!process.env.DRYDOCK_DATABASE_URL) {
     // encodeURIComponent even though generated values are URL-safe: this also
     // runs over a password a human chose, where @ : / # are ordinary.
-    const pw = encodeURIComponent(process.env.DRYDOCK_DB_PASSWORD);
+    const pw = encodeURIComponent(process.env.DRYDOCK_DB_PASSWORD ?? "");
     appendEnv("DRYDOCK_DATABASE_URL", `postgres://drydock:${pw}@127.0.0.1:${port}/drydock`);
     console.log("[up] wrote DRYDOCK_DATABASE_URL into .env");
   }
@@ -104,7 +108,7 @@ function ensureDbCredentials() {
   }
 }
 
-function volumeExists() {
+function volumeExists(): boolean {
   // Project name is pinned to `drydock` in the compose file, so the volume is
   // predictable rather than derived from whatever directory this checkout is in.
   const out = spawnSync("docker", ["volume", "inspect", "drydock_drydock_pgdata"], {
@@ -113,7 +117,7 @@ function volumeExists() {
   return out.status === 0;
 }
 
-function composeCmd() {
+function composeCmd(): [string, string[]] | null {
   const probe = spawnSync("docker", ["compose", "version"], { stdio: "ignore" });
   if (probe.status === 0) return ["docker", ["compose"]];
   const legacy = spawnSync("docker-compose", ["version"], { stdio: "ignore" });
@@ -129,7 +133,7 @@ function composeCmd() {
  * a connection error in the log at startup, which is indistinguishable from a
  * genuinely wrong DRYDOCK_DATABASE_URL. Better to be slow and unambiguous.
  */
-function compose(...argv) {
+function compose(...argv: string[]) {
   const cmd = composeCmd();
   if (!cmd) {
     console.error(
@@ -145,11 +149,11 @@ function compose(...argv) {
   // repo-root .env is never read — DRYDOCK_DB_PASSWORD and DRYDOCK_DB_PORT
   // would silently take their compose defaults while the daemon honoured the
   // real values, producing a container it cannot authenticate against.
-  const args = [...base, "--project-directory", ROOT, "-f", COMPOSE_FILE, ...argv];
-  return spawnSync(bin, args, { stdio: "inherit", cwd: ROOT, env: process.env });
+  const composeArgs = [...base, "--project-directory", ROOT, "-f", COMPOSE_FILE, ...argv];
+  return spawnSync(bin, composeArgs, { stdio: "inherit", cwd: ROOT, env: process.env });
 }
 
-function startDb() {
+function startDb(): void {
   ensureDbCredentials();
   console.log("[up] starting local postgres");
   const up = compose("up", "-d");
@@ -233,7 +237,7 @@ child.on("error", (err) => {
 // Hand signals down rather than dying first: this process is the parent of the
 // daemon, which owns live PTYs. Exiting out from under it would orphan that
 // tree instead of letting the daemon log what it's about to destroy (DRY-45).
-for (const signal of ["SIGINT", "SIGTERM"]) {
+for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.on(signal, () => child.kill(signal));
 }
 

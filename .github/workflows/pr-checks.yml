@@ -53,12 +53,26 @@ jobs:
       # --ignore-scripts skips postinstall, i.e. node-pty's native build. That
       # addon must be compiled by Node's node-gyp (CLAUDE.md) and takes real
       # time, but nothing here spawns a PTY: tsc reads node-pty's shipped .d.ts
-      # and the shell never touches it. Verified on a clean clone — both steps
-      # below pass with the addon absent. Anything that actually RUNS the daemon
-      # needs a plain `bun install`.
+      # and the shell never touches it. Verified on a clean clone — all three
+      # steps below pass with the addon absent. Anything that actually RUNS the
+      # daemon needs a plain `bun install`.
+      #
+      # It also skips playwright's browser download, which is the whole reason
+      # `playwright` can be an ordinary devDependency (DRY-80): the scripts
+      # typecheck needs its TYPES, not a browser. Bun doesn't run install
+      # scripts for untrusted packages anyway, so a developer's `bun install`
+      # doesn't fetch ~150MB of Chromium either — running a harness is what
+      # needs `bunx playwright install chromium`, once.
       - run: bun install --frozen-lockfile --ignore-scripts
 
       - name: daemon typecheck
         run: bun run --filter '@drydock/daemon' typecheck
       - name: shell build (vue-tsc + vite)
         run: bun run --filter '@drydock/shell' build
+      # scripts/ is neither workspace, so it was in neither check (DRY-80): a
+      # `.mts` harness here was TypeScript that tsx STRIPPED rather than
+      # TypeScript anything CHECKED, which bought the syntax and none of the
+      # safety. auth.mts had two live type errors nobody had ever seen, and the
+      # first run of this step found seven more across two other files.
+      - name: scripts typecheck
+        run: bun run typecheck:scripts

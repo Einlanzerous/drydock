@@ -14,7 +14,16 @@
 // where a swept session's scrollback was the only copy there ever was, and the
 // database tier is where a removed window could come back as a tombstone
 // (round B's "the window is gone" is what proves it doesn't).
-import { chromium } from "playwright";
+//
+// The `page.evaluate` bodies below are functions rather than strings, and that
+// is checked rather than assumed — none of them binds a name to a function, so
+// none picks up tsx's `__name(...)` wrapper (see the note at the top of
+// surface.mts). A `const q = (s) => …` added inside one would break it.
+//
+// Run from `daemon/`, where tsx resolves (DRY-80):
+//   (cd daemon && node --import tsx ../scripts/verify/sweep.mts)
+import { chromium, type Page } from "playwright";
+import type { ConfigResponse, HealthResponse, SessionInfo, SessionsResponse, SpawnResponse } from "./api.mjs";
 
 const DAEMON = process.env.DRY60_DAEMON ?? "http://127.0.0.1:4360";
 const SHELL = process.env.DRY60_SHELL ?? "http://127.0.0.1:5360";
@@ -23,20 +32,29 @@ const SHELL = process.env.DRY60_SHELL ?? "http://127.0.0.1:5360";
 const POLL_MS = 3000;
 
 let failures = 0;
-function check(name, ok, detail) {
+function check(name: string, ok: boolean, detail?: string): void {
   if (!ok) failures++;
   console.log(`${ok ? "PASS" : "FAIL"}  ${name}`);
   if (detail) console.log(`      ${detail}`);
 }
 
-const api = async (p, init) => {
+/**
+ * The 204/unparseable case really does yield null, and the cast folds it in —
+ * one deliberate assertion at the boundary rather than a `!` at every call
+ * site. The type parameter each caller names IS checked, against the daemon's
+ * own response types.
+ *
+ * The trailing comma on `<T,>` is required in a `.mts` file: `<T>` alone at the
+ * start of an arrow is reserved syntax there (it would be a JSX tag in `.tsx`).
+ */
+const api = async <T,>(p: string, init?: RequestInit): Promise<T> => {
   const res = await fetch(`${DAEMON}${p}`, init);
   if (!res.ok && res.status !== 404) throw new Error(`${p} -> ${res.status}`);
-  return res.status === 204 ? null : res.json().catch(() => null);
+  return (res.status === 204 ? null : await res.json().catch(() => null)) as T;
 };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const json = (body) => ({
+const json = (body: unknown): RequestInit => ({
   method: "POST",
   headers: { "Content-Type": "application/json" },
   body: JSON.stringify(body),
@@ -49,27 +67,30 @@ const ENDS_BADLY = ["-c", "exit 3"];
 /** Never ends. Standing in for an agent still working. */
 const RUNS_ON = ["-c", "while :; do sleep 1; done"];
 
-async function spawn(args, extra = {}) {
-  const out = await api("/api/sessions", json({ command: "/bin/sh", args, ...extra }));
+async function spawn(args: string[], extra: Record<string, unknown> = {}): Promise<string> {
+  const out = await api<SpawnResponse>("/api/sessions", json({ command: "/bin/sh", args, ...extra }));
   return out.session.id;
 }
 
-const listed = async () => (await api("/api/sessions")).sessions;
-const byId = async (id) => (await listed()).find((s) => s.id === id);
+const listed = async (): Promise<SessionInfo[]> =>
+  (await api<SessionsResponse>("/api/sessions")).sessions;
+const byId = async (id: string): Promise<SessionInfo | undefined> =>
+  (await listed()).find((s) => s.id === id);
 
 /**
  * Which tier this daemon is on. The sweep behaves identically either way; what
  * differs is what a swept session leaves behind, and therefore whether the desk
  * owes anybody a warning about it.
  */
-const KEEPS_HISTORY = (await api("/healthz")).store?.capabilities?.sessionHistory === true;
+const KEEPS_HISTORY =
+  (await api<HealthResponse>("/healthz")).store?.capabilities?.sessionHistory === true;
 console.log(`tier: ${KEEPS_HISTORY ? "postgres (history kept)" : "file (no history)"}`);
 
 /** The DRY-58 notice line, if the desk is holding one about session history. */
-const historyNotice = (page) =>
+const historyNotice = (page: Page): Promise<string | undefined> =>
   page.evaluate(() =>
     [...document.querySelectorAll(".notice")]
-      .map((n) => n.textContent.trim())
+      .map((n) => (n.textContent ?? "").trim())
       .find((t) => t.includes("aren't being recorded")),
   );
 
@@ -78,7 +99,7 @@ const historyNotice = (page) =>
  * meaningful against a daemon started with it turned down, and hardcoding it
  * here would mean silently waiting out five real minutes and calling it a pass.
  */
-const config = await api("/api/config");
+const config = await api<ConfigResponse>("/api/config");
 const SWEEP_MS = config?.desk?.clearFinishedAfterMs;
 if (!SWEEP_MS || SWEEP_MS > 30_000) {
   console.log(
@@ -99,12 +120,23 @@ const PAST_SWEEP = SWEEP_MS + POLL_MS * 2;
  * for) tests OUR rule; actually backgrounding a headless tab would also throttle
  * the poll to once a minute and test Chromium's.
  */
-async function setVisible(page, visible) {
+async function setVisible(page: Page, visible: boolean): Promise<void> {
   await page.evaluate((v) => {
     Object.defineProperty(document, "visibilityState", { value: v ? "visible" : "hidden", configurable: true });
     Object.defineProperty(document, "hidden", { value: !v, configurable: true });
     document.dispatchEvent(new Event("visibilitychange"));
   }, visible);
+}
+
+/** One rail card, measured three separate ways — see `cards` below. */
+interface Card {
+  label: string;
+  meta: string;
+  state: string;
+  clearing: boolean;
+  metaShown: boolean;
+  metaFits: boolean;
+  cardInLane: boolean;
 }
 
 /**
@@ -126,7 +158,7 @@ async function setVisible(page, visible) {
  *    sort puts quiet (finished, counting-down) cards last, so they are the ones
  *    that go.
  */
-const cards = (page) =>
+const cards = (page: Page): Promise<Card[]> =>
   page.evaluate(() => {
     const laneRect = document.querySelector(".underway")?.getBoundingClientRect();
     return [...document.querySelectorAll(".card")].map((c) => {
@@ -141,8 +173,8 @@ const cards = (page) =>
       const sharesRowWithId =
         !!mr && !!ir && !(mr.top >= ir.bottom - 0.5 || mr.bottom <= ir.top + 0.5);
       return {
-        label: id?.textContent.trim() ?? "",
-        meta: meta?.textContent.trim() ?? "",
+        label: id?.textContent?.trim() ?? "",
+        meta: meta?.textContent?.trim() ?? "",
         state: c.className.replace("card", "").trim(),
         // The card's own verdict, not the wording.
         clearing: c.classList.contains("clearing"),
@@ -153,7 +185,10 @@ const cards = (page) =>
           mr.right <= cr.right + 0.5 &&
           mr.left >= cr.left - 0.5 &&
           mr.bottom <= cr.bottom + 0.5 &&
-          (!sharesRowWithId || ir.right <= mr.left + 0.5),
+          // `!!ir` is implied by `sharesRowWithId` and stated anyway: the
+          // implication is not one a compiler can follow, and an assertion here
+          // would be the guess this file was converted to stop making.
+          (!sharesRowWithId || (!!ir && ir.right <= mr.left + 0.5)),
         cardInLane:
           !!laneRect && cr.right <= laneRect.right + 0.5 && cr.left >= laneRect.left - 0.5,
       };
@@ -161,11 +196,15 @@ const cards = (page) =>
   });
 
 /** Every window frame, as {title, tag}. `.statustag` is where the countdown renders. */
-const frames = (page) =>
+interface Frame {
+  title: string;
+  tag: string;
+}
+const frames = (page: Page): Promise<Frame[]> =>
   page.evaluate(() =>
     [...document.querySelectorAll(".frame")].map((f) => ({
-      title: f.querySelector(".title")?.textContent.trim() ?? "",
-      tag: f.querySelector(".statustag")?.textContent.trim() ?? "",
+      title: f.querySelector(".title")?.textContent?.trim() ?? "",
+      tag: f.querySelector(".statustag")?.textContent?.trim() ?? "",
     })),
   );
 
@@ -284,7 +323,7 @@ const wsAgent = await spawn(ENDS_WELL, { title: "DRY60-WS" });
 const wsShell = await spawn(RUNS_ON, { title: "DRY60-WS-SHELL" });
 await sleep(3000);
 
-const win = (id, title, z, extra = {}) => ({
+const win = (id: string, title: string, z: number, extra: Record<string, unknown> = {}) => ({
   id,
   kind: "terminal",
   type: "bash",
@@ -328,7 +367,7 @@ await page.click('.frame:has(.title:text-is("DRY60-FOCUSED")) .body');
 await sleep(POLL_MS * 2);
 
 let open = await frames(page);
-const tagOf = (t) => open.find((f) => f.title === t)?.tag ?? "(no frame)";
+const tagOf = (t: string) => open.find((f) => f.title === t)?.tag ?? "(no frame)";
 check(
   "an unfocused finished window says it is going, in its own title bar",
   tagOf("DRY60-IDLE").startsWith("clears in"),
@@ -413,7 +452,7 @@ for (const id of [liveC, wsAgent, wsShell]) await api(`/api/sessions/${id}/kill`
 console.log("\n--- round C: ten runs, and every countdown still legible ---");
 
 const CROWD = 10;
-const crowd = [];
+const crowd: string[] = [];
 for (let i = 0; i < CROWD; i++) {
   crowd.push(
     await spawn(ENDS_WELL, { autonomous: true, ticket: `DRY60-C${i}`, title: `DRY60-C${i}` }),
@@ -476,7 +515,7 @@ check(
   // that has ever run against this daemon, which round A explicitly refuses to
   // make for exactly this reason.
   !seen.some((c) => c.label.startsWith("DRY60-C")) &&
-    (await Promise.all(crowd.map(byId))).every((s) => s === undefined),
+    (await Promise.all(crowd.map((id) => byId(id)))).every((s) => s === undefined),
   `${seen.length} card(s) left: ${JSON.stringify(seen.map((c) => c.label))}`,
 );
 
@@ -516,7 +555,7 @@ await setVisible(page, true);
 await sleep(POLL_MS * 2);
 
 open = await frames(page);
-const tagFor = (t) => open.find((f) => f.title === t)?.tag ?? "(no frame)";
+const tagFor = (t: string) => open.find((f) => f.title === t)?.tag ?? "(no frame)";
 check(
   "a window focused by the window manager, not by a person, still counts down",
   tagFor("DRY60-TOPZ").startsWith("clears in") && tagFor("DRY60-UNDER").startsWith("clears in"),

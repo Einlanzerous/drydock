@@ -32,7 +32,15 @@ const base: TicketDetail = {
 };
 
 let failures = 0;
-function check(name: string, cond: boolean, detail?: string) {
+/**
+ * `detail` is `unknown` rather than `string` because most of what a failure
+ * here wants to print is a length, a count or an array of matched bylines —
+ * the numbers ARE the diagnosis. Before DRY-80 typechecked this directory it
+ * was declared `string` and five call sites passed a number or a `string[]`
+ * anyway; they read fine, since template interpolation formats them, but the
+ * declaration was a lie nothing was checking.
+ */
+function check(name: string, cond: boolean, detail?: unknown) {
   if (!cond) failures++;
   console.log(`${cond ? "ok  " : "FAIL"}  ${name}${cond || !detail ? "" : `\n        ${detail}`}`);
 }

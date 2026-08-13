@@ -5,33 +5,66 @@
 // CLAUDE.md is explicit that these are the tests that matter for "the desk
 // follows the person": both pass under the old localStorage design by accident,
 // so only the surface version proves anything.
-import { chromium } from "playwright";
+//
+// ON `page.evaluate` BODIES HERE (DRY-80). This file runs under `tsx`, whose
+// esbuild transform wraps NAME-BOUND functions in a `__name(...)` helper
+// (keepNames) — and Playwright ships an evaluate body to the browser as SOURCE,
+// where that helper does not exist, so the page throws
+// `ReferenceError: __name is not defined` at a line that reads perfectly well.
+// Anonymous inline arrows are not name-bound and cross intact, which is why
+// most of the bodies below are still functions. `VISIBILITY_JS` is a string
+// because its body binds a name — the `get:` accessor — and is therefore the
+// one that would break. Anything added here that introduces a `const q = …`
+// inside a body has to become a string too; see auth.mts, which is all strings.
+//
+// Run from `daemon/`, where tsx resolves:
+//   (cd daemon && node --import tsx ../scripts/verify/surface.mts)
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import type { HealthResponse, SessionsResponse } from "./api.mjs";
 
 const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5370";
 const DAEMON = process.env.DAEMON ?? "http://127.0.0.1:4370"; // past the proxy — ground truth
 const PROXY = process.env.PROXY ?? "http://127.0.0.1:4371"; // what the shell talks to (and its mirror key)
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const j = async (u, i) => (await fetch(u, i)).json();
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// The trailing comma is required in a `.mts` file: `<T>` alone at the start of
+// an arrow is reserved syntax there (it would be a JSX tag in `.tsx`).
+const j = async <T,>(u: string, i?: RequestInit): Promise<T> =>
+  (await fetch(u, i)).json() as Promise<T>;
 let failures = 0;
-const check = (n, ok, d = "") => {
+const check = (n: string, ok: boolean, d: unknown = "") => {
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${n}${d ? ` — ${d}` : ""}`);
   if (!ok) failures++;
 };
-const noticed = (page) => page.locator(".notice").count();
-const geo = (page) =>
+const noticed = (page: Page) => page.locator(".notice").count();
+const geo = (page: Page): Promise<number[]> =>
   page.$$eval(".frame", (els) =>
     els.map((e) => Math.round(e.getBoundingClientRect().x)).sort((a, b) => a - b),
   );
-async function drag(page, dx, dy) {
+
+/**
+ * Being in another tab, as the desk sees it — a STRING body, see the note at
+ * the top of this file. The `get:` accessor is bound to a name, so under tsx's
+ * transform this exact body is the one that arrives in the page carrying an
+ * undefined `__name` call.
+ */
+const VISIBILITY_JS = `(() => {
+  window.__vis = "hidden";
+  Object.defineProperty(document, "visibilityState", { get: () => window.__vis });
+})()`;
+
+async function drag(page: Page, dx: number, dy: number): Promise<void> {
   const b = await page.locator(".frame .bar").first().boundingBox();
+  // A missing box means no window was on the desk to drag, which invalidates
+  // everything after it — said out loud rather than as a TypeError on `b.x`.
+  if (!b) throw new Error("no .frame .bar on the desk to drag");
   await page.mouse.move(b.x + b.width / 2, b.y + b.height / 2);
   await page.mouse.down();
   await page.mouse.move(b.x + b.width / 2 + dx, b.y + b.height / 2 + dy, { steps: 10 });
   await page.mouse.up();
   await sleep(900);
 }
-async function open(browser) {
+async function open(browser: Browser): Promise<{ ctx: BrowserContext; page: Page }> {
   const ctx = await browser.newContext({ viewport: { width: 1600, height: 900 } });
   const page = await ctx.newPage();
   await page.goto(SHELL);
@@ -41,7 +74,7 @@ async function open(browser) {
 }
 
 await fetch(`${PROXY}/__heal`, { method: "POST" });
-for (const s of (await j(`${DAEMON}/api/sessions`)).sessions) {
+for (const s of (await j<SessionsResponse>(`${DAEMON}/api/sessions`)).sessions) {
   await fetch(`${DAEMON}/api/sessions/${s.id}/kill`, { method: "POST" });
 }
 await fetch(`${DAEMON}/api/workspace`, { method: "DELETE" });
@@ -56,7 +89,7 @@ await sleep(600);
 const browser = await chromium.launch();
 
 console.log("\n1. the desk follows the person (DRY-28, unchanged by this work)");
-let arranged;
+let arranged: number[];
 {
   const { ctx, page } = await open(browser);
   await drag(page, 220, 130);
@@ -129,10 +162,7 @@ console.log("\n3. a tab nobody is looking at doesn't wedge");
   // Stub the API the loop consults. Not a perfect background tab, but it does
   // exercise the branch — and the branch's whole job is to reschedule rather
   // than sit waiting for an event that may never arrive.
-  await page.evaluate(() => {
-    window.__vis = "hidden";
-    Object.defineProperty(document, "visibilityState", { get: () => window.__vis });
-  });
+  await page.evaluate(VISIBILITY_JS);
   await fetch(`${PROXY}/__break?mode=503`, { method: "POST" });
   await drag(page, 100, 60);
   await sleep(1500);
@@ -147,10 +177,10 @@ console.log("\n3. a tab nobody is looking at doesn't wedge");
   await ctx.close();
 }
 
-const { sessions } = await j(`${DAEMON}/api/sessions`);
+const { sessions } = await j<SessionsResponse>(`${DAEMON}/api/sessions`);
 console.log("\n4. still true at the end");
 check("sessions all live", sessions.length === 2 && sessions.every((s) => s.status === "running"));
-check("daemon ok", (await j(`${DAEMON}/healthz`)).ok === true);
+check("daemon ok", (await j<HealthResponse>(`${DAEMON}/healthz`)).ok === true);
 
 await browser.close();
 console.log(`\n${failures === 0 ? "ALL PASS" : `${failures} FAILURE(S)`}`);

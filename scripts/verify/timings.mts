@@ -11,21 +11,34 @@
 //   3. One request per window pays the ~5s connect timeout, and the window
 //      widens 10s → 20s → 30s and then stops.
 //   4. Healing restores service with no daemon restart, and the backoff resets.
+//
+// Run from `daemon/`, where tsx resolves (DRY-80):
+//   (cd daemon && node --import tsx ../scripts/verify/timings.mts)
+import type { HealthResponse, WorkspaceResponse } from "./api.mjs";
+
 const DAEMON = process.env.DAEMON ?? "http://127.0.0.1:4372";
 const PGCTL = "http://127.0.0.1:5457";
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;
-const check = (n, ok, d = "") => {
+const check = (n: string, ok: boolean, d: unknown = "") => {
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${n}${d ? ` — ${d}` : ""}`);
   if (!ok) failures++;
 };
 
-async function timed(path) {
+/** One request, with the wall clock around it. `status: 0` = never answered. */
+interface Timed<T> {
+  ms: number;
+  status: number;
+  body: T | null;
+  err?: string;
+}
+
+async function timed<T>(path: string): Promise<Timed<T>> {
   const t0 = Date.now();
   try {
     const res = await fetch(`${DAEMON}${path}`, { signal: AbortSignal.timeout(45_000) });
-    const body = await res.json().catch(() => null);
+    const body = (await res.json().catch(() => null)) as T | null;
     return { ms: Date.now() - t0, status: res.status, body };
   } catch (err) {
     // A request the daemon never answers is itself a result — and the one this
@@ -34,10 +47,13 @@ async function timed(path) {
   }
 }
 
+const workspace = () => timed<WorkspaceResponse>("/api/workspace");
+const healthz = () => timed<HealthResponse>("/healthz");
+
 console.log("\nBaseline (database reachable)");
 {
-  const ws = await timed("/api/workspace");
-  const hz = await timed("/healthz");
+  const ws = await workspace();
+  const hz = await healthz();
   check("workspace 200 and quick", ws.status === 200 && ws.ms < 1000, `${ws.ms}ms`);
   check("healthz reports the store ok", hz.body?.store?.ok === true, `${hz.ms}ms`);
   check("no `cooling` field while healthy", hz.body?.store?.cooling === undefined);
@@ -49,7 +65,7 @@ await fetch(`${PGCTL}/__break`, { method: "POST" });
 // First request after the partition is the one that pays. ~5s = the pool's
 // connectionTimeoutMillis. If this came back instantly the proxy would be
 // refusing rather than partitioning, and the whole test would be worthless.
-const first = await timed("/api/workspace");
+const first = await workspace();
 check(
   "the first request pays the connect timeout (a real partition, not a refusal)",
   first.status === 503 && first.ms >= 4000,
@@ -57,15 +73,15 @@ check(
 );
 
 // ...and every request behind it in that window returns immediately.
-const inWindow = [];
-for (let i = 0; i < 4; i++) inWindow.push(await timed("/api/workspace"));
+const inWindow: Timed<WorkspaceResponse>[] = [];
+for (let i = 0; i < 4; i++) inWindow.push(await workspace());
 check(
   "the rest of the window fast-fails without dialling",
   inWindow.every((r) => r.status === 503 && r.ms < 300),
   inWindow.map((r) => `${r.ms}ms`).join(" "),
 );
 
-const hzCool = await timed("/healthz");
+const hzCool = await healthz();
 check(
   "healthz answers immediately inside the cooldown",
   hzCool.ms < 300,
@@ -77,19 +93,23 @@ check(
   JSON.stringify(hzCool.body?.store),
 );
 check("the daemon itself is still ok", hzCool.body?.ok === true);
+// Read into a local rather than compared through the chain: `retryInMs` is
+// optional, and `undefined <= 10_000` is a silent false in JavaScript but an
+// error to tsc. The local keeps the false and makes the reason legible.
+const retryIn = hzCool.body?.store?.retryInMs;
 check(
   "retryInMs is inside the first window",
-  hzCool.body.store.retryInMs > 0 && hzCool.body.store.retryInMs <= 10_000,
-  `${hzCool.body.store.retryInMs}ms`,
+  retryIn !== undefined && retryIn > 0 && retryIn <= 10_000,
+  `${retryIn}ms`,
 );
 
 // The window has to WIDEN. Poll until a request pays the connect timeout again
 // (the probe at the end of a window), and measure the gaps between probes.
 console.log("\nBackoff: the window widens 10s → 20s → 30s");
-const probes = [];
+const probes: number[] = [];
 const t0 = Date.now();
 while (probes.length < 3 && Date.now() - t0 < 130_000) {
-  const r = await timed("/api/workspace");
+  const r = await workspace();
   if (r.ms >= 4000) probes.push(Date.now());
   await sleep(400);
 }
@@ -109,9 +129,9 @@ check(
 
 console.log("\nHeal (no daemon restart)");
 await fetch(`${PGCTL}/__heal`, { method: "POST" });
-let healed = null;
+let healed: Timed<WorkspaceResponse> | null = null;
 for (let i = 0; i < 90; i++) {
-  const r = await timed("/api/workspace");
+  const r = await workspace();
   if (r.status === 200) {
     healed = r;
     break;
@@ -119,19 +139,22 @@ for (let i = 0; i < 90; i++) {
   await sleep(1000);
 }
 check("the store healed without a restart", healed !== null, healed ? `${healed.ms}ms` : "never");
-const hzWell = await timed("/healthz");
-check("healthz green again", hzWell.body?.store?.ok === true && !hzWell.body.store.cooling);
+const hzWell = await healthz();
+check("healthz green again", hzWell.body?.store?.ok === true && !hzWell.body?.store?.cooling);
 check("and it probes for real again", hzWell.ms < 1000, `${hzWell.ms}ms`);
 
 // Backoff must RESET, or the next outage inherits a 30s window it didn't earn.
 await fetch(`${PGCTL}/__break`, { method: "POST" });
-const again = await timed("/api/workspace");
+const again = await workspace();
 check("a fresh outage pays one connect timeout", again.ms >= 4000, `${again.ms}ms`);
-const hzAgain = await timed("/healthz");
+const hzAgain = await healthz();
+// Same treatment as `retryIn` above: absent must read as "not inside the first
+// window", which is what the loose comparison did before it was checked.
+const retryAgain = hzAgain.body?.store?.retryInMs;
 check(
   "the backoff reset — first window is 10s again, not 30s",
-  hzAgain.body?.store?.retryInMs <= 10_000,
-  `${hzAgain.body?.store?.retryInMs}ms`,
+  retryAgain !== undefined && retryAgain <= 10_000,
+  `${retryAgain}ms`,
 );
 await fetch(`${PGCTL}/__heal`, { method: "POST" });
 

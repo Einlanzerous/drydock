@@ -9,6 +9,17 @@
 // Bun runs an explicit `node` command in a script with the real Node binary, so
 // wiring this as `"postinstall": "node scripts/build-native.mjs"` builds the
 // addon correctly even though Bun drives the install.
+//
+// WHY THIS IS STILL `.mjs` (DRY-80). Every other script in this directory is
+// TypeScript; this one can't be, and the reason is the moment it runs rather
+// than anything about what it does. It is the postinstall, so it executes while
+// the dependency tree is still being assembled — and the TypeScript loader it
+// would need is a *daemon workspace* dependency: there is no
+// `node_modules/.bin/tsx` at the repo root, so `node --import tsx` from here
+// fails outright (verified, not assumed). Nor can it be handed to `bun`: Bun
+// compiling node-pty is the exact failure this file exists to route around.
+// A postinstall that breaks a fresh clone is a worse outcome than a file that
+// doesn't match the house style, so it stays JavaScript on plain Node.
 import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import * as path from "node:path";

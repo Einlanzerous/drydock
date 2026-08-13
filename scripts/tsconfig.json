@@ -1,0 +1,34 @@
+{
+  // scripts/ is checked separately from the daemon and the shell (DRY-80).
+  //
+  // It cannot join daemon/tsconfig.json: that one is `"include": ["src"]` with
+  // `"types": ["node"]` and no DOM lib, while these files are half Node (a
+  // harness driving the daemon's HTTP API) and half browser (the `page.evaluate`
+  // bodies that read the shell's DOM). Checking them under the daemon's config
+  // either drops the DOM types or leaks them into the daemon's own build.
+  //
+  // Before this existed, a `.mts` here was TypeScript that tsx STRIPPED rather
+  // than TypeScript anything CHECKED — which bought the syntax and none of the
+  // safety. auth.mts had carried two live type errors since it was written.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    // DOM is here for the `page.evaluate` bodies. Note it only types the ones
+    // written as functions — a body passed as a STRING (which is what Playwright
+    // plus tsx's esbuild transform forces on any body containing a named inner
+    // function; see the comment at the top of auth.mts) is opaque to tsc by
+    // construction, so those declare their shape through the evaluate generic.
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"]
+  },
+  // The harnesses only. `build-native.mjs` stays JavaScript on purpose (it runs
+  // in postinstall under plain `node`, where there is no tsx to import), and
+  // `verify/drift.sh` is shell orchestrating docker and psql.
+  "include": ["*.mts", "verify/*.mts"]
+}

@@ -2,7 +2,7 @@
 // verification), with controls and — the reason it exists — REQUEST COUNTERS.
 //
 // Every other tracker harness here stubs at a layer above this one:
-// proxy-tracker.mjs sits between the browser and the daemon, so it can break
+// proxy-tracker.mts sits between the browser and the daemon, so it can break
 // `/api/tracker/tickets` but never sees what the daemon does upstream. DRY-72's
 // claims are entirely about upstream: that N browser polls become one fan-out,
 // that a child-stats query doesn't repeat every 20s, that the daemon keeps
@@ -26,16 +26,45 @@
 // bucket (DRY-83) — the shape the sidebar's pull renders as an epic with nothing
 // under it, and the one an on-demand child fetch exists for. OFF by default,
 // because every epic in the set costs one more child-stats request and
-// `tracker-cache.mjs` asserts on those counts exactly.
+// `tracker-cache.mts` asserts on those counts exactly.
+//
+// Run from `daemon/`, where tsx resolves (DRY-80):
+//   (cd daemon && node --import tsx ../scripts/verify/stub-tracker.mts)
 import http from "node:http";
 
 const PORT = Number(process.env.STUB_PORT ?? 4386);
 const DORMANT_EPIC = process.env.STUB_DORMANT_EPIC === "1";
 
-let mode = "ok";
+/**
+ * A row as Switchyard's API returns it — not `TicketDetail`, which is the
+ * daemon's own normalised shape. This is deliberately the WIRE shape, snake
+ * case and all, because the thing under test is the provider's parsing of it.
+ */
+interface StubTicket {
+  id: string;
+  key: string;
+  title: string;
+  type: "epic" | "task";
+  status: { category: string; display_name: string };
+  parent_id?: string;
+  parent?: { key: string; title: string };
+}
+
+/** What `/__state` reports. Each counter answers a different question. */
+interface Counts {
+  list: number;
+  epicList: number;
+  children: number;
+  lookup: number;
+  total: number;
+}
+
+type Mode = "ok" | "502" | "hang";
+
+let mode: Mode = "ok";
 let latencyMs = 0;
-const counts = { list: 0, epicList: 0, children: 0, lookup: 0, total: 0 };
-const held = new Set();
+const counts: Counts = { list: 0, epicList: 0, children: 0, lookup: 0, total: 0 };
+const held = new Set<http.ServerResponse>();
 // Requests the daemon has open right now. Reported but never reset: it's what
 // lets a harness wait for a BACKGROUND refresh to land before asserting on
 // counts. Counting alone can't — under latency there's a gap between a
@@ -46,7 +75,7 @@ let inflight = 0;
 // One epic with two children (one of them closed, so childStats has something
 // to break down), plus loose tickets. Small on purpose: the assertions are
 // about how MANY requests arrive, not how many rows come back.
-const TICKETS = [
+const TICKETS: StubTicket[] = [
   {
     id: "e1",
     key: "DRY-1",
@@ -98,7 +127,7 @@ const TICKETS = [
 // One child is `closed` so `childStats` has a done segment: the row's
 // expandability is derived from total-minus-done, and an epic with a done child
 // is what tells that apart from a plain `total > 0`.
-const DORMANT = [
+const DORMANT: StubTicket[] = [
   {
     id: "e10",
     key: "DRY-10",
@@ -137,18 +166,19 @@ const DORMANT = [
 if (DORMANT_EPIC) TICKETS.push(...DORMANT);
 
 const PROJECT = { key: "DRY", name: "Drydock", repo_url: null };
-const withProject = (t) => ({ ...t, project: PROJECT, labels: [] });
+const withProject = (t: StubTicket) => ({ ...t, project: PROJECT, labels: [] });
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url ?? "/", "http://x");
-  const json = (code, body) => {
+  const json = (code: number, body: unknown) => {
     res.writeHead(code, { "Content-Type": "application/json" });
     res.end(JSON.stringify(body));
   };
 
   // --- control plane (never broken, never counted) ---
   if (url.pathname === "/__break") {
-    mode = url.searchParams.get("mode") ?? "502";
+    const m = url.searchParams.get("mode");
+    mode = m === "hang" ? "hang" : "502";
     return json(200, { mode });
   }
   if (url.pathname === "/__heal") {
@@ -162,7 +192,7 @@ const server = http.createServer(async (req, res) => {
     return json(200, { latencyMs });
   }
   if (url.pathname === "/__reset") {
-    for (const k of Object.keys(counts)) counts[k] = 0;
+    for (const k of Object.keys(counts) as (keyof Counts)[]) counts[k] = 0;
     return json(200, counts);
   }
   if (url.pathname === "/__state") return json(200, { mode, latencyMs, inflight, ...counts });
