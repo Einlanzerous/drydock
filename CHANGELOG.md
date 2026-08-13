@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.3.0](https://github.com/Einlanzerous/drydock/compare/v1.2.0...v1.3.0) (2026-08-13)
+
+
+### Features
+
+* **daemon:** put session exits on the event stream (DRY-64) ([7a3957c](https://github.com/Einlanzerous/drydock/commit/7a3957c902fc37e38a1917536d0c318ee7ed8985))
+* **daemon:** put session exits on the event stream (DRY-64) ([9806efe](https://github.com/Einlanzerous/drydock/commit/9806efe5ddbf43633ce3de799cc1a04f47653118))
+
+
+### Bug Fixes
+
+* **daemon:** carry endReason on session-exit, and correct what it promises (DRY-64) ([d7ee3c4](https://github.com/Einlanzerous/drydock/commit/d7ee3c4042852403303c64d1b78fa016b80db978))
+* **scripts:** address review of the TypeScript conversion (DRY-80) ([186ea82](https://github.com/Einlanzerous/drydock/commit/186ea826b42700092e90bb9b118b01c65f9aec98))
+* **scripts:** fold in main, and make the gate report both halves (DRY-80) ([0a6dec2](https://github.com/Einlanzerous/drydock/commit/0a6dec24f9fa3dbdca5a1c26d37866dd0a0d944f))
+* **shell:** address review on the clipboard chords (DRY-71) ([a7d214a](https://github.com/Einlanzerous/drydock/commit/a7d214a568833a67f4c1234990a88aed204701d3))
+* **shell:** copy from a terminal pane with Ctrl+Shift+C (DRY-71) ([f5c22aa](https://github.com/Einlanzerous/drydock/commit/f5c22aa3da563dac4b0b0558104af86771b182cb))
+* **shell:** copy from a terminal pane with Ctrl+Shift+C (DRY-71) ([584bcd4](https://github.com/Einlanzerous/drydock/commit/584bcd480437051e2eddbe1d7c72c29af0ef70e1))
+* **shell:** draw the real mark in the tab, not just the hull (DRY-86) ([17ec3fe](https://github.com/Einlanzerous/drydock/commit/17ec3feb59a5dbd1cf4734aaadebca034809555b))
+* **shell:** put the favicon's plate back and drop its media query (DRY-86) ([7e91b8c](https://github.com/Einlanzerous/drydock/commit/7e91b8c1728c027a8ed3e0b63b88aefa78d1d867))
+* **shell:** redraw the favicon at the size it is used (DRY-86) ([f0d8760](https://github.com/Einlanzerous/drydock/commit/f0d87604d3ea2bccd216a940669155cc8b45b4a1))
+* **shell:** redraw the favicon at the size it is used (DRY-86) ([12518de](https://github.com/Einlanzerous/drydock/commit/12518de771a568899f886c1cc4b17a7ca504fbca))
+* **shell:** stop the backlog control dimming on a poll nobody asked for (DRY-85) ([9df7e35](https://github.com/Einlanzerous/drydock/commit/9df7e3598dd249c00027c004cedc0d0c01bf6112))
+* **shell:** stop the backlog control dimming on a poll nobody asked for (DRY-85) ([4693e1e](https://github.com/Einlanzerous/drydock/commit/4693e1ee2a54ee12250e60cbbfc5b848ea4e9dea))
+
+
+### Documentation
+
+* **scripts:** move the harness docs onto the .mts invocations (DRY-80) ([501f704](https://github.com/Einlanzerous/drydock/commit/501f7047421f23464daffab693fa18b94426b0fd))
+* **shell:** record that the inspect-element accelerator is preventable (DRY-71) ([fbae626](https://github.com/Einlanzerous/drydock/commit/fbae626b2b63626aa53eae7eb9059ef9599944f8))
+
+
+### Refactoring
+
+* **scripts:** convert the remaining .mjs harnesses to TypeScript (DRY-80) ([d9b1857](https://github.com/Einlanzerous/drydock/commit/d9b185758000aa99c09ac1cd5e9d6a8cab004ecc))
+* **scripts:** convert the remaining .mjs harnesses to TypeScript, and typecheck them (DRY-80) ([31b042b](https://github.com/Einlanzerous/drydock/commit/31b042ba362ae789eb14c6378981dc136aba956c))
+
 ## [1.2.0](https://github.com/Einlanzerous/drydock/compare/v1.1.0...v1.2.0) (2026-08-12)
 
 
