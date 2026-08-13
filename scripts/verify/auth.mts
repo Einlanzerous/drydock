@@ -294,9 +294,13 @@ try {
     });
     const attached = await waitFor(
       async () =>
-        (await page.evaluate(
-          `Array.from(document.querySelectorAll(".xterm-rows")).map((n) => n.textContent).join(" ")`,
-        ).catch(() => "")).includes(marker),
+        (
+          await page
+            .evaluate<string>(
+              `Array.from(document.querySelectorAll(".xterm-rows")).map((n) => n.textContent).join(" ")`,
+            )
+            .catch(() => "")
+        ).includes(marker),
       25_000,
     );
     check("PTY output reaches the browser over the WebSocket", attached !== null, `after ${attached}s`);
@@ -444,7 +448,7 @@ try {
     );
     // The card names its owner rather than its origin, which is the difference
     // between "why is this on my rail" being answerable and not.
-    const label = await b.evaluate(cardField("A-PUBLIC", ".origin"));
+    const label = await b.evaluate<string | null>(cardField("A-PUBLIC", ".origin"));
     check("the shared card names its owner", label === "MAGOS", label ?? "nothing");
     // No ✕ on somebody else's run: clearing means killing, which the daemon
     // refuses, so the button would fail every time it was pressed.

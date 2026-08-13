@@ -1,0 +1,70 @@
+{
+  // scripts/, the NODE half (DRY-80). See tsconfig.browser.json for the other.
+  //
+  // Why scripts/ is checked apart from the daemon and the shell at all: before
+  // this existed, a `.mts` here was TypeScript that tsx STRIPPED rather than
+  // TypeScript anything CHECKED — which bought the syntax and none of the
+  // safety. auth.mts had carried two live type errors since it was written, and
+  // the first run of this config found seven more in two other files.
+  //
+  // WHY TWO CONFIGS. The browser harnesses need the DOM lib for their
+  // `page.evaluate` bodies; the in-process ones (ticket-brief,
+  // tracker-getticket, tracker-cache-unit) import real daemon modules —
+  // tracker/cache.ts, tracker/jira.ts, tracker/switchyard.ts — which then land
+  // in this program too. Checking those under DOM as well as under the daemon's
+  // own node-only config means the same source is held against two different
+  // definitions of `fetch`, `Response` and `setTimeout`. They happen to agree
+  // today (measured), and that is not a property to build on: it would fail as
+  // a red gate here on code the daemon's own gate calls fine. So daemon code is
+  // only ever reached from THIS project, which has no DOM lib.
+  //
+  // The include is a recursive glob, so a new file anywhere under scripts/ is
+  // picked up automatically and lands here by default. A browser harness that
+  // lands here USUALLY says so — "Cannot find name 'document'" — and wants
+  // moving to the list in tsconfig.browser.json.
+  //
+  // "Usually", not "always", and clipboard.mts (DRY-71) is the counterexample
+  // that landed the week this was written: it drives a browser, and it compiled
+  // here without the DOM lib, because every one of its six `page.evaluate`
+  // bodies is a TEMPLATE STRING. tsc never parses those, so there was no DOM
+  // reference to fail on — ~69 of its 548 lines are page code the typecheck
+  // cannot see at all. It is in the browser list below for correct
+  // classification, but do not read its green as coverage; the checking is only
+  // as wide as the code written as functions (see the note in
+  // tsconfig.browser.json).
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "noEmit": true,
+    "lib": ["ES2023"],
+    "types": ["node"]
+  },
+  "include": ["**/*.mts", "**/*.ts"],
+  // Kept identical to tsconfig.browser.json's `include`, and it is the only
+  // duplication here — the two files partition scripts/ between them.
+  //
+  // `build-native.mjs` is not listed because it is not matched: it stays
+  // JavaScript on plain Node (it is the postinstall, and `node --import tsx`
+  // has nothing to resolve while the tree is still being installed), and
+  // `verify/drift.sh` is shell orchestrating docker and psql.
+  "exclude": [
+    "verify/auth.mts",
+    "verify/backlog-toggle.mts",
+    "verify/clipboard.mts",
+    "verify/epic-children.mts",
+    "verify/gate-actions.mts",
+    "verify/hang.mts",
+    "verify/race.mts",
+    "verify/roam.mts",
+    "verify/sidebar.mts",
+    "verify/surface.mts",
+    "verify/sweep.mts",
+    "verify/tombstone.mts",
+    "verify/tracker-cache.mts"
+  ]
+}

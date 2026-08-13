@@ -28,10 +28,17 @@
  *               DRY-74's lesson: `getBoundingClientRect()` is healthy whether
  *               or not anything can reach the element.
  *
- * Rig: see README. Usage:
- *   node scripts/verify/gate-actions.mjs [shellUrl] [daemonUrl]
+ * The `page.evaluate` bodies here are functions rather than strings, and that
+ * is checked rather than assumed: tsx's esbuild transform only wraps NAME-BOUND
+ * functions in its `__name(...)` helper, and neither body below binds one (see
+ * the note at the top of surface.mts). Adding a `const q = (s) => …` inside one
+ * would break it in the page with `ReferenceError: __name is not defined`.
+ *
+ * Rig: see README. Usage, run from `daemon/` where tsx resolves (DRY-80):
+ *   (cd daemon && node --import tsx ../scripts/verify/gate-actions.mts [shellUrl] [daemonUrl])
  */
-import { chromium } from "playwright";
+import { chromium, type Page } from "playwright";
+import type { SpawnResponse } from "./api.mjs";
 
 const SHELL = process.argv[2] ?? "http://127.0.0.1:5378";
 const DAEMON = process.argv[3] ?? "http://127.0.0.1:4378";
@@ -44,6 +51,14 @@ const DAEMON = process.argv[3] ?? "http://127.0.0.1:4378";
  */
 const PANEL = ".rail > .panel";
 
+/** One row of the tool table below. `expand` clicks "Show all" on the blob. */
+interface ToolCase {
+  key: string;
+  name: string;
+  command: string;
+  expand?: boolean;
+}
+
 /**
  * The tool names the row is measured against.
  *
@@ -52,7 +67,7 @@ const PANEL = ".rail > .panel";
  * this shipped. A run that passes on Bash and fails on the MCP name has
  * reproduced the bug; one that fails on both has broken something else.
  */
-const TOOLS = [
+const TOOLS: ToolCase[] = [
   { key: "builtin", name: "Bash", command: "echo hi" },
   { key: "mcp", name: "mcp__switchyard__transition_ticket_by_category", command: "echo hi" },
   // The vertical worst case. The panel grows UPWARD out of the rail, so the
@@ -76,7 +91,7 @@ const TOOLS = [
  * room: the panel grows UPWARD out of a 98px rail, so a taller row costs
  * headroom rather than reach.
  */
-const VIEWPORTS = [
+const VIEWPORTS: { w: number; h: number }[] = [
   { w: 1600, h: 900 },
   { w: 1200, h: 800 },
   { w: 900, h: 700 },
@@ -91,16 +106,23 @@ const VIEWPORTS = [
   { w: 640, h: 380 },
 ];
 
-const results = [];
-function check(name, ok, detail) {
+interface Result {
+  name: string;
+  ok: boolean;
+  detail?: string;
+}
+const results: Result[] = [];
+function check(name: string, ok: boolean, detail?: string): void {
   results.push({ name, ok, detail });
   console.log(`${ok ? "  ok  " : "  FAIL"} ${name}${detail ? ` — ${detail}` : ""}`);
 }
 
-async function api(path, init) {
+// The trailing comma is required in a `.mts` file: `<T>` alone at the start of
+// an arrow is reserved syntax there (it would be a JSX tag in `.tsx`).
+async function api<T,>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${DAEMON}${path}`, init);
   if (!res.ok) throw new Error(`${path} → ${res.status}`);
-  return res.status === 204 ? null : res.json();
+  return (res.status === 204 ? null : await res.json()) as T;
 }
 
 /**
@@ -109,7 +131,7 @@ async function api(path, init) {
  * promise is settled by the answer at the end of the scenario; it is kept only
  * so an unhandled rejection can't take the run down.
  */
-function raiseGate(sessionId, tool, command) {
+function raiseGate(sessionId: string, tool: string, command: string): Promise<Response | null> {
   return fetch(`${DAEMON}/hook/pretooluse`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-drydock-session": sessionId },
@@ -121,6 +143,27 @@ function raiseGate(sessionId, tool, command) {
   }).catch(() => null);
 }
 
+interface Box {
+  left: number;
+  right: number;
+  top: number;
+  bottom: number;
+}
+interface Control {
+  label: string;
+  rect: Box & { width: number };
+  hittable: boolean;
+}
+/** A successful measurement of the action row and everything it is measured against. */
+interface Measured {
+  panel: Box & { height: number };
+  ask: { overflow: number } | null;
+  controls: Control[];
+  desk: { top: number; bottom: number } | null;
+  viewport: { w: number; h: number };
+}
+type RowMeasure = { error: string } | Measured;
+
 /**
  * Measure every control in the gate's action row.
  *
@@ -131,8 +174,8 @@ function raiseGate(sessionId, tool, command) {
  * a hit-test failure here can mean a missing `pointer-events: auto` rather than
  * a layout overflow.
  */
-async function measureRow(page) {
-  return page.evaluate((sel) => {
+async function measureRow(page: Page): Promise<RowMeasure> {
+  return page.evaluate((sel): RowMeasure => {
     const panel = document.querySelector(sel);
     if (!panel) return { error: `no ${sel}` };
     const p = panel.getBoundingClientRect();
@@ -147,7 +190,6 @@ async function measureRow(page) {
     // truncating the button honest — if this is cut too, the panel never says
     // what is being approved.
     const askEl = panel.querySelector(".ask");
-    const ask = askEl ? askEl.getBoundingClientRect() : null;
     const controls = [...panel.querySelectorAll(".actions button")].map((el) => {
       const r = el.getBoundingClientRect();
       const cx = r.left + r.width / 2;
@@ -166,7 +208,7 @@ async function measureRow(page) {
       // scrollWidth vs clientWidth, not the rect: the element is a block that
       // fills the panel either way, so its own rect is inside by construction
       // while the unbreakable token inside it hangs out over the edge.
-      ask: ask && { overflow: askEl.scrollWidth - askEl.clientWidth },
+      ask: askEl ? { overflow: askEl.scrollWidth - askEl.clientWidth } : null,
       controls,
       desk: desk && { top: desk.top, bottom: desk.bottom },
       viewport: { w: window.innerWidth, h: window.innerHeight },
@@ -174,8 +216,8 @@ async function measureRow(page) {
   }, PANEL);
 }
 
-function assertRow(tag, m) {
-  if (m.error) {
+function assertRow(tag: string, m: RowMeasure): void {
+  if ("error" in m) {
     check(`${tag} panel present`, false, m.error);
     return;
   }
@@ -238,13 +280,13 @@ function assertRow(tag, m) {
 }
 
 const browser = await chromium.launch();
-let sessionId = null;
+let sessionId: string | null = null;
 try {
   // An AUTONOMOUS run: `orphanGates` is what the rail's panel renders, and a
   // gate is an orphan when its session has no pane. A windowed session's gate
   // goes to PermissionPrompt.vue inside the terminal instead — a different
   // component with a different action row.
-  const spawned = await api("/api/sessions", {
+  const spawned = await api<SpawnResponse & { id?: string }>("/api/sessions", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -254,7 +296,7 @@ try {
       title: "DRY-78",
     }),
   });
-  sessionId = spawned.id ?? spawned.session?.id;
+  sessionId = spawned.id ?? spawned.session?.id ?? null;
   if (!sessionId) throw new Error(`no session id in ${JSON.stringify(spawned)}`);
   console.log(`session ${sessionId}\n`);
 

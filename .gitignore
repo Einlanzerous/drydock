@@ -14,7 +14,11 @@ dist/
 # point everyone else's install at a registry they can't reach.
 .npmrc
 
-# Ad-hoc playwright install for scripts/verify (see its README)
+# Playwright is an ordinary root devDependency since DRY-80, so nothing should
+# install into scripts/verify/ any more — these two stay only to catch the
+# `npm i playwright --prefix scripts/verify` that the README told people to run
+# for a couple of years. A stray nested install there would otherwise be
+# committable, and would shadow the root copy at a different version.
 scripts/verify/node_modules/
 scripts/verify/package*.json
 

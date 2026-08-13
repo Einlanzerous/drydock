@@ -20,6 +20,9 @@
 // that can't tell which write won can't test which write should have.
 //
 // Control: POST /__break?mode=503|hang|delay , POST /__heal , GET /__state
+//
+// Run from `daemon/`, where tsx resolves (DRY-80):
+//   (cd daemon && node --import tsx ../scripts/verify/proxy-http.mts)
 import http from "node:http";
 import net from "node:net";
 
@@ -27,9 +30,29 @@ const LISTEN = Number(process.env.PROXY_PORT ?? 4398);
 const TARGET = Number(process.env.TARGET_PORT ?? 4399);
 const DELAY_MS = Number(process.env.DELAY_MS ?? 6000);
 
-let mode = "ok"; // "ok" | "503" | "hang" | "delay"
-const held = new Set(); // sockets parked by "hang", released on heal
-let delayed = 0; // how many writes "delay" has held and forwarded
+export type Mode = "ok" | "503" | "hang" | "delay";
+
+/**
+ * `GET /__state`, and the reason it is exported (DRY-80): the harnesses that
+ * drive this proxy used to each re-declare this shape, which is the duplication
+ * `api.mts` exists to prevent one layer up. Declared where it is SERVED, so the
+ * response below is checked against it rather than against a copy that can
+ * drift. `import type` erases completely, so a harness naming this type does
+ * not start a proxy.
+ */
+export interface ProxyHttpState {
+  mode: Mode;
+  /** Sockets parked by "hang" and not yet released. */
+  held: number;
+  /** How many writes "delay" has held and forwarded. */
+  delayed: number;
+}
+
+let mode: Mode = "ok";
+/** Sockets parked by "hang", released on heal. */
+const held = new Set<net.Socket>();
+/** How many writes "delay" has held and forwarded. */
+let delayed = 0;
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url ?? "/", "http://x");
@@ -49,11 +72,12 @@ const server = http.createServer((req, res) => {
     return res.end(JSON.stringify({ mode }));
   }
   if (url.pathname === "/__state") {
+    const state: ProxyHttpState = { mode, held: held.size, delayed };
     res.writeHead(200, { "Content-Type": "application/json" });
-    return res.end(JSON.stringify({ mode, held: held.size, delayed }));
+    return res.end(JSON.stringify(state));
   }
 
-  const cors = {
+  const cors: Record<string, string> = {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "GET,POST,PUT,DELETE,OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type",
@@ -94,8 +118,8 @@ const server = http.createServer((req, res) => {
       // Buffer the body first: `req` is a stream, and by the time the timer
       // fires there is nothing left to pipe.
       delayed = 1;
-      const chunks = [];
-      req.on("data", (c) => chunks.push(c));
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
       req.on("end", () => {
         setTimeout(() => forward(req, res, Buffer.concat(chunks), cors), DELAY_MS);
       });
@@ -109,7 +133,12 @@ const server = http.createServer((req, res) => {
 });
 
 /** Pass a request upstream. `body` non-null means it was already buffered. */
-function forward(req, res, body, cors) {
+function forward(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  body: Buffer | null,
+  cors: Record<string, string>,
+): void {
   const upstream = http.request(
     { host: "127.0.0.1", port: TARGET, path: req.url, method: req.method, headers: req.headers },
     (up) => {

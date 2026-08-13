@@ -9,17 +9,24 @@
   ],
   "scripts": {
     "postinstall": "node scripts/build-native.mjs",
-    "up": "node scripts/up.mjs",
-    "up:local": "node scripts/up.mjs --local",
+    "up": "node --import tsx scripts/up.mts",
+    "up:local": "node --import tsx scripts/up.mts --local",
     "daemon": "bun run --filter '@drydock/daemon' dev",
     "daemon:local": "DRYDOCK_HOST=127.0.0.1 bun run --filter '@drydock/daemon' dev",
     "shell": "bun run --filter '@drydock/shell' dev",
     "dev": "bun run --filter '*' dev",
-    "db:up": "node scripts/up.mjs --db-only",
-    "db:down": "node scripts/up.mjs --db-down",
+    "typecheck:scripts": "tsc --noEmit -p scripts/tsconfig.json; n=$?; tsc --noEmit -p scripts/tsconfig.browser.json; b=$?; exit $(( n > b ? n : b ))",
+    "db:up": "node --import tsx scripts/up.mts --db-only",
+    "db:down": "node --import tsx scripts/up.mts --db-down",
     "db:psql": "docker exec -it drydock-db psql -U drydock -d drydock"
   },
   "engines": {
     "bun": ">=1.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "playwright": "^1.62.1",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
   }
 }

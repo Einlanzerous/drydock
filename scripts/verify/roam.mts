@@ -11,17 +11,30 @@
 //
 // B and C are the pair the conflict rule exists for; either alone proves
 // nothing. Throwaway daemon :4370, partition proxy :4371, vite :5370.
-import { chromium } from "playwright";
+//
+// Run from `daemon/`, where tsx resolves (DRY-80):
+//   (cd daemon && node --import tsx ../scripts/verify/roam.mts)
+import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import {
+  deskWindows,
+  type Detail,
+  type HealthResponse,
+  type SessionsResponse,
+  type WorkspaceResponse,
+} from "./api.mjs";
 
 const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5370";
 const DAEMON = process.env.DAEMON ?? "http://127.0.0.1:4370"; // past the proxy — ground truth
 const PROXY = process.env.PROXY ?? "http://127.0.0.1:4371"; // what the shell talks to (and its mirror key)
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-const j = async (u, init) => (await fetch(u, init)).json();
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+// The trailing comma is required in a `.mts` file: `<T>` alone at the start of
+// an arrow is reserved syntax there (it would be a JSX tag in `.tsx`).
+const j = async <T,>(u: string, init?: RequestInit): Promise<T> =>
+  (await fetch(u, init)).json() as Promise<T>;
 
 let failures = 0;
-function check(name, ok, detail = "") {
+function check(name: string, ok: boolean, detail: Detail = ""): void {
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${name}${detail ? ` — ${detail}` : ""}`);
   if (!ok) failures++;
 }
@@ -29,32 +42,43 @@ function check(name, ok, detail = "") {
 const breakStore = (mode = "503") => j(`${PROXY}/__break?mode=${mode}`, { method: "POST" });
 const healStore = () => j(`${PROXY}/__heal`, { method: "POST" });
 
+/** A window's position, as one side or the other holds it. */
+interface Spot {
+  x: number;
+  y: number;
+}
+type Desk = Record<string, Spot>;
+
 /** Desk as the DAEMON holds it, keyed by window id. */
-async function stored() {
-  const { workspace } = await j(`${DAEMON}/api/workspace`);
+async function stored(): Promise<Desk> {
+  const { workspace } = await j<WorkspaceResponse>(`${DAEMON}/api/workspace`);
   return Object.fromEntries(
-    (workspace?.windows ?? []).map((w) => [w.id, { x: Math.round(w.x), y: Math.round(w.y) }]),
+    deskWindows(workspace).map((w) => [w.id, { x: Math.round(w.x), y: Math.round(w.y) }]),
   );
 }
 
 /** Desk as THIS BROWSER holds it — the localStorage mirror the wm writes. */
-async function local(page) {
+async function local(page: Page): Promise<Desk> {
   const raw = await page.evaluate((k) => localStorage.getItem(k), `drydock.layout.${PROXY}`);
-  const parsed = raw ? JSON.parse(raw) : null;
+  const parsed = raw ? (JSON.parse(raw) as WorkspaceResponse["workspace"]) : null;
   return Object.fromEntries(
-    (parsed?.windows ?? []).map((w) => [w.id, { x: Math.round(w.x), y: Math.round(w.y) }]),
+    deskWindows(parsed).map((w) => [w.id, { x: Math.round(w.x), y: Math.round(w.y) }]),
   );
 }
 
 /** Where the windows actually are on screen, sorted — DOM, not model. */
-const onScreen = (page) =>
+const onScreen = (page: Page): Promise<number[]> =>
   page.$$eval(".frame", (els) =>
     els.map((e) => Math.round(e.getBoundingClientRect().x)).sort((a, b) => a - b),
   );
 
-const noticed = (page) => page.locator(".notice").count().then((n) => n > 0);
+const noticed = (page: Page) => page.locator(".notice").count().then((n) => n > 0);
 
-async function waitFor(label, fn, ms = 45000) {
+async function waitFor(
+  label: string,
+  fn: () => Promise<boolean>,
+  ms = 45000,
+): Promise<number | null> {
   const t0 = Date.now();
   while (Date.now() - t0 < ms) {
     if (await fn()) return Math.round((Date.now() - t0) / 100) / 10;
@@ -64,8 +88,11 @@ async function waitFor(label, fn, ms = 45000) {
 }
 
 /** Drag the first window's title bar — a real arrangement, not a poke. */
-async function drag(page, dx, dy) {
+async function drag(page: Page, dx: number, dy: number): Promise<void> {
   const box = await page.locator(".frame .bar").first().boundingBox();
+  // A missing box means no window was on the desk to drag, which invalidates
+  // everything after it — said out loud rather than as a TypeError on `box.x`.
+  if (!box) throw new Error("no .frame .bar on the desk to drag");
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
   await page.mouse.down();
   await page.mouse.move(box.x + box.width / 2 + dx, box.y + box.height / 2 + dy, { steps: 12 });
@@ -73,7 +100,7 @@ async function drag(page, dx, dy) {
   await sleep(800); // past the 400ms persist debounce
 }
 
-async function freshPage(browser) {
+async function freshPage(browser: Browser): Promise<{ ctx: BrowserContext; page: Page }> {
   const ctx = await browser.newContext({ viewport: { width: 1600, height: 900 } });
   const page = await ctx.newPage();
   page.on("console", (m) => {
@@ -86,11 +113,12 @@ async function freshPage(browser) {
   return { ctx, page };
 }
 
-const moved = (a, b, id, tol = 4) => a[id] && b[id] && Math.abs(a[id].x - b[id].x) <= tol;
+const moved = (a: Desk, b: Desk, id: string, tol = 4) =>
+  !!a[id] && !!b[id] && Math.abs(a[id].x - b[id].x) <= tol;
 
 // ---------------------------------------------------------------- setup ----
 await healStore();
-for (const s of (await j(`${DAEMON}/api/sessions`)).sessions) {
+for (const s of (await j<SessionsResponse>(`${DAEMON}/api/sessions`)).sessions) {
   await fetch(`${DAEMON}/api/sessions/${s.id}/kill`, { method: "POST" });
 }
 await fetch(`${DAEMON}/api/workspace`, { method: "DELETE" });
@@ -207,8 +235,8 @@ console.log("\nC. outage BEFORE the first read, a window dragged — this client
 // ------------------------------------------------- the DRY-28 invariant ----
 console.log("\nD. the property none of this may regress");
 {
-  const health = await j(`${DAEMON}/healthz`);
-  const { sessions } = await j(`${DAEMON}/api/sessions`);
+  const health = await j<HealthResponse>(`${DAEMON}/healthz`);
+  const { sessions } = await j<SessionsResponse>(`${DAEMON}/api/sessions`);
   check("daemon still up", health.ok === true);
   check(
     "sessions stayed live throughout",

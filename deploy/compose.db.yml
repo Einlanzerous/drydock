@@ -36,7 +36,7 @@ services:
       # install the same database password — "it's only window positions" and
       # "it's only on loopback" are both true, and neither makes a shared
       # credential a good idea. `bun run up` / `bun run db:up` generate one into
-      # the gitignored .env on first use (scripts/up.mjs), and they refuse to
+      # the gitignored .env on first use (scripts/up.mts), and they refuse to
       # start the container without it, so the missing-value case is handled
       # there with a message rather than here.
       #
@@ -47,7 +47,7 @@ services:
       POSTGRES_DB: drydock
     volumes:
       - drydock_pgdata:/var/lib/postgresql/data
-    # scripts/up.mjs waits on this before starting the daemon. Without it the
+    # scripts/up.mts waits on this before starting the daemon. Without it the
     # daemon races the database's own first-boot initdb, and while that only
     # costs a degraded first request (the store retries), it looks exactly like
     # a misconfiguration in the logs.
