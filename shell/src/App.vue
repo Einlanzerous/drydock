@@ -109,21 +109,25 @@ function saveScope(): void {
   );
 }
 
+// All three change what the daemon PULLS, so they go through `trackedPull` and
+// hold the scope counter until their own pull settles (DRY-85) — and through
+// `runTicketPull` rather than `loadTickets` directly, so a scope change queues
+// behind a poll already in flight instead of racing it (DRY-72).
 function addScopeProject(key: string): void {
   if (scopeProjects.value.includes(key) || userProjects.value.includes(key)) return;
   userProjects.value = [...userProjects.value, key];
   saveScope();
-  void loadTickets();
+  void trackedPull(scopePulls);
 }
 function removeScopeProject(key: string): void {
   userProjects.value = userProjects.value.filter((k) => k !== key);
   saveScope();
-  void loadTickets();
+  void trackedPull(scopePulls);
 }
 function toggleBacklog(show: boolean): void {
   showBacklog.value = show;
   saveScope();
-  void loadTickets();
+  void trackedPull(scopePulls);
 }
 const sidebarOpen = ref(true);
 const quickOpen = ref(false);
@@ -172,7 +176,41 @@ const now = ref(Date.now());
 
 let poll: ReturnType<typeof setInterval> | null = null;
 let ticketPoll: ReturnType<typeof setTimeout> | null = null;
-const refreshingTickets = ref(false);
+/**
+ * Pulls somebody is WAITING on, by what started them (DRY-85).
+ *
+ * There used to be one `refreshingTickets`, set by every pull, and the sidebar
+ * dimmed its scope controls off it — so the backlog control blinked on the 20s
+ * poll's cadence, announcing a fetch nobody asked for and nothing was waiting
+ * on. Since DRY-72 the poll is normally answered from the daemon's cache, which
+ * made it a flash rather than a sustained disable: worse, not better.
+ *
+ * The race the disable exists for is real but narrower than it was written —
+ * re-toggling scope mid-flight desyncs the control from the list, and the epoch
+ * guard in `loadTickets` protects the list, not the control. So only a pull the
+ * user's own gesture started counts, and only the gesture's own control locks.
+ *
+ * Counters, not booleans: pulls queue through `runTicketPull`, so a second
+ * gesture can be waiting behind the first, and a boolean would clear when the
+ * first settles — unlocking the control while the pull it started is still
+ * queued, which is the exact race being guarded.
+ */
+const scopePulls = ref(0);
+const refreshPulls = ref(0);
+const scopeBusy = computed(() => scopePulls.value > 0);
+const refreshBusy = computed(() => refreshPulls.value > 0);
+
+/**
+ * Run a pull that a control is waiting on, holding that control's counter until
+ * it settles. Background pulls (the poll, the visibility wake) call
+ * `runTicketPull` directly and hold nothing — that is the whole point.
+ */
+function trackedPull(counter: { value: number }, force = false): Promise<void> {
+  counter.value++;
+  return runTicketPull(force).finally(() => {
+    counter.value--;
+  });
+}
 
 /**
  * Consecutive failed ticket pulls, which lengthen the interval (DRY-72).
@@ -215,12 +253,13 @@ const trackerError = ref<string | null>(null);
 // Epoch guard: scope changes (backlog toggle, chips) refetch immediately, so a
 // slow older request can resolve AFTER a newer one — without the guard it
 // overwrites the fresh list and the sidebar looks "stuck" on the old scope.
-// Only the latest in-flight load may commit its result or clear the spinner
-// (the sidebar disables the scope controls while refreshing is true).
+// Only the latest in-flight load may commit its result.
+// It no longer owns a "refreshing" flag: which CONTROL is waiting is a fact
+// about the gesture that started the pull, not about the pull, and this
+// function can't see the difference (DRY-85). `trackedPull` holds that instead.
 let loadEpoch = 0;
 async function loadTickets(force = false) {
   const epoch = ++loadEpoch;
-  refreshingTickets.value = true;
   try {
     const pull = await listTickets(
       true,
@@ -253,8 +292,6 @@ async function loadTickets(force = false) {
       ticketFailures++;
       reportTrackerTrouble(String(e));
     }
-  } finally {
-    if (epoch === loadEpoch) refreshingTickets.value = false;
   }
 }
 
@@ -329,7 +366,7 @@ async function tickTickets(): Promise<void> {
  * never does, or the cache would buy nothing.
  */
 function forceLoadTickets(): void {
-  void runTicketPull(true).then(scheduleTicketPoll);
+  void trackedPull(refreshPulls, true).then(scheduleTicketPoll);
 }
 
 /** Back at the desk — pull now, and reset the cadence around it. */
@@ -1841,7 +1878,8 @@ onBeforeUnmount(stopDesk);
         v-if="sidebarOpen"
         :name="providerName"
         :tickets="tickets"
-        :refreshing="refreshingTickets"
+        :refreshing="refreshBusy"
+        :scope-busy="scopeBusy"
         :pull-error="trackerError"
         :name-confirmed="providerNamed"
         :scope-projects="scopeProjects"
