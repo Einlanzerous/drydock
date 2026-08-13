@@ -71,11 +71,32 @@ cd daemon
 DRYDOCK_PORT=4399 DRYDOCK_HOST=127.0.0.1 node --import tsx src/index.ts
 ```
 
+"Real env wins" has a bite when the tester is an agent Drydock itself spawned:
+the session inherits the daemon that started it, so a "throwaway" started from
+inside one runs with the **prod** `DRYDOCK_DATABASE_URL`, `DRYDOCK_AUTH_PASSWORD`
+and tracker token, and a fresh worktree having no `.env` says nothing about it.
+The tell is `/healthz` answering `store.kind: "postgres"` when you passed a state
+file, or an anonymous request 401ing. Strip them rather than overriding one at a
+time — the set is not fixed:
+
+```sh
+env $(env | grep -o '^DRYDOCK_[A-Z_0-9]*' | sed 's/^/-u /' | tr '\n' ' ') \
+  DRYDOCK_PORT=4399 DRYDOCK_HOST=127.0.0.1 DRYDOCK_TRACKER=fixture \
+  DRYDOCK_STATE_FILE=/tmp/s.json node --import tsx src/index.ts
+```
+
 Since DRY-57 a throwaway daemon leaves **detached supervisor processes** behind
 if you Ctrl-C it — that is the feature working, and it means cleaning up after a
 test run is now a real step. Kill by executable, not by pattern: `pkill -f
 supervisor/main` also matches the shell command containing that string and will
 kill your own session.
+
+The same trap eats the tidy-up one layer up, and `/proc/<pid>/exe` is not enough
+on its own: `pgrep -f "src/index.ts"` matches the **shell wrapper** running your
+cleanup command, and on a host with several worktrees each running a daemon, a
+cwd filter is what tells your instance from another agent's. Match on both —
+exe is node AND cwd is your worktree — or the command kills itself midway and
+leaves the rest of the rig up. (Done it, twice in one session.)
 
 ```sh
 for p in $(pgrep -f "supervisor/main"); do
@@ -727,6 +748,49 @@ The traps:
    demand-driven, so on a desk that has never lost a window it is still null at
    the first sweep, and a bare `=== false` stays quiet on exactly the tier the
    notice exists for.
+
+## The event stream carries exits (DRY-64)
+
+`GET /api/events` (DRY-50) carried gates and nothing else, so a session ending
+was WebSocket-only — and anything that merely wanted to know a run had finished
+either held a socket per session purely to hear it, or polled `/api/sessions` on
+a timer and read one field off every record. It now also carries `session-exit`:
+`sessionId`, `status`, `exitCode`, named and typed exactly as `SessionInfo`'s so
+a consumer patches the record it already has instead of translating.
+
+```sh
+curl -sN localhost:4399/api/events &          # leave it running
+curl -s -X POST localhost:4399/api/sessions -H 'Content-Type: application/json' \
+  -d '{"command":"/bin/sh","args":["-c","sleep 1; exit 3"]}'
+# → data: {"type":"session-exit","sessionId":"…","status":"exited","exitCode":3}
+```
+
+1. **It hangs off `SessionEndNotifier`, never `onRunEnd`.** That one is gated on
+   `autonomous` inside `announceRunEnd`, by design — DRY-49's artefacts are for
+   the runs nobody watched — so an exit event wired there fires for a fraction of
+   sessions and looks like it works. Exactly the trap DRY-56 named when history
+   took this notifier instead.
+2. **Don't look the session up in order to filter it.** `/kill` drops it from the
+   registry the moment it signals (DRY-60 trap 8), so by the time the child
+   actually goes, `manager.get(id)` is undefined — and that exit is precisely the
+   one somebody is waiting on. The notifier hands the session over; ask it. The
+   check is a killed session emitting at all (`exitCode: 129`), not a clean one.
+3. **`visibleTo`, not `ownedBy`** — deliberately looser than the gate filter
+   beside it. A gate is a question only its owner can answer and it carries the
+   tool's input; an exit is three fields a spectator on a public run can already
+   read off `/api/sessions`, and withholding it leaves their card marching
+   forever. Test both halves under multi-user, since only one of them is a leak:
+   a stranger's private run must stay silent, a public one must arrive.
+4. **There is no catch-up frame, and there should not be.** `gate-snapshot`
+   exists because a resolution that fires while the stream is down is gone for
+   good; an exit is a *state*, and an exited session stays in the registry until
+   somebody clears it. A consumer that was away reads the list. Same reason boot
+   reconciliation records history directly rather than through the fan-out —
+   reconcile runs before the port is bound, so there is no stream to reach.
+5. `GET /api/sessions/{id}` was folded into this ticket and deliberately **not**
+   built. The only reason anything polled it was to learn about exits, so the
+   event retires the route with the loop; adding it would be a second surface
+   answering a question that no longer needs asking.
 
 ## Verifying the ticket brief (DRY-53)
 

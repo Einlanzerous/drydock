@@ -73,6 +73,23 @@ export class SessionManager {
   }
 
   /**
+   * Subscribers to ANY session ending — autonomous or not (DRY-64).
+   *
+   * Pointedly not `onRunEnd`. That one is gated on `autonomous` inside
+   * `announceRunEnd` by design, because DRY-49's artefacts are for the runs
+   * nobody watched; a client waiting to hear that the session it spawned has
+   * exited has the opposite requirement. Hanging the event off the run-end path
+   * would deliver it for a fraction of sessions and look like it worked — the
+   * trap DRY-56 named when history took this notifier rather than that one.
+   */
+  private readonly sessionEndListeners = new Set<SessionEndNotifier>();
+
+  onSessionEnd(listener: SessionEndNotifier): () => void {
+    this.sessionEndListeners.add(listener);
+    return () => this.sessionEndListeners.delete(listener);
+  }
+
+  /**
    * Async since DRY-57: a spawn now waits for a detached supervisor to bind its
    * socket before the session is real. Callers must await it — answering 201
    * before the socket exists makes every attach a race.
@@ -214,6 +231,11 @@ export class SessionManager {
       );
       // History has to learn about this one too, or it has a hole exactly where
       // the daemon was absent — which is the case a tombstone exists for.
+      //
+      // History alone, not `emitSessionEnd`: reconciliation runs before the port
+      // is bound, so there is no stream a session-exit event (DRY-64) could
+      // reach. A consumer that was away for this learns it the way it learns
+      // anything that happened while it was disconnected — by reading the list.
       this.history?.ended(session);
       // Not returned to the registry. It is a dead session with no PTY behind
       // it, so putting it in `/api/sessions` would draw a pane for something
@@ -247,8 +269,29 @@ export class SessionManager {
     return [
       (event) => this.emitGate(event),
       (s, reason) => this.emitRunEnd(s, reason),
-      (s) => this.history?.ended(s),
+      (s) => this.emitSessionEnd(s),
     ];
+  }
+
+  /**
+   * One session ending, fanned out to history and to whoever is streaming.
+   *
+   * History first, and not merely by habit: it is the durable record, and a
+   * subscriber is a browser's event stream — a socket that died mid-frame must
+   * not be able to cost a tombstone.
+   */
+  private emitSessionEnd(session: PtySession): void {
+    this.history?.ended(session);
+    for (const listener of this.sessionEndListeners) {
+      // Same rule as the two fan-outs above (DRY-45): this process is the
+      // lifetime of every live PTY, so a throwing subscriber may take neither
+      // the process nor its siblings in the set with it.
+      try {
+        listener(session);
+      } catch (err) {
+        log.warn("session-end listener threw", { id: session.id, err: String(err) });
+      }
+    }
   }
 
   private emitRunEnd(session: PtySession, reason: RunEndReason): void {

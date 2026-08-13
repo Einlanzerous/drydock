@@ -88,6 +88,33 @@ export type EventMessage =
       sessionId: string;
       requestId: string;
       decision: PermissionDecision | "timeout";
+    }
+  /**
+   * A session reached its terminal state (DRY-64).
+   *
+   * Exit was WebSocket-only until now — `{type:"status", status:"exited"}` to
+   * whoever happened to be attached — so a client that only wanted to know a
+   * run had ended either held a socket per session purely to hear it, or polled
+   * `GET /api/sessions` on a timer and read three fields off every record.
+   *
+   * Those three fields, named and typed exactly as `SessionInfo`'s, so a
+   * consumer patches the record it already has rather than translating one
+   * shape into another. `sessionId` rather than `id` only because every other
+   * variant in this union says `sessionId`, and a client switching on `type`
+   * should not have to remember which arm renamed it.
+   *
+   * There is deliberately no catch-up frame beside `gate-snapshot`. A gate
+   * needs one because a resolution that fires while the stream is down is gone
+   * for good; an exit is a *state*, and an exited session stays in the registry
+   * until somebody clears it — so a consumer that was disconnected across one
+   * still finds it in `GET /api/sessions`. The event removes the polling loop,
+   * not the list.
+   */
+  | {
+      type: "session-exit";
+      sessionId: string;
+      status: SessionStatus;
+      exitCode: number | null;
     };
 
 export type SessionStatus = "running" | "exited";

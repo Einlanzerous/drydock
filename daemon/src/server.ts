@@ -566,7 +566,7 @@ const server = http.createServer(async (req, res) => {
       // pane would be the one that leaks a colleague's tool calls, tool INPUT
       // included.
       const viewer = me().id;
-      const unsubscribe = manager.onGate((event) => {
+      const unsubscribeGates = manager.onGate((event) => {
         // A RESOLUTION goes to everyone, deliberately. It carries no detail —
         // a requestId and a decision — so it can only ever retract a row this
         // client was already sent, and the alternative is worse in a way that
@@ -582,6 +582,31 @@ const server = http.createServer(async (req, res) => {
         const session = manager.get(event.sessionId);
         if (session?.ownedBy(viewer)) write(event);
       });
+
+      // Exits (DRY-64), so learning that a run ended is an event rather than a
+      // poll of every session for one field.
+      //
+      // `visibleTo`, not `ownedBy` — the looser of the two, unlike the gate
+      // filter above. A gate is a question only its owner can answer and it
+      // carries the tool's input; an exit is three fields a spectator on a
+      // public run can already read off `GET /api/sessions`, and withholding it
+      // would leave their pane's card marching forever for a process that has
+      // stopped.
+      //
+      // The session is asked directly rather than looked up: `/kill` drops it
+      // from the registry the moment it signals (DRY-60), so by the time the
+      // child actually goes there is nothing left to find — and that exit is
+      // precisely the one somebody is waiting on.
+      const unsubscribeExits = manager.onSessionEnd((session) => {
+        if (!session.visibleTo(viewer)) return;
+        const { id, status, exitCode } = session.info();
+        write({ type: "session-exit", sessionId: id, status, exitCode });
+      });
+
+      const unsubscribe = (): void => {
+        unsubscribeGates();
+        unsubscribeExits();
+      };
       // Load-bearing, same class as the pg pool listener in DRY-28 and the
       // socket handlers in DRY-45: an unhandled 'error' on this response throws,
       // and this process is the lifetime of every live PTY.
