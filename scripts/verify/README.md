@@ -61,6 +61,12 @@ Three groups:
   minute; no daemon config beyond a spare port. Run it when touching
   `GatePanel.vue`, or the rail's `measureGateRoom` / anything that changes the
   panel's width, height or anchoring.
+- **The terminal's clipboard keys (DRY-71)** —
+  [its own section](#the-terminals-clipboard-keys-dry-71). A browser, about
+  30 seconds; no daemon config beyond a spare port. Run it when touching
+  `attachClipboardKeys` in `TerminalPane.vue`, anything else that reaches
+  `attachCustomKeyEventHandler`, or an xterm bump — the keymap this depends on
+  is xterm's, and it is what decides whether paste reaches the browser at all.
 
 ## Running these
 
@@ -658,6 +664,98 @@ Same technique for the vertical half, which `main` also can't discriminate for
 the same reason: drop `overflow: hidden auto` and the sticky positioning from
 `.actions`, and the four-edge check reports the row spilling 9-85px past the
 panel's bottom at the short viewports.
+
+## The terminal's clipboard keys (DRY-71)
+
+Self-contained: a throwaway daemon, a vite, and a browser. No tracker, no
+database, no `claude` — the panes are `/bin/sh`. About 30 seconds.
+
+```sh
+npm i playwright --prefix scripts/verify     # ad-hoc; not a repo dependency
+
+(cd daemon && DRYDOCK_PORT=4379 DRYDOCK_HOST=127.0.0.1 DRYDOCK_SESSIONS_DIR=/tmp/dry71 \
+   DRYDOCK_STATE_FILE=/tmp/dry71-state.json DRYDOCK_TRACKER=fixture \
+   node --import tsx src/index.ts &)
+(cd shell && VITE_DAEMON_URL=http://127.0.0.1:4379 bunx vite --port 5379 --strictPort &)
+
+(cd daemon && node --import tsx ../scripts/verify/clipboard.mts)
+```
+
+Panes are told apart by their working directory: a window's title comes from its
+COMMAND, so five `/bin/sh` panes are identical in the bar, and the `~/<cwd>` chip
+beside it is the only thing about a spawn the desk renders that the caller picks.
+**The harness creates those directories itself**, deliberately — it used to ask
+you to `mkdir` them, and a missing one is silent and looks exactly like a product
+bug: the daemon records the cwd it was handed, so the frame still says `~/<dir>`
+and the pane still attaches, while the PTY dies on the spot and every keystroke
+after that vanishes into what looks like a working terminal. `attached()` now
+also refuses DRY-41's exit banner for the same reason.
+
+| harness | what it holds down |
+|---|---|
+| `clipboard.mts` | Copy and paste from the keyboard, in both directions and between two panes, plus the two keys that must NOT change: `Ctrl+C` still raises SIGINT and `Ctrl+V` still sends SYN. Also that the shell never reaches for `navigator.clipboard`, which is absent on the plain-HTTP origin prod is served from, and that `Ctrl+K` still opens the palette — DRY-71 moved that chord's letter-matching into a helper it now shares with the clipboard keys. |
+
+Five things about it are deliberate.
+
+**It presses the keys for real and asserts on the PTY's echo.** Dispatching a
+`paste` ClipboardEvent from the harness proves xterm's listener works, which was
+never in doubt — the bug is that the listener is *unreachable*. `page.keyboard`
+goes through Chromium's input pipeline and therefore through its
+editing-command table, which is the half under test, and characters appearing in
+`.xterm-rows` are something only a real paste could have put there.
+
+**The panes run `stty lnext undef`.** Without it a `^V` reaching the tty is
+swallowed by the line discipline's literal-next and echoes nothing — so the SYN
+this ticket is named for is invisible at the only surface the harness can see,
+and the check that it is *deliberately still there* would pass against anything.
+
+**It takes `navigator.clipboard` away from the page** (`addInitScript` stashes
+the real object on `window.__clip` for the harness's own seeding and reading,
+and leaves the page a throwing stub). 127.0.0.1 is a secure context, so that API
+works here and does not exist in prod; without this, a fix written against it
+passes every check and does nothing on the box it ships to.
+
+**Section (f) runs the copy checks again with `navigator.platform` forced to
+`Win32`.** This is the half a Linux box structurally cannot show you: xterm
+mirrors a *mouse* selection into its helper textarea to feed X11's PRIMARY
+selection, guarded by `Browser.isLinux`, so on Linux there is always a selection
+lying about and `queryCommandEnabled("copy")` is true for reasons that have
+nothing to do with the terminal. Two checks stand in front of the copy ones and
+prove the override took: the mirror really is absent (`textarea.value` empty and
+its selection range collapsed — the mirror IS those, so they are what gets read,
+not `window.getSelection()`, whose treatment of a textarea selection is a
+browser-version detail and could report "empty" for the wrong reason), and the
+command really does report itself disabled. If either flips, everything under
+them is vacuous.
+
+**Section (g) is the fallback, and it is a stub browser built to order.** Every
+browser measured returns true from `execCommand("copy")` — Chromium and Firefox,
+Linux and forced-Win32 — so nothing else in the file ever reaches
+`copySelection`'s second attempt, and an untested fallback for a *silent* failure
+is worse than none. So `document.execCommand` is replaced with one that refuses
+exactly the first `copy` per press, returning false without copying, which is
+what a disabled command does. It refuses on a counter the harness arms rather
+than by inspecting the selection: on this Linux host the mirror keeps handing the
+bare attempt a selection, so a selection-sniffing stub never refuses and the
+section passes having tested nothing. (Written down because that is the first
+version this shipped as.)
+
+Confirm it discriminates by swapping in `main`'s copy of the two shell files —
+`git show origin/main:<path> > <path>`, let vite reload, then restore from a
+backup copy. **Not `git stash`**: the fix is committed on this branch, so
+stashing only removes uncommitted review edits and reports 1 failure instead of
+5, which reads like the harness going soft. Against `main` it fails **5 of 25** —
+both `Ctrl+Shift+C` checks, the round trip between panes, and both of (g)'s.
+Removing *only* the fallback (drop the `if (…) return;` in `copySelection`) fails
+exactly one, (g)'s last, which is how you know that branch isn't dead code.
+
+Note what does *not* move, because it is the ticket's premise and it was wrong:
+`Ctrl+Shift+V` and `Shift+Insert` already pasted before this change, and
+`Ctrl+Insert` already copied — in both platform conditions. xterm's ctrl branch
+requires `!shiftKey`, so it never claimed ctrl+shift+letter and `_keyDown`
+returned before `cancel()`; the proposed fix of returning `false` for those two
+would have been a no-op. Copy was the only gap, and only on `Ctrl+Shift+C`, which
+no browser generates a `copy` event for.
 
 ## Workspace store: why a proxy and not `docker stop`
 

@@ -19,6 +19,7 @@ import {
   signOut,
   signedIn,
 } from "./lib/auth.js";
+import { chordLetter } from "./lib/keys.js";
 import { openGates, startGateStream, stopGateStream } from "./composables/gateStore.js";
 import { askToNotify, notifyGate, useAttention } from "./composables/attention.js";
 import { isFinished, runState } from "./composables/runState.js";
@@ -1532,9 +1533,10 @@ function isPaletteChord(e: KeyboardEvent): boolean {
   // altKey is excluded because AltGr reports ctrlKey AND altKey on Windows and
   // Linux layouts — without this, AltGr+K stops typing its real character.
   // shiftKey is excluded because Ctrl+Shift+K is the browser's console and the
-  // UI never advertised it. toLowerCase (rather than matching "K") keeps the
-  // chord working under CapsLock, which reports "K" with shiftKey false.
-  return (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "k";
+  // UI never advertised it. The letter comes from `chordLetter` (DRY-71), which
+  // is where the CapsLock and non-Latin-layout reasoning now lives — shared with
+  // the terminal's clipboard keys so the two can't drift.
+  return (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && chordLetter(e) === "k";
 }
 
 /** What had the keyboard when the palette opened, to hand it back on dismiss. */
