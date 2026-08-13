@@ -745,13 +745,17 @@ rig in its README — a browser, about 30 seconds.
 2. **A Linux dev box hides the case that matters.** xterm mirrors a MOUSE
    selection into that textarea to feed X11's PRIMARY selection, guarded by
    `Browser.isLinux` (`SelectionService.refresh`), so on Linux there is always
-   a DOM selection lying about and `queryCommandEnabled("copy")` is true for
+   a selection lying about and `queryCommandEnabled("copy")` is true for
    reasons that have nothing to do with the terminal. On Windows there is none
    and it is false. Test it by forcing `navigator.platform` to `Win32` before
-   the app loads — and assert the override TOOK (no DOM selection after a
-   double-click), or every check under it is vacuous. Measured on Chromium and
-   Firefox: the `copy` event fires either way, which is why the fix needs no
-   off-screen relay textarea to lean on.
+   the app loads — and assert the override TOOK, on the mirror itself
+   (`textarea.value` empty, its selection range collapsed) rather than on
+   `window.getSelection()`, whose treatment of a textarea selection is a
+   browser-version detail that can read "empty" for the wrong reason. Measured
+   on Chromium and Firefox: the `copy` event fires either way, so the bare
+   `execCommand` is the primary path — but its boolean is READ, and a false
+   answer retries through an off-screen textarea. A copy that silently does
+   nothing has no surface to report on.
 3. **Most of what the ticket described as broken already worked.** Measured
    against xterm 5.5.0: `Ctrl+Shift+V` and `Shift+Insert` pasted, `Ctrl+Insert`
    copied. xterm's ctrl branch requires `!ev.shiftKey` and the `ev.key &&
@@ -762,11 +766,25 @@ rig in its README — a browser, about 30 seconds.
    for it. Don't add a handler for a key without first pressing it.
 4. **The handler runs for keyup and keypress too**, and `_keyUp` reads a
    `false` as "don't refocus" — so a handler that answers every phase copies
-   three times and leaves the terminal blurred. Guard on `ev.type`.
-5. `Ctrl+V` stays SYN and `Ctrl+C` stays SIGINT on purpose, so the harness
+   three times and leaves the terminal blurred. Guard on `ev.type`, and on
+   `ev.repeat` as well: the palette chord already had to (DRY-43).
+5. **Match the letter with `chordLetter`** (`shell/src/lib/keys.ts`), shared
+   with `isPaletteChord`. `ev.key` is what the LAYOUT produced, which is what a
+   chord means; `ev.code` is the physical US-QWERTY position and belongs only
+   in the `ev.key`-produced-no-Latin-letter fallback. OR-ing the two makes a
+   Dvorak keyboard claim TWO chords — its own C and whatever now sits where
+   QWERTY's C was, which there is `j`, i.e. the browser console.
+6. `Ctrl+V` stays SYN and `Ctrl+C` stays SIGINT on purpose, so the harness
    asserts both POSITIVELY. Seeing the `^V` needs `stty lnext undef` in the
    probe shell, or the line discipline's literal-next eats it and the check
    passes against anything.
+7. **A pane whose cwd does not exist is the cruellest false negative here.**
+   The daemon records the cwd it was handed, so the frame renders `~/<dir>` and
+   the pane attaches normally — the PTY dies immediately and every keystroke
+   afterwards vanishes into what looks like a working terminal, which reads
+   exactly like the clipboard being broken. The harness makes its own
+   directories, and `attached()` refuses DRY-41's exit banner as well as the
+   reconnect badge.
 
 ## Verifying the ticket brief (DRY-53)
 

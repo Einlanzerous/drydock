@@ -190,13 +190,15 @@ no per-repo setup.
 - **Copy and paste in a pane (DRY-71).** `Ctrl+Shift+C` copies the selection,
   `Ctrl+Shift+V` pastes — the same pair a Linux terminal uses, and they work
   between two Drydock windows. `Ctrl+Insert` / `Shift+Insert` and the
-  right-click menu do the same thing and always did, undocumented. **`Ctrl+C`
-  is still SIGINT and `Ctrl+V` is still literal-next**, deliberately: on a desk
-  full of agents, a stale selection turning an interrupt into a copy is a bad
-  trade for a selection that's easy to leave behind. macOS is unaffected —
-  `Cmd+C` / `Cmd+V` were never intercepted. None of this needs HTTPS: it goes
-  through clipboard *events*, not `navigator.clipboard`, which doesn't exist on
-  the plain-HTTP origin prod is served from.
+  right-click menu also copy and paste, and did before this ticket; they were
+  simply undocumented. Only `Ctrl+Shift+C` was ever missing, because no browser
+  raises a `copy` event for it. **`Ctrl+C` is still SIGINT and `Ctrl+V` is still
+  literal-next**, deliberately: on a desk full of agents, a stale selection
+  turning an interrupt into a copy is a bad trade for a selection that's easy to
+  leave behind. macOS is unaffected — `Cmd+C` / `Cmd+V` were never intercepted.
+  None of this needs HTTPS: it goes through clipboard *events*, not
+  `navigator.clipboard`, which doesn't exist on the plain-HTTP origin prod is
+  served from.
 - **Markdown doc viewer (DRY-35).** Ctrl/Cmd-click a `*.md` path in any
   terminal pane and it opens rendered (sanitized `marked` + DOMPurify) in a
   floating window; relative links inside a doc navigate in place, and a refresh

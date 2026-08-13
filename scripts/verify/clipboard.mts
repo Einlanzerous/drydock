@@ -28,10 +28,11 @@
 // Setup + overrides: see README.md. Run from `daemon/` like the other .mts
 // harnesses, so tsx resolves:
 //   (cd daemon && node --import tsx ../scripts/verify/clipboard.mts)
+import { mkdirSync } from "node:fs";
 import { chromium, type Page } from "playwright";
 
-const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5371";
-const API = process.env.API_URL ?? "http://127.0.0.1:4371";
+const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5379";
+const API = process.env.API_URL ?? "http://127.0.0.1:4379";
 
 let failures = 0;
 function check(name: string, ok: boolean, extra = "") {
@@ -62,6 +63,12 @@ const spawned: string[] = [];
  * three `/bin/sh` panes are indistinguishable there.
  */
 async function spawnPane(dir: string, args: string[]): Promise<void> {
+  // Created here rather than asked for in the README, because getting it wrong
+  // is silent and looks like a product bug: the daemon records the cwd it was
+  // given, so the frame still renders `~/<dir>` and the pane still attaches —
+  // the PTY just dies on the spot, and every keystroke afterwards appears to
+  // vanish into a working terminal. (Cost an hour once, to the author.)
+  mkdirSync(`/tmp/${dir}`, { recursive: true });
   const r = await fetch(`${API}/api/sessions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -125,16 +132,21 @@ const rowsOf = (page: Page, dir: string): Promise<string> =>
   );
 
 /**
- * Attached, not merely rendered. `term.open()` runs on mount whatever the
- * socket does, so an `.xterm` element on screen says nothing about whether a
- * keystroke would reach a PTY; the pane's own "reconnecting…" badge being gone
- * is what says the WebSocket is up.
+ * Attached to a LIVE PTY — not merely rendered, and not merely connected.
+ *
+ * `term.open()` runs on mount whatever the socket does, so an `.xterm` element
+ * on screen says nothing about whether a keystroke would reach a PTY. The
+ * pane's own "reconnecting…" badge being gone says the WebSocket is up; DRY-41's
+ * exit banner being absent says there is still something on the other end of
+ * it. Both, because a pane bound to a dead PTY is attached, silent, and
+ * indistinguishable from a clipboard that stopped working.
  */
 const attached = (page: Page, dir: string): Promise<boolean> =>
   evalIn(
     page,
     `(() => { const f = ${FRAME_JS(dir)};
-      return !!f && !!f.querySelector(".xterm-rows") && !f.querySelector(".detached"); })()`,
+      return !!f && !!f.querySelector(".xterm-rows")
+        && !f.querySelector(".detached") && !f.querySelector(".exited"); })()`,
     false,
   );
 
@@ -160,11 +172,19 @@ const clipWrite = (page: Page, text: string): Promise<unknown> =>
   page.evaluate(`window.__clip.writeText(${JSON.stringify(text)})`);
 
 /**
- * Did the page reach for `navigator.clipboard`? Recorded rather than thrown, so
- * a run reports the constraint being broken instead of dying somewhere else.
+ * Did the page reach for `navigator.clipboard`?
+ *
+ * Deliberately NOT through `evalIn`: its rejection handler returns the fallback,
+ * and the fallback for "which calls happened" is the empty list — so any
+ * evaluation error at all would report the constraint as HELD. This check
+ * guards the one claim that decides whether the feature works in prod, so it
+ * fails closed: an error becomes a marker no assertion can mistake for silence.
  */
 const clipReached = (page: Page): Promise<string[]> =>
-  evalIn<string[]>(page, `window.__clipReached || []`, []);
+  page.evaluate(`window.__clipReached`).then(
+    (v) => (Array.isArray(v) ? (v as string[]) : ["<the probe itself is missing>"]),
+    (e) => [`<could not read the probe: ${e}>`],
+  );
 
 const INIT_JS = `(() => {
   Object.defineProperty(window, "__clip", { value: navigator.clipboard });
@@ -234,9 +254,23 @@ async function selectWord(page: Page, dir: string, token: string): Promise<boole
   );
 }
 
+/**
+ * A precondition, not a claim.
+ *
+ * Silent when it holds, because it is scaffolding rather than a result; loud and
+ * NAMED when it doesn't. The alternative — discarding these booleans — makes a
+ * focus that landed on the wrong element or a double-click that selected nothing
+ * present as an empty clipboard, i.e. as a bug in the code under test.
+ */
+async function must(what: string, ok: boolean | Promise<boolean>): Promise<boolean> {
+  const held = await ok;
+  if (!held) check(`PRECONDITION ${what}`, false);
+  return held;
+}
+
 /** Put `token` on screen in a pane, by typing it. Also proves input reaches the PTY. */
 async function typeToken(page: Page, dir: string, token: string): Promise<number | null> {
-  await focusPane(page, dir);
+  await must(`focus ${dir}`, focusPane(page, dir));
   await page.keyboard.type(token);
   await page.keyboard.press("Enter");
   return waitFor(async () => (await rowsOf(page, dir)).includes(token), 8_000);
@@ -246,6 +280,7 @@ const ALPHA = "dry71-alpha";
 const BRAVO = "dry71-bravo";
 const INTPANE = "dry71-interrupt";
 const WINPANE = "dry71-notlinux";
+const STUBPANE = "dry71-refuses";
 const TOKEN = "COPYME71"; // no word separators, so xterm's double-click takes exactly this
 
 async function main(): Promise<void> {
@@ -268,7 +303,7 @@ async function main(): Promise<void> {
     // already listens for, and whose own keymap is the only thing in the way.
     const P1 = "PASTED-CTRLSHIFTV-71";
     await clipWrite(page, P1);
-    await focusPane(page, ALPHA);
+    await must(`focus ${ALPHA}`, focusPane(page, ALPHA));
     await page.keyboard.press("Control+Shift+V");
     const pasted = await waitFor(async () => (await rowsOf(page, ALPHA)).includes(P1), 6_000);
     check("Ctrl+Shift+V pastes the clipboard into the terminal", pasted !== null,
@@ -279,7 +314,7 @@ async function main(): Promise<void> {
     // handler is exactly the thing that swallows it by accident.
     const P2 = "PASTED-SHIFTINSERT-71";
     await clipWrite(page, P2);
-    await focusPane(page, ALPHA);
+    await must(`focus ${ALPHA}`, focusPane(page, ALPHA));
     await page.keyboard.press("Shift+Insert");
     const pasted2 = await waitFor(async () => (await rowsOf(page, ALPHA)).includes(P2), 6_000);
     check("Shift+Insert still pastes", pasted2 !== null,
@@ -290,7 +325,7 @@ async function main(): Promise<void> {
     // takes a working key away from anyone with the muscle memory — the same
     // line every Linux terminal draws. "^V" echoed in the rows is the SYN
     // arriving at the PTY.
-    await focusPane(page, ALPHA);
+    await must(`focus ${ALPHA}`, focusPane(page, ALPHA));
     await page.keyboard.press("Control+v");
     const syn = await waitFor(async () => (await rowsOf(page, ALPHA)).includes("^V"), 5_000);
     check("Ctrl+V still sends SYN (literal-next), unclaimed by paste", syn !== null,
@@ -309,7 +344,7 @@ async function main(): Promise<void> {
     let clip = await clipRead(page);
     check("Ctrl+Insert still copies", clip.includes(TOKEN), JSON.stringify(clip));
 
-    await selectWord(page, ALPHA, TOKEN);
+    await must("re-select the token", selectWord(page, ALPHA, TOKEN));
     await clipWrite(page, "CLIPBOARD-UNTOUCHED");
     await page.keyboard.press("Control+Shift+C");
     await sleep(400);
@@ -326,7 +361,7 @@ async function main(): Promise<void> {
     await echoPane(BRAVO);
     const up2 = await waitFor(() => attached(page, BRAVO));
     check("a second pane is attached", up2 !== null, `after ${up2}s`);
-    await focusPane(page, BRAVO);
+    await must(`focus ${BRAVO}`, focusPane(page, BRAVO));
     await page.keyboard.press("Control+Shift+V");
     const crossed = await waitFor(async () => (await rowsOf(page, BRAVO)).includes(TOKEN), 6_000);
     check("text copied in one pane pastes into another", crossed !== null,
@@ -340,7 +375,7 @@ async function main(): Promise<void> {
     await spawnPane(INTPANE, ["-c", "trap 'echo GOTSIGINT' INT; while :; do sleep 0.2; done"]);
     const up3 = await waitFor(() => attached(page, INTPANE));
     check("the interrupt pane is attached", up3 !== null, `after ${up3}s`);
-    await focusPane(page, INTPANE);
+    await must(`focus ${INTPANE}`, focusPane(page, INTPANE));
     await page.keyboard.press("Control+c");
     const interrupted = await waitFor(
       async () => (await rowsOf(page, INTPANE)).includes("GOTSIGINT"),
@@ -348,6 +383,22 @@ async function main(): Promise<void> {
     );
     check("Ctrl+C sends SIGINT rather than copying", interrupted !== null,
       interrupted !== null ? `after ${interrupted}s` : "the shell never trapped INT");
+
+    // Ctrl+K, here rather than in a palette harness, because DRY-71 moved the
+    // letter-matching out of `isPaletteChord` and into the `chordLetter` the
+    // clipboard keys share with it. That refactor can only break one thing, and
+    // this is it: the palette's chord is pressed from inside a terminal by
+    // design (DRY-43), so nothing else on this desk would notice.
+    await must(`focus ${INTPANE} again`, focusPane(page, INTPANE));
+    await page.keyboard.press("Control+k");
+    const palette = await waitFor(
+      async () => (await evalIn(page, `!!document.querySelector(".palette")`, false)),
+      5_000,
+    );
+    check("Ctrl+K still opens the palette from inside a pane", palette !== null,
+      palette !== null ? `after ${palette}s` : "the palette never opened");
+    await page.keyboard.press("Escape");
+    await sleep(300);
 
     // ------------------------------------------------- (e) the prod constraint
     console.log("\n(e) the clipboard is reached through events, not navigator.clipboard");
@@ -380,35 +431,111 @@ async function main(): Promise<void> {
     check("the shell agrees it is not on Linux",
       (await evalIn(winPage, `navigator.platform`, "")) === "Win32");
 
-    await spawnPane(WINPANE, ["-c", "stty lnext undef; cat"]);
+    await echoPane(WINPANE);
     const up4 = await waitFor(() => attached(winPage, WINPANE));
     check("a pane is attached in that browser", up4 !== null, `after ${up4}s`);
     const wEchoed = await typeToken(winPage, WINPANE, TOKEN);
-    check("a token to copy is on screen", wEchoed !== null, `after ${wEchoed}s`);
+    check("a token to copy is on screen there too", wEchoed !== null, `after ${wEchoed}s`);
+    await must("select the token (not on Linux)", selectWord(winPage, WINPANE, TOKEN));
 
-    check("double-click selects the token", await selectWord(winPage, WINPANE, TOKEN));
-    // The proof that this run is measuring something the Linux run cannot: no
-    // DOM selection was left behind by the double-click. If this ever reports
-    // true, the mirror is back and everything below it is vacuous.
-    check("and leaves no DOM selection behind, unlike on Linux",
-      (await evalIn(winPage, `String(window.getSelection() || "")`, "?")) === "");
+    // The proof that this run measures something the Linux one cannot, and it
+    // asserts on the MIRROR rather than on a symptom of it. `window
+    // .getSelection()` alone would be a bad witness: whether a textarea's
+    // selection shows up there is a browser-version detail, so a check built on
+    // it can report "no selection" for the wrong reason and pass either way.
+    // The mirror IS `textarea.value` + a selection range over it, so that is
+    // what gets read — plus `queryCommandEnabled("copy")`, which is the thing
+    // the fallback in `copySelection` exists for and which flips with it.
+    const mirror = await evalIn(
+      winPage,
+      `(() => { const t = document.querySelector(".xterm-helper-textarea");
+        return { value: t.value, from: t.selectionStart, to: t.selectionEnd,
+                 doc: String(window.getSelection() || ""),
+                 enabled: document.queryCommandEnabled("copy") }; })()`,
+      null as null | { value: string; from: number; to: number; doc: string; enabled: boolean },
+    );
+    check("xterm's Linux selection mirror is genuinely absent",
+      !!mirror && mirror.value === "" && mirror.from === mirror.to && mirror.doc === "",
+      JSON.stringify(mirror));
+    check("so the copy command reports itself DISABLED, as it does on Windows",
+      !!mirror && mirror.enabled === false, JSON.stringify(mirror?.enabled));
 
     await clipWrite(winPage, "CLIPBOARD-UNTOUCHED");
     await winPage.keyboard.press("Control+Shift+C");
     await sleep(400);
-    check("Ctrl+Shift+C still copies", (await clipRead(winPage)).includes(TOKEN),
-      JSON.stringify(await clipRead(winPage)));
+    let wClip = await clipRead(winPage);
+    check("Ctrl+Shift+C copies anyway", wClip.includes(TOKEN), JSON.stringify(wClip));
 
     // Ctrl+Insert is the browser's, not the pane's — deliberately. It reaches
-    // xterm's `copy` listener on its own even with no DOM selection (measured
-    // here, which is why the pane doesn't claim it), so intercepting it would
-    // be a line of code that changes nothing while reading like the fix.
-    await selectWord(winPage, WINPANE, TOKEN);
+    // xterm's `copy` listener on its own even here (measured, which is why the
+    // pane doesn't claim it), so intercepting it would be a line of code that
+    // changes nothing while reading like the fix.
+    await must("re-select the token (not on Linux)", selectWord(winPage, WINPANE, TOKEN));
     await clipWrite(winPage, "CLIPBOARD-UNTOUCHED");
     await winPage.keyboard.press("Control+Insert");
     await sleep(400);
-    check("Ctrl+Insert still copies, unclaimed by the pane",
-      (await clipRead(winPage)).includes(TOKEN), JSON.stringify(await clipRead(winPage)));
+    wClip = await clipRead(winPage);
+    check("Ctrl+Insert copies too, unclaimed by the pane", wClip.includes(TOKEN),
+      JSON.stringify(wClip));
+
+    // ------------------------------------------- (g) the fallback, exercised --
+    console.log("\n(g) the copy still lands when execCommand refuses");
+    // `copySelection` reads `execCommand`'s boolean and, on false, retries with
+    // an off-screen textarea holding the text — a selection the command cannot
+    // refuse. Every browser measured returns true, so nothing above this ever
+    // reaches that branch, and an untested fallback for a SILENT failure is
+    // worse than none: it would rot unnoticed and be there for exactly the
+    // browser nobody tried.
+    //
+    // So this is the browser it is for, built to order: `execCommand` is stubbed
+    // to refuse — returning false without copying — while the DOM has no
+    // selection of its own, and to work normally once something is selected.
+    // That is precisely the "command disabled" behaviour the branch guards
+    // against. Without the fallback nothing reaches the clipboard at all.
+    const stub = await browser.newContext({ permissions: ["clipboard-read", "clipboard-write"] });
+    await stub.addInitScript(INIT_JS);
+    await stub.addInitScript(`(() => {
+      const real = document.execCommand.bind(document);
+      // Driven by an explicit counter the harness sets, NOT by inspecting the
+      // selection: on this Linux host xterm's mirror keeps handing the bare
+      // attempt a selection, so a stub that refuses "when nothing is selected"
+      // never refuses, the fallback is never reached, and the section passes
+      // while testing nothing. Refusing the FIRST attempt is also the honest
+      // model — a disabled command returns false and copies nothing.
+      window.__refuseCopies = 0;
+      window.__refusals = 0;
+      document.execCommand = (cmd, ...rest) => {
+        if (cmd === "copy" && window.__refuseCopies > 0) {
+          window.__refuseCopies--;
+          window.__refusals++;
+          return false;
+        }
+        return real(cmd, ...rest);
+      };
+    })()`);
+    const stubPage = await stub.newPage();
+    await stubPage.goto(SHELL, { waitUntil: "domcontentloaded" });
+    await echoPane(STUBPANE);
+    const up5 = await waitFor(() => attached(stubPage, STUBPANE));
+    check("a pane is attached in the refusing browser", up5 !== null, `after ${up5}s`);
+    const sEchoed = await typeToken(stubPage, STUBPANE, TOKEN);
+    check("a token to copy is on screen in the refusing browser", sEchoed !== null,
+      `after ${sEchoed}s`);
+    await must("select the token (refusing browser)", selectWord(stubPage, STUBPANE, TOKEN));
+    // Exactly one refusal armed: the bare attempt is refused, the fallback's is
+    // not. Two would refuse the fallback as well and prove only that a doubly
+    // broken browser stays broken.
+    await evalIn(stubPage,
+      `(() => { window.__refuseCopies = 1; window.__refusals = 0; return true; })()`, false);
+
+    await clipWrite(stubPage, "CLIPBOARD-UNTOUCHED");
+    await stubPage.keyboard.press("Control+Shift+C");
+    await sleep(400);
+    const refusals = await evalIn(stubPage, `window.__refusals`, -1);
+    check("the bare attempt really was refused", refusals === 1, `refusals=${refusals}`);
+    const sClip = await clipRead(stubPage);
+    check("the fallback puts the selection on the clipboard regardless",
+      sClip.includes(TOKEN), JSON.stringify(sClip));
   } finally {
     for (const id of spawned) await kill(id);
     await browser.close();

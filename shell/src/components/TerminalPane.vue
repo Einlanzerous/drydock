@@ -3,6 +3,7 @@ import { computed, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vu
 import { Terminal, type ILink } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { attachUrl } from "../lib/daemon.js";
+import { chordLetter } from "../lib/keys.js";
 import { claimPane, releasePane } from "../composables/gateStore.js";
 import PermissionPrompt from "./PermissionPrompt.vue";
 import type { ClientMessage, ServerMessage, SessionInfo } from "../lib/protocol.js";
@@ -82,15 +83,63 @@ function registerMdLinks(t: Terminal): void {
 // simply absent on `http://<host>:5321`, which is how prod is served
 // (docs/deploy.md). A fix written against it works on a dev box at localhost
 // and silently does nothing where this actually runs.
-const COPY_KEY = { key: "c", code: "KeyC" };
-const PASTE_KEY = { key: "v", code: "KeyV" };
+/**
+ * Put the terminal's selection on the clipboard, through a `copy` EVENT.
+ *
+ * `execCommand` dispatches a real `copy` at the focused element — xterm's helper
+ * textarea — and xterm's own listener answers it by putting the selection in
+ * `clipboardData`. That is the whole mechanism, and it is deliberately the same
+ * listener the right-click menu's Copy reaches, so the two cannot drift apart.
+ *
+ * It survives having no DOM selection to copy, which is the case that matters
+ * and the one a Linux dev box hides: xterm mirrors a MOUSE selection into that
+ * textarea for X11's PRIMARY selection, guarded by `Browser.isLinux`, so on
+ * Linux a real selection is always lying about and elsewhere there is none.
+ * Measured on Chromium and Firefox with `navigator.platform` forced to Win32 —
+ * the textarea is empty, `queryCommandEnabled("copy")` goes false, and the
+ * event fires anyway.
+ *
+ * The fallback exists because that is four browser-and-platform combinations,
+ * not a guarantee, and the failure it guards against is SILENT: the chord would
+ * do nothing, with nothing to see. So the boolean is read rather than dropped,
+ * and a false answer gets a second attempt with a selection the command cannot
+ * refuse — an off-screen textarea holding the same text, which is the trick
+ * xterm itself uses to make the right-click menu work. Exercised by
+ * `scripts/verify/clipboard.mts` section (g), which stubs `execCommand` into
+ * being the browser this is for; an untested fallback is worse than none.
+ */
+function copySelection(t: Terminal, host: HTMLElement): void {
+  if (!t.hasSelection()) return;
+  if (document.execCommand("copy")) return;
 
-/** Layout-tolerant: the letter you typed, or failing that the key you pressed. */
-function pressed(ev: KeyboardEvent, k: { key: string; code: string }): boolean {
-  return ev.key.toLowerCase() === k.key || ev.code === k.code;
+  const text = t.getSelection();
+  const relay = document.createElement("textarea");
+  relay.value = text;
+  relay.setAttribute("aria-hidden", "true");
+  relay.style.cssText = "position:fixed;top:-9999px;left:-9999px;opacity:0";
+  // Set explicitly rather than letting the textarea's own selection be copied,
+  // so a multi-line selection arrives as the "\n" xterm produced instead of
+  // whatever line endings a textarea normalises to. Capture, so it wins over
+  // anything listening on the way up.
+  const onCopy = (ev: ClipboardEvent) => {
+    ev.clipboardData?.setData("text/plain", text);
+    ev.preventDefault();
+  };
+  document.addEventListener("copy", onCopy, true);
+  // Beside the .xterm element rather than inside it, so xterm's own listener
+  // isn't a second author of the same event.
+  host.appendChild(relay);
+  relay.select();
+  try {
+    document.execCommand("copy");
+  } finally {
+    document.removeEventListener("copy", onCopy, true);
+    relay.remove();
+    t.focus(); // selecting the relay took the keyboard; give it straight back
+  }
 }
 
-function attachClipboardKeys(t: Terminal): void {
+function attachClipboardKeys(t: Terminal, host: HTMLElement): void {
   t.attachCustomKeyEventHandler((ev) => {
     // keydown only. The handler also runs for keypress and keyup, and `_keyUp`
     // reads a false as "don't refocus" — so answering every phase would copy
@@ -98,28 +147,18 @@ function attachClipboardKeys(t: Terminal): void {
     if (ev.type !== "keydown" || !ev.ctrlKey || !ev.shiftKey || ev.altKey || ev.metaKey) {
       return true;
     }
-    if (pressed(ev, COPY_KEY)) {
+    const letter = chordLetter(ev);
+    if (letter === "c") {
       // Claimed whether or not anything is selected: while the keyboard is in a
       // terminal this key means copy, and passing it on for an empty selection
       // would hand a gesture aimed at the pane to the browser, where it is
       // Chrome's inspect-element accelerator.
       ev.preventDefault();
-      // `execCommand` dispatches a real `copy` event at the focused element —
-      // xterm's helper textarea — and xterm's own listener answers it by
-      // putting the selection in `clipboardData`. That is the whole mechanism,
-      // and it is deliberately the same listener the right-click menu's Copy
-      // reaches, so the two gestures cannot drift apart.
-      //
-      // It survives having no DOM selection to copy, which is the case that
-      // matters and the one a Linux dev box hides: xterm mirrors a MOUSE
-      // selection into that textarea for X11's PRIMARY selection, guarded by
-      // `Browser.isLinux`, so on Linux a real selection is always lying about
-      // and on Windows there is none. Measured on Chromium and Firefox with
-      // `navigator.platform` forced to Win32 — `queryCommandEnabled("copy")`
-      // goes false, the event fires anyway. `scripts/verify/clipboard.mts`
-      // pins it, since a copy that quietly stopped working on half the
-      // platforms in this ticket's title would look identical here.
-      if (t.hasSelection()) document.execCommand("copy");
+      // Swallow every repeat, copy only on the first — the same shape as the
+      // palette's chord (DRY-43). Holding the keys down would otherwise
+      // re-serialize the whole selection and re-dispatch a synchronous `copy`
+      // per repeat, on the keyboard's cadence, for one gesture.
+      if (!ev.repeat) copySelection(t, host);
       return false;
     }
     // Insurance, not the fix: Ctrl+Shift+V already reaches the browser in xterm
@@ -127,8 +166,10 @@ function attachClipboardKeys(t: Terminal): void {
     // `ev.key && ctrlKey` fallback maps only `_` and `@` — so no key is
     // produced and `_keyDown` returns before `cancel()`. Stated here so an
     // xterm bump that starts claiming ctrl+shift+letter can't quietly take
-    // paste away again, which is exactly how Ctrl+V behaves today.
-    if (pressed(ev, PASTE_KEY)) return false;
+    // paste away again, which is exactly how Ctrl+V behaves today. Not
+    // preventDefault-ed: the browser's own paste is the thing being let
+    // through.
+    if (letter === "v") return false;
     return true;
   });
 }
@@ -354,9 +395,12 @@ onMounted(async () => {
     if (!props.readOnly) sendWs({ type: "input", data });
   });
   registerMdLinks(t);
-  // Copy stays available to a spectator (DRY-27): reading somebody else's run
-  // is the whole point of a public one. A paste is dropped by the guard above.
-  attachClipboardKeys(t);
+  // Copy does not go through `onData`, so the read-only guard above does not
+  // apply to it — a spectator on somebody else's public run (DRY-27) can still
+  // take a line out of the scrollback, which is the whole point of watching
+  // one. Reasoned from the call graph, not measured: a read-only pane needs
+  // multi-user and a second account, which is `auth.mts`'s rig.
+  attachClipboardKeys(t, termEl.value!);
   term.value = t;
   fit.value = f;
 
