@@ -778,7 +778,15 @@ rig in its README — a browser, about 30 seconds.
    asserts both POSITIVELY. Seeing the `^V` needs `stty lnext undef` in the
    probe shell, or the line discipline's literal-next eats it and the check
    passes against anything.
-7. **A pane whose cwd does not exist is the cruellest false negative here.**
+7. **Chrome's inspect-element accelerator is not reserved**, verified by hand on
+   Chrome for Windows (headless cannot answer it, and the web is confidently
+   wrong in both directions). `preventDefault` on `Ctrl+Shift+C` suppresses it
+   while the keyboard is in a pane, and the same chord elsewhere on the desk
+   still opens DevTools — which is why the pane claims it unconditionally
+   rather than only when something is selected. Narrowing that puts the
+   inspector back on exactly the empty-selection press somebody makes by
+   mistake.
+8. **A pane whose cwd does not exist is the cruellest false negative here.**
    The daemon records the cwd it was handed, so the frame renders `~/<dir>` and
    the pane attaches normally — the PTY dies immediately and every keystroke
    afterwards vanishes into what looks like a working terminal, which reads

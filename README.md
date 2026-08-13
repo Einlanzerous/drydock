@@ -195,7 +195,9 @@ no per-repo setup.
   raises a `copy` event for it. **`Ctrl+C` is still SIGINT and `Ctrl+V` is still
   literal-next**, deliberately: on a desk full of agents, a stale selection
   turning an interrupt into a copy is a bad trade for a selection that's easy to
-  leave behind. macOS is unaffected — `Cmd+C` / `Cmd+V` were never intercepted.
+  leave behind. The chord is claimed only *inside* a pane: press `Ctrl+Shift+C`
+  anywhere else on the desk and it's still your browser's inspect-element
+  shortcut. macOS is unaffected — `Cmd+C` / `Cmd+V` were never intercepted.
   None of this needs HTTPS: it goes through clipboard *events*, not
   `navigator.clipboard`, which doesn't exist on the plain-HTTP origin prod is
   served from.

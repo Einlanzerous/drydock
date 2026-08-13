@@ -153,6 +153,13 @@ function attachClipboardKeys(t: Terminal, host: HTMLElement): void {
       // terminal this key means copy, and passing it on for an empty selection
       // would hand a gesture aimed at the pane to the browser, where it is
       // Chrome's inspect-element accelerator.
+      //
+      // That accelerator is NOT reserved, verified on Chrome for Windows: this
+      // preventDefault suppresses it while the focus is in a pane, and pressing
+      // the same chord anywhere else on the desk still opens DevTools. Worth
+      // knowing before anyone narrows this to "only when there is a selection"
+      // — that would put the inspector back on an empty-selection copy, which
+      // is the most likely time to press it by mistake.
       ev.preventDefault();
       // Swallow every repeat, copy only on the first — the same shape as the
       // palette's chord (DRY-43). Holding the keys down would otherwise
