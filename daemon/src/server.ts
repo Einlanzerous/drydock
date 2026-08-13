@@ -597,15 +597,30 @@ const server = http.createServer(async (req, res) => {
       // from the registry the moment it signals (DRY-60), so by the time the
       // child actually goes there is nothing left to find — and that exit is
       // precisely the one somebody is waiting on.
+      //
+      // `ending()` rather than `info()`: it is the narrow accessor that exists
+      // precisely because `exitCode` cannot say whether a run was stopped or
+      // crashed, and it costs three fields per connected stream instead of a
+      // whole `SessionInfo` rendered to read three.
       const unsubscribeExits = manager.onSessionEnd((session) => {
         if (!session.visibleTo(viewer)) return;
-        const { id, status, exitCode } = session.info();
-        write({ type: "session-exit", sessionId: id, status, exitCode });
+        const { exitCode, endReason } = session.ending();
+        write({
+          type: "session-exit",
+          sessionId: session.id,
+          status: "exited",
+          exitCode: exitCode ?? null,
+          endReason,
+        });
       });
 
+      // Collected rather than chained, so adding a third subscription to this
+      // handler is one line and cannot half-happen: an unsubscribe left out of
+      // a hand-composed teardown leaks a listener holding a dead response, and
+      // the leak is invisible until something writes to it.
+      const subscriptions = [unsubscribeGates, unsubscribeExits];
       const unsubscribe = (): void => {
-        unsubscribeGates();
-        unsubscribeExits();
+        for (const drop of subscriptions) drop();
       };
       // Load-bearing, same class as the pg pool listener in DRY-28 and the
       // socket handlers in DRY-45: an unhandled 'error' on this response throws,

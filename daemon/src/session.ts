@@ -7,7 +7,7 @@ import { log } from "./log.js";
 import { assertSocketPathFits, forget, writeMeta } from "./sessions-dir.js";
 import { SupervisorLink } from "./supervisor/link.js";
 import { PROTOCOL_VERSION, type SessionMeta } from "./supervisor/wire.js";
-import type { SessionEndReason, SessionStart } from "./state/types.js";
+import type { SessionStart } from "./state/types.js";
 import type {
   EventMessage,
   PendingGate,
@@ -16,6 +16,7 @@ import type {
   RunFailure,
   RunOrigin,
   ServerMessage,
+  SessionEndOutcome,
   SessionInfo,
   SessionStatus,
   SessionVisibility,
@@ -842,8 +843,14 @@ export class PtySession {
    * recorder lives outside this class — `exit_code` can't distinguish a
    * deliberate stop (129/137/143) from a crash, and the thing that knows the
    * difference is `stoppedByRequest`, which only exists in here.
+   *
+   * Typed as the three outcomes the body can actually produce rather than as
+   * the persisted `SessionEndReason`, which is these plus `unknown` (DRY-64).
+   * Narrower still satisfies the recorder, and it means the value can go
+   * straight onto the wire without a client having to handle a case this can
+   * never return.
    */
-  ending(): { endedAt: number; exitCode?: number; endReason: SessionEndReason } {
+  ending(): { endedAt: number; exitCode?: number; endReason: SessionEndOutcome } {
     return {
       endedAt: this.endedAtValue ?? Date.now(),
       exitCode: this.exitCode ?? undefined,

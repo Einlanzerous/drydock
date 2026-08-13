@@ -95,27 +95,80 @@ export type EventMessage =
    * Exit was WebSocket-only until now — `{type:"status", status:"exited"}` to
    * whoever happened to be attached — so a client that only wanted to know a
    * run had ended either held a socket per session purely to hear it, or polled
-   * `GET /api/sessions` on a timer and read three fields off every record.
+   * `GET /api/sessions` on a timer and read one field off every record.
    *
-   * Those three fields, named and typed exactly as `SessionInfo`'s, so a
-   * consumer patches the record it already has rather than translating one
-   * shape into another. `sessionId` rather than `id` only because every other
-   * variant in this union says `sessionId`, and a client switching on `type`
-   * should not have to remember which arm renamed it.
+   * A notification of an ending, NOT a patch for the record you hold. `idle`,
+   * `failure` and `handoff` all move at exit too, and the last of them is
+   * written after this fires, so a consumer that merged these fields into a
+   * cached `SessionInfo` would hold one claiming a finished run is still idle
+   * and still has no handoff. Anything past "it ended, and how" is a re-read.
    *
-   * There is deliberately no catch-up frame beside `gate-snapshot`. A gate
-   * needs one because a resolution that fires while the stream is down is gone
-   * for good; an exit is a *state*, and an exited session stays in the registry
-   * until somebody clears it — so a consumer that was disconnected across one
-   * still finds it in `GET /api/sessions`. The event removes the polling loop,
-   * not the list.
+   * `sessionId` rather than `id` because every other variant in this union says
+   * `sessionId`, and a client switching on `type` should not have to remember
+   * which arm renamed it.
+   *
+   * There is no catch-up frame beside `gate-snapshot`, and the reason is not
+   * that nothing is ever missed — it is that the two misses differ. A gate
+   * resolved while the stream was down is gone for good; an ordinary exit
+   * leaves the session sitting in the registry, so a consumer that missed the
+   * frame still finds it, terminal state and all, in `GET /api/sessions`.
+   *
+   * The exception, stated rather than papered over: `/kill` drops a session
+   * from the registry synchronously (DRY-60), so for a killed run this frame is
+   * everything the stream and the list will ever say — miss it and the session
+   * is merely absent from the next poll, with no exit code to be had. (A
+   * database tier still files a history row, but that is another surface and
+   * one the file tier hasn't got.) Survivable because a kill is something a
+   * client asked for, and most of why `endReason` rides here rather than being
+   * left to be inferred from `exitCode`.
    */
   | {
       type: "session-exit";
       sessionId: string;
+      /** Always `exited`; carried so the frame reads as a status on its own. */
       status: SessionStatus;
+      /**
+       * The child's exit code — with two values that are not the child's.
+       *
+       * `-1` is the daemon's own: a supervisor that vanished without an exit
+       * frame, i.e. the session ended and nobody can say how (`link.ts`). It is
+       * not a POSIX code and a consumer branching on the number needs to know
+       * that. `null` means no code was ever recorded, which today's only
+       * emitter cannot produce — kept because the field mirrors
+       * `SessionInfo.exitCode`, and inventing a number there would be worse.
+       *
+       * Either way, `endReason` is the field to branch on.
+       */
       exitCode: number | null;
+      /**
+       * Finished, failed, or stopped on purpose — the distinction `exitCode`
+       * cannot make and the one every surface here has been burned by.
+       *
+       * Signalling a process exits it 129/137/143, so a consumer inferring
+       * failure from a non-zero code reports every deliberate stop as a crash:
+       * DRY-49's trap 2, which put "nobody was watching, please pick it up" on
+       * the tickets of runs somebody stopped by hand, and DRY-56's trap 3 in a
+       * tombstone. Only the daemon holds what separates them (`stoppedByRequest`
+       * is set by `/kill` before the signal), so a client cannot re-derive it
+       * from anything on the wire — least of all for a killed session, whose
+       * registry entry is gone before the exit lands.
+       */
+      endReason: SessionEndOutcome;
     };
+
+/**
+ * How a session ended, in the vocabulary the daemon can actually establish.
+ *
+ * `finished` is not a claim of success beyond "exited 0" — the Stop hook's
+ * "ended turn" is a run-level notion (DRY-49) and deliberately absent here,
+ * since a process that hands back its turn has not exited at all.
+ *
+ * The persisted twin, `SessionEndReason` (`state/types.ts`), extends this with
+ * `unknown` for a row that was never stamped. A live ending always has one, so
+ * the wire type does not carry a case a client would have to handle and could
+ * never receive.
+ */
+export type SessionEndOutcome = "finished" | "failed" | "stopped";
 
 export type SessionStatus = "running" | "exited";
 

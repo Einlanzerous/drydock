@@ -1,3 +1,5 @@
+import type { SessionEndOutcome } from "../protocol.js";
+
 // Persisted workspace state (DRY-28).
 //
 // The desktop arrangement used to live in the browser's localStorage (DRY-14),
@@ -110,8 +112,15 @@ export interface SessionRecord {
   endReason?: SessionEndReason;
 }
 
-/** Mirrors session.ts's RunEndReason plus the case history has that runs don't. */
-export type SessionEndReason = "finished" | "failed" | "stopped" | "unknown";
+/**
+ * Mirrors session.ts's RunEndReason plus the case history has that runs don't.
+ *
+ * Derived from the wire type rather than spelled out again (DRY-64): the same
+ * three words now ride on `session-exit`, and a second literal union would be
+ * free to drift from the one a client parses. `unknown` is history's alone — it
+ * is what a row that was never stamped reads as, which a live ending cannot be.
+ */
+export type SessionEndReason = SessionEndOutcome | "unknown";
 
 /** What a spawn knows about itself. `id`/`createdAt` come from the session. */
 export type SessionStart = Omit<

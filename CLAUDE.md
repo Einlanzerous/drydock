@@ -91,13 +91,6 @@ test run is now a real step. Kill by executable, not by pattern: `pkill -f
 supervisor/main` also matches the shell command containing that string and will
 kill your own session.
 
-The same trap eats the tidy-up one layer up, and `/proc/<pid>/exe` is not enough
-on its own: `pgrep -f "src/index.ts"` matches the **shell wrapper** running your
-cleanup command, and on a host with several worktrees each running a daemon, a
-cwd filter is what tells your instance from another agent's. Match on both —
-exe is node AND cwd is your worktree — or the command kills itself midway and
-leaves the rest of the rig up. (Done it, twice in one session.)
-
 ```sh
 for p in $(pgrep -f "supervisor/main"); do
   case "$(readlink /proc/$p/exe)" in *node*) kill -9 "$p";; esac
@@ -109,6 +102,21 @@ sessions dir with live supervisors in it doesn't stop them; it deletes the
 socket and metadata that were the only handle on them, leaving processes that
 no daemon can ever find. (Done it. The symptom is a supervisor whose `/proc/<pid>/fd`
 shows its log as `(deleted)`.)
+
+Stopping the throwaway **daemon** needs one filter more than that, because its
+pattern is not distinctive: `pgrep -f "src/index.ts"` matches the shell wrapper
+running your own cleanup command — same class as `pkill -f supervisor/main`
+above, and it kills the command midway, leaving the rest of the rig up — and on
+a host where several worktrees each run a daemon, exe alone can't tell yours
+from another agent's. Match on exe AND cwd:
+
+```sh
+for p in $(pgrep -f "src/index.ts"); do
+  case "$(readlink /proc/$p/exe)" in *node*)
+    case "$(readlink /proc/$p/cwd)" in *<your-worktree>*) kill "$p";; esac;;
+  esac
+done
+```
 
 Smoke-test against it (`curl` from another terminal):
 
@@ -755,14 +763,13 @@ The traps:
 was WebSocket-only — and anything that merely wanted to know a run had finished
 either held a socket per session purely to hear it, or polled `/api/sessions` on
 a timer and read one field off every record. It now also carries `session-exit`:
-`sessionId`, `status`, `exitCode`, named and typed exactly as `SessionInfo`'s so
-a consumer patches the record it already has instead of translating.
+`sessionId`, `status`, `exitCode`, `endReason`.
 
 ```sh
 curl -sN localhost:4399/api/events &          # leave it running
 curl -s -X POST localhost:4399/api/sessions -H 'Content-Type: application/json' \
   -d '{"command":"/bin/sh","args":["-c","sleep 1; exit 3"]}'
-# → data: {"type":"session-exit","sessionId":"…","status":"exited","exitCode":3}
+# → data: {…,"status":"exited","exitCode":3,"endReason":"failed"}
 ```
 
 1. **It hangs off `SessionEndNotifier`, never `onRunEnd`.** That one is gated on
@@ -781,16 +788,40 @@ curl -s -X POST localhost:4399/api/sessions -H 'Content-Type: application/json' 
    read off `/api/sessions`, and withholding it leaves their card marching
    forever. Test both halves under multi-user, since only one of them is a leak:
    a stranger's private run must stay silent, a public one must arrive.
-4. **There is no catch-up frame, and there should not be.** `gate-snapshot`
-   exists because a resolution that fires while the stream is down is gone for
-   good; an exit is a *state*, and an exited session stays in the registry until
-   somebody clears it. A consumer that was away reads the list. Same reason boot
-   reconciliation records history directly rather than through the fan-out —
-   reconcile runs before the port is bound, so there is no stream to reach.
-5. `GET /api/sessions/{id}` was folded into this ticket and deliberately **not**
+4. **`endReason` rides along, because `exitCode` is not a verdict.** Signalling a
+   process exits it 129/137/143, so a consumer inferring failure from the number
+   reports every deliberate stop as a crash — DRY-49's trap 2 and DRY-56's trap
+   3, which is now this surface's too and worse here: `/kill` has already
+   dropped the session, so unlike a card or a tombstone there is no record left
+   to correct the impression. It comes from `ending()`, the accessor that exists
+   for exactly this, and the wire type is `SessionEndOutcome` — the persisted
+   `SessionEndReason` minus `unknown`, which a live ending cannot be. One
+   definition, in protocol.ts, with `state/types.ts` extending it.
+5. **There is no catch-up frame, and the reason is not that nothing is missed.**
+   `gate-snapshot` exists because a resolution that fires while the stream is
+   down is gone; an ordinary exit leaves the session in the registry, so a
+   consumer that missed the frame still finds it terminal in `/api/sessions`.
+   The exception is worth saying out loud rather than papering over: a KILLED
+   session is dropped synchronously, so that frame is everything the stream and
+   the list will ever say — miss it and the session is merely absent next poll,
+   with no code to be had. A database tier still files a history row; the file
+   tier has no such surface, so don't lean on it. Tolerable only because a kill
+   is something a client asked for.
+6. **"Reconcile can't reach a stream" is true of one path, not of reconcile.**
+   Boot records history directly for a session rebuilt by `adoptExited`, which
+   is finished before the port binds. The `meta.killedAt` re-kill branch is the
+   counterexample: it leaves its link OPEN by design, so its exit can land well
+   after the port is up and does emit — for an id no client has ever listed.
+   That frame is correct, not stray, and any similar claim here needs checking
+   against that branch before it is written down.
+7. `GET /api/sessions/{id}` was folded into this ticket and deliberately **not**
    built. The only reason anything polled it was to learn about exits, so the
    event retires the route with the loop; adding it would be a second surface
-   answering a question that no longer needs asking.
+   answering a question that no longer needs asking. Note the stream carries no
+   session-*start* either, and needn't: a consumer learns the id of the session
+   it spawned from the 201, which is the wishlist's whole loop ("spawn an agent,
+   wait for it to exit"). Watching for OTHER clients' spawns is still a poll —
+   a different feature, and nobody has asked for it.
 
 ## Verifying the ticket brief (DRY-53)
 
