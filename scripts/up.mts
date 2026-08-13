@@ -10,16 +10,25 @@
 // is exactly one way to start the thing regardless of how much of it you're
 // running today.
 //
-// It runs under BUN, not Node (DRY-80). That is a change from the `.mjs` this
-// replaced, and it is safe for the reason the daemon's own choice is not: this
-// process only ORCHESTRATES. It hands off to `bun run --filter '*' dev`, so the
-// daemon's "must be real node" invocation stays defined in one place
-// (daemon/package.json) and node-pty is never loaded in this process. The route
-// Node would have taken — `node --import tsx` — is not available here anyway:
-// tsx is a *daemon* workspace dependency and there is no `node_modules/.bin/tsx`
-// at the repo root, so it does not resolve from this directory at all.
+// It still runs on NODE after being converted to TypeScript (DRY-80), via
+// `node --import tsx` — which is why `tsx` is a devDependency of the ROOT
+// package and not only of the daemon workspace.
 //
-// It deliberately does NOT reimplement how each half starts.
+// **Do not "simplify" this to `bun scripts/up.mts`.** It is tempting, since this
+// process only orchestrates and never loads node-pty, and it appears to work.
+// But Bun auto-loads `.env` and performs `$VAR` EXPANSION on the values, while
+// `loadEnv()` below (and `daemon/src/env.ts`, which it deliberately mirrors)
+// treats them literally. `loadEnv` skips any key already in `process.env`, so
+// under Bun every key is already there and the expanded value silently wins:
+// `docker compose` then initdb's the container with one password while a daemon
+// started any other way — CLAUDE.md's second-instance pattern, plain
+// `node --import tsx src/index.ts` — reads the unexpanded one and cannot
+// authenticate. Measured: a `.env` line `PW=abc$HOME/def` reaches Bun as
+// `abc/home/you/def` and Node as the literal.
+//
+// It deliberately does NOT reimplement how each half starts: it hands off to
+// `bun run --filter '*' dev`, so the daemon's "must be real node" invocation
+// stays defined in one place (daemon/package.json).
 import { spawn, spawnSync } from "node:child_process";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
@@ -90,10 +99,17 @@ function ensureDbCredentials(): void {
     console.log("[up] generated a database password into .env");
   }
   if (!process.env.DRYDOCK_DATABASE_URL) {
+    const pw = process.env.DRYDOCK_DB_PASSWORD;
+    // Unreachable: the block above either found this set or just wrote it via
+    // appendEnv, which assigns process.env too. Asserted rather than defaulted
+    // — a `?? ""` here satisfies the compiler by writing a PASSWORD-LESS URL
+    // into .env, which surfaces much later as an authentication failure against
+    // a container that was initdb'd correctly.
+    if (!pw) throw new Error("[up] DRYDOCK_DB_PASSWORD missing after bootstrap");
     // encodeURIComponent even though generated values are URL-safe: this also
     // runs over a password a human chose, where @ : / # are ordinary.
-    const pw = encodeURIComponent(process.env.DRYDOCK_DB_PASSWORD ?? "");
-    appendEnv("DRYDOCK_DATABASE_URL", `postgres://drydock:${pw}@127.0.0.1:${port}/drydock`);
+    const url = `postgres://drydock:${encodeURIComponent(pw)}@127.0.0.1:${port}/drydock`;
+    appendEnv("DRYDOCK_DATABASE_URL", url);
     console.log("[up] wrote DRYDOCK_DATABASE_URL into .env");
   }
   // Postgres only reads POSTGRES_PASSWORD at initdb, so an existing volume

@@ -14,14 +14,14 @@
 //
 // Run from `daemon/`, where tsx resolves (DRY-80):
 //   (cd daemon && node --import tsx ../scripts/verify/timings.mts)
-import type { HealthResponse, WorkspaceResponse } from "./api.mjs";
+import type { Detail, HealthResponse, WorkspaceResponse } from "./api.mjs";
 
 const DAEMON = process.env.DAEMON ?? "http://127.0.0.1:4372";
 const PGCTL = "http://127.0.0.1:5457";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;
-const check = (n: string, ok: boolean, d: unknown = "") => {
+const check = (n: string, ok: boolean, d: Detail = "") => {
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${n}${d ? ` — ${d}` : ""}`);
   if (!ok) failures++;
 };

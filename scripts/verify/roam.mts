@@ -17,6 +17,7 @@
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import {
   deskWindows,
+  type Detail,
   type HealthResponse,
   type SessionsResponse,
   type WorkspaceResponse,
@@ -33,7 +34,7 @@ const j = async <T,>(u: string, init?: RequestInit): Promise<T> =>
   (await fetch(u, init)).json() as Promise<T>;
 
 let failures = 0;
-function check(name: string, ok: boolean, detail: unknown = ""): void {
+function check(name: string, ok: boolean, detail: Detail = ""): void {
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${name}${detail ? ` — ${detail}` : ""}`);
   if (!ok) failures++;
 }

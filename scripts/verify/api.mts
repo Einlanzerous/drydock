@@ -24,6 +24,22 @@ import type { Ticket } from "../../daemon/src/tracker/types.js";
 
 export type { SessionInfo, SessionRecord, Ticket, WorkspaceState };
 
+/**
+ * The trailing argument every harness's `check()` takes: the diagnosis printed
+ * beside a failure.
+ *
+ * A union rather than `unknown`, which is what this was first widened to when
+ * the new typecheck found five call sites in ticket-brief.mts passing a number
+ * or a `string[]` to a parameter declared `string`. `unknown` makes the error
+ * go away by giving up on the parameter entirely — and these values are
+ * interpolated into a template, where the one thing that must not happen is an
+ * object arriving and rendering as `[object Object]`: the detail line is then
+ * useless at exactly the moment somebody is reading it. This admits every shape
+ * that formats usefully and nothing else. Callers with a richer value are
+ * expected to `JSON.stringify` it, which most already do.
+ */
+export type Detail = string | number | readonly string[];
+
 /** `GET /api/sessions` */
 export interface SessionsResponse {
   sessions: SessionInfo[];

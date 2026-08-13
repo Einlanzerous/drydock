@@ -16,7 +16,10 @@
 // Run from `daemon/`, where tsx resolves (DRY-80):
 //   (cd daemon && node --import tsx ../scripts/verify/race.mts)
 import { chromium, type Page } from "playwright";
-import { deskWindows, type SessionsResponse, type WorkspaceResponse } from "./api.mjs";
+import { deskWindows, type Detail, type SessionsResponse, type WorkspaceResponse } from "./api.mjs";
+// The proxy's own declaration of what it serves, rather than a copy of it here
+// (DRY-80). `import type` erases, so this does not start a second proxy.
+import type { ProxyHttpState } from "./proxy-http.mjs";
 
 const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5370";
 const DAEMON = process.env.DAEMON ?? "http://127.0.0.1:4370";
@@ -26,20 +29,13 @@ const PROXY = process.env.PROXY ?? "http://127.0.0.1:4371";
 // silently change what is being tested rather than fail.
 const DELAY_MS = Number(process.env.DELAY_MS ?? 6000);
 
-/** `proxy-http.mts`'s control surface. `delayed` counts held-then-forwarded writes. */
-interface ProxyState {
-  mode: string;
-  held: number;
-  delayed: number;
-}
-
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // The trailing comma is required in a `.mts` file: `<T>` alone at the start of
 // an arrow is reserved syntax there (it would be a JSX tag in `.tsx`).
 const j = async <T,>(u: string, i?: RequestInit): Promise<T> =>
   (await fetch(u, i)).json() as Promise<T>;
 let failures = 0;
-const check = (n: string, ok: boolean, d: unknown = "") => {
+const check = (n: string, ok: boolean, d: Detail = "") => {
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${n}${d ? ` — ${d}` : ""}`);
   if (!ok) failures++;
 };
@@ -117,7 +113,7 @@ console.log("\n1. a drag landing mid-recovery is not swallowed");
   // tell which one it was meant to be checking.
   await j(`${PROXY}/__break?mode=delay`, { method: "POST" });
   const t0 = Date.now();
-  await waitFor(async () => (await j<ProxyState>(`${PROXY}/__state`)).delayed > 0, 40000);
+  await waitFor(async () => (await j<ProxyHttpState>(`${PROXY}/__state`)).delayed > 0, 40000);
   console.log(`      recovery push held after ${Math.round((Date.now() - t0) / 100) / 10}s`);
 
   // Inside that hold: a new arrangement, whose own push 503s immediately and

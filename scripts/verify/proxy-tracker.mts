@@ -48,7 +48,24 @@ const LISTEN = Number(process.env.PROXY_PORT ?? 4375);
 const TARGET = Number(process.env.TARGET_PORT ?? 4374);
 const BREAK_PATH = process.env.BREAK_PATH ?? "/api/tracker/tickets";
 
-type Mode = "ok" | "502" | "hang" | "huge" | "skew";
+export type Mode = "ok" | "502" | "hang" | "huge" | "skew";
+
+/**
+ * `GET /__state`. Exported so the harnesses driving this proxy name the shape
+ * it actually serves rather than each keeping a copy (DRY-80) — `import type`
+ * erases, so naming it does not start a proxy.
+ */
+export interface ProxyTrackerState {
+  mode: Mode;
+  /**
+   * Requests this proxy refused or parked. The answer to "was it never SENT, or
+   * sent and rejected" — only one of those is a product bug, and the DOM alone
+   * cannot tell them apart.
+   */
+  blocked: number;
+  /** Sockets parked by "hang" and not yet released. */
+  held: number;
+}
 
 let mode: Mode = "ok";
 let blocked = 0;
@@ -80,10 +97,10 @@ const server = http.createServer((req, res) => {
     held.clear();
     return json(200, { mode });
   }
-  // `blocked` is the answer to "was the request never SENT, or sent and
-  // rejected" — only one of those is a product bug, and the harness asserts on
-  // it rather than inferring from the DOM alone.
-  if (url.pathname === "/__state") return json(200, { mode, blocked, held: held.size });
+  if (url.pathname === "/__state") {
+    const state: ProxyTrackerState = { mode, blocked, held: held.size };
+    return json(200, state);
+  }
 
   // Answered whatever the mode. A partitioned tracker does not break the
   // daemon's CORS negotiation, and failing the preflight would stop the browser

@@ -71,10 +71,13 @@ invocation below has the same shape:
 (cd daemon && node --import tsx ../scripts/verify/<name>.mts)
 ```
 
-The `cd daemon` is not decoration. `tsx` is a dependency of the **daemon**
-workspace, so there is no `node_modules/.bin/tsx` at the repo root and
-`node --import tsx` does not resolve from there at all. It is a subshell so the
-blocks below still copy-paste in sequence from the repo root.
+The `cd daemon` is now convention rather than necessity. `tsx` used to be a
+**daemon**-workspace dependency only, so `node --import tsx` did not resolve
+from the repo root at all; DRY-80 made it a root devDependency too (the launcher
+needs it — see the note in `scripts/up.mts`), so `node --import tsx
+scripts/verify/<name>.mts` from the root works identically. The blocks below
+keep the subshell form because every harness's own header comment gives it, and
+because a subshell means the whole section still copy-pastes in sequence.
 
 The browser harnesses need Playwright. The library itself is an ordinary
 devDependency now (DRY-80) — `bun install` at the repo root is enough — but the
@@ -88,26 +91,33 @@ bunx playwright install chromium
 If a launch fails with "Executable doesn't exist", that is the line you missed.
 
 **These are typechecked in CI, and that proves almost nothing.** `bun run
-typecheck:scripts` (the `scripts typecheck` step in `pr-checks.yml`) reads
-`scripts/tsconfig.json` and holds down what tsc can see: that a harness still
+typecheck:scripts` (the `scripts typecheck` step in `pr-checks.yml`) runs two
+projects — `scripts/tsconfig.json` for the Node half and
+`scripts/tsconfig.browser.json` for the Playwright half, split so that daemon
+source reached by the in-process harnesses is never checked under the DOM lib as
+well as its own. Between them they hold down what tsc can see: that a harness
 compiles, that it agrees with the daemon's own `SessionInfo` / `SessionRecord` /
-`Ticket` — imported through `api.mts` rather than re-declared — and that the
-DOM calls in a `page.evaluate` body written as a *function* are real. It cannot
-see a selector, a body written as a *string*, or an assertion that has quietly
-stopped discriminating. Everything in
+`Ticket` (imported through `api.mts` rather than re-declared) and with each
+proxy's own `/__state` shape (imported from the proxy, likewise), and that the
+DOM calls in a `page.evaluate` body are real. It cannot see a selector, or an
+assertion that has quietly stopped discriminating. Everything in
 [Making sure a harness still discriminates](#making-sure-a-harness-still-discriminates)
 is still done by hand and still the part that matters.
 
-**`page.evaluate` bodies containing a named inner function must be STRINGS.**
-`tsx`'s esbuild transform wraps name-bound functions in a `__name(...)` helper
-(keepNames), and Playwright ships an evaluate body to the browser as source,
-where that helper doesn't exist — so it fails as
+**A `page.evaluate` body may not bind a NAME to a function.** `tsx`'s esbuild
+transform wraps name-bound functions in a `__name(...)` helper (keepNames), and
+Playwright ships an evaluate body to the browser as source, where that helper
+doesn't exist — so `const q = (s) => …` inside a body fails as
 `ReferenceError: __name is not defined` from inside the page, pointing at a line
 that reads perfectly well. An anonymous inline arrow crosses intact, which is
-why most bodies here are still functions and why the rule looks optional right
-up until somebody adds a `const q = (s) => …`. The bodies that must be strings
-are marked as such where they appear (`auth.mts`, `sidebar.mts`,
-`epic-children.mts`, `surface.mts`, `backlog-toggle.mts`).
+what makes the rule look optional.
+
+Passing the body as a STRING also dodges it, and `auth.mts` and
+`backlog-toggle.mts` take that route — but a string is opaque to tsc, so it buys
+the workaround by giving up exactly the checking this directory was converted
+for. Prefer writing the helper out: `sidebar.mts` and `epic-children.mts` spell
+`document.querySelector` in full for that reason, and `surface.mts` swapped a
+`get:` accessor for a `value:`. Verbosity is the cheaper price.
 
 `drift.sh` is the one file here that isn't TypeScript, and that is a decision
 rather than an oversight (DRY-80, trap 5): it is `docker exec` and `psql` and
@@ -144,7 +154,7 @@ bunx playwright install chromium             # once per machine; see "Running th
 
 (cd daemon && DRYDOCK_PORT=4374 DRYDOCK_HOST=127.0.0.1 DRYDOCK_TRACKER=fixture \
    DRYDOCK_STATE_FILE=/tmp/dry55-state.json node --import tsx src/index.ts &)
-(cd daemon && node --import tsx ../scripts/verify/proxy-tracker.mts) &                   # :4375 → :4374
+(cd daemon && node --import tsx ../scripts/verify/proxy-tracker.mts &)   # :4375 → :4374
 (cd shell && VITE_DAEMON_URL=http://127.0.0.1:4375 bunx vite --port 5375 --strictPort &)
 
 (cd daemon && node --import tsx ../scripts/verify/sidebar.mts)
@@ -219,7 +229,7 @@ corporate Jira. Which is the state the bug shipped in.
 ```sh
 bunx playwright install chromium             # once per machine; see "Running these"
 
-(cd daemon && node --import tsx ../scripts/verify/stub-tracker.mts) &                    # :4386, counting
+(cd daemon && node --import tsx ../scripts/verify/stub-tracker.mts &)    # :4386, counting
 (cd daemon && DRYDOCK_PORT=4385 DRYDOCK_HOST=127.0.0.1 \
    DRYDOCK_TRACKER=switchyard DRYDOCK_SWITCHYARD_URL=http://127.0.0.1:4386 \
    DRYDOCK_TRACKER_PROJECTS=DRY \
@@ -309,7 +319,7 @@ set costs one more child-stats request, and `tracker-cache.mts` asserts
 ```sh
 bunx playwright install chromium             # once per machine; see "Running these"
 
-(cd daemon && STUB_PORT=4396 STUB_DORMANT_EPIC=1 node --import tsx ../scripts/verify/stub-tracker.mts) &
+(cd daemon && STUB_PORT=4396 STUB_DORMANT_EPIC=1 node --import tsx ../scripts/verify/stub-tracker.mts &)
 (cd daemon && DRYDOCK_PORT=4395 DRYDOCK_HOST=127.0.0.1 \
    DRYDOCK_TRACKER=switchyard DRYDOCK_SWITCHYARD_URL=http://127.0.0.1:4396 \
    DRYDOCK_TRACKER_PROJECTS=DRY \
@@ -673,10 +683,19 @@ bunx playwright install chromium             # once per machine; see "Running th
    DRYDOCK_STATE_FILE=/tmp/dry58-state.json DRYDOCK_TRACKER=fixture \
    node --import tsx src/index.ts &)
 
-# HTTP partition proxy in front of it, and the dev shell pointed at the PROXY
-(cd daemon && node --import tsx ../scripts/verify/proxy-http.mts) &                      # :4371 → :4370
+# HTTP partition proxy in front of it, and the dev shell pointed at the PROXY.
+# The two ports are PASSED, not implied: proxy-http defaults to :4398 → :4399,
+# which is nothing this rig runs, while every harness here defaults to
+# PROXY=:4371 and DAEMON=:4370. This block used to omit them and carry a
+# `# :4371 → :4370` comment describing ports the proxy was not listening on, so
+# it could not work as pasted — the harnesses reported a dead proxy.
+(cd daemon && PROXY_PORT=4371 TARGET_PORT=4370 \
+   node --import tsx ../scripts/verify/proxy-http.mts &)
 (cd shell && VITE_DAEMON_URL=http://127.0.0.1:4371 bunx vite --port 5370 --strictPort &)
 ```
+
+`proxy-tcp` and `proxy-tracker` need no such override — their defaults already
+match the ports their rigs use.
 
 For the Postgres tier, add a throwaway database behind the TCP proxy and a
 second daemon in front of it:
@@ -684,7 +703,7 @@ second daemon in front of it:
 ```sh
 docker run -d --name dry58-pg -e POSTGRES_PASSWORD=dry58 -e POSTGRES_DB=drydock \
   -p 127.0.0.1:5455:5432 postgres:16
-(cd daemon && node --import tsx ../scripts/verify/proxy-tcp.mts) &                       # :5456 → :5455, control :5457
+(cd daemon && node --import tsx ../scripts/verify/proxy-tcp.mts &)   # :5456 → :5455, control :5457
 
 (cd daemon && DRYDOCK_PORT=4372 DRYDOCK_HOST=127.0.0.1 DRYDOCK_TRACKER=fixture \
    DRYDOCK_DATABASE_URL='postgres://postgres:dry58@127.0.0.1:5456/drydock' \
@@ -719,26 +738,28 @@ while their ticket was still a branch, so `main` really was the broken side;
 every one of them has since merged, and `git checkout main -- <those files>` is
 now a no-op that leaves the FIXED tree in place. The run that follows passes,
 and reads as "still discriminates" when nothing was reverted at all — the exact
-false green this section exists to prevent, one layer up. Revert to the commit
-*before* the merge instead. Find it with `git log --oneline --all --grep=DRY-NN`
-and take the merge's first parent:
+false green this section exists to prevent, one layer up.
+
+So each recipe names the commit before **its own** merge. **They cannot share
+one `PRE`**, which is the second half of the same trap: the merges are ordered
+(DRY-58 → DRY-55 → DRY-83), so DRY-55's parent already contains DRY-58's fix and
+reverting to it would leave `roam.mts` testing a tree that was never broken.
+`git merge-base --is-ancestor 3f1e228 c760181` is what that looks like when you
+check it rather than assume it.
+
+**Confirm the revert landed before trusting the run.** `git diff --stat` against
+the ref must be non-empty; a `checkout` that matched nothing is silent, and the
+green that follows is just the harness passing.
 
 ```sh
-PRE=$(git rev-parse "$(git log --format=%H --grep='Merge pull request' --grep='DRY-55' --all-match -1)~1")
-```
-
-…or just read the sha out of `git log` yourself. Then, checking the revert
-landed before trusting the run (`git diff --stat` should be far from empty):
-
-```sh
-# DRY-58 roaming — PRE = the commit before DRY-58 merged
-git checkout $PRE -- shell/src/composables/layoutStore.ts \
+# DRY-58 roaming — 3f1e228 is the merge, 4a6953b the commit before it
+git checkout 3f1e228~1 -- shell/src/composables/layoutStore.ts \
   shell/src/composables/useWindowManager.ts shell/src/App.vue
 (cd daemon && node --import tsx ../scripts/verify/roam.mts)        # expect 6 failures
 git checkout HEAD -- shell/src/composables shell/src/App.vue
 
-# DRY-55 the sidebar's outage copy — PRE = c760181~1
-git checkout $PRE -- shell/src/App.vue shell/src/components/TrackerSidebar.vue \
+# DRY-55 the sidebar's outage copy — c760181 is the merge
+git checkout c760181~1 -- shell/src/App.vue shell/src/components/TrackerSidebar.vue \
   shell/src/lib/tracker.ts
 (cd daemon && node --import tsx ../scripts/verify/sidebar.mts)     # expect 19 failures, across (a), (c), (e), (f), (g)
 git checkout HEAD -- shell/src/App.vue shell/src/components/TrackerSidebar.vue \
@@ -746,8 +767,8 @@ git checkout HEAD -- shell/src/App.vue shell/src/components/TrackerSidebar.vue \
 
 # DRY-83: revert only the SHELL half, so what's under test is the sidebar
 # having no way to ask rather than the daemon having no way to answer.
-# PRE = 8b79ceb~1
-git checkout $PRE -- shell/src/components/TrackerSidebar.vue shell/src/lib/tracker.ts
+# 8b79ceb is the merge.
+git checkout 8b79ceb~1 -- shell/src/components/TrackerSidebar.vue shell/src/lib/tracker.ts
 (cd daemon && node --import tsx ../scripts/verify/epic-children.mts)   # expect 10, incl. the row's own tooltip
 git checkout HEAD -- shell/src/components/TrackerSidebar.vue shell/src/lib/tracker.ts
 ```

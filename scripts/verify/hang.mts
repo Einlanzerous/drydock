@@ -10,18 +10,14 @@
 // Run from `daemon/`, where tsx resolves (DRY-80):
 //   (cd daemon && node --import tsx ../scripts/verify/hang.mts)
 import { chromium, type Page } from "playwright";
-import { deskWindows, type SessionsResponse, type WorkspaceResponse } from "./api.mjs";
+import { deskWindows, type Detail, type SessionsResponse, type WorkspaceResponse } from "./api.mjs";
+// The proxy's own declaration of what it serves, rather than a copy of it here
+// (DRY-80). `import type` erases, so this does not start a second proxy.
+import type { ProxyHttpState } from "./proxy-http.mjs";
 
 const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5370";
 const DAEMON = process.env.DAEMON ?? "http://127.0.0.1:4370"; // past the proxy — ground truth
 const PROXY = process.env.PROXY ?? "http://127.0.0.1:4371"; // what the shell talks to (and its mirror key)
-
-/** `proxy-http.mts`'s control surface. `held` is sockets parked by "hang". */
-interface ProxyState {
-  mode: string;
-  held: number;
-  delayed: number;
-}
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 // The trailing comma is required in a `.mts` file: `<T>` alone at the start of
@@ -29,7 +25,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const j = async <T,>(u: string, init?: RequestInit): Promise<T> =>
   (await fetch(u, init)).json() as Promise<T>;
 let failures = 0;
-const check = (n: string, ok: boolean, d: unknown = "") => {
+const check = (n: string, ok: boolean, d: Detail = "") => {
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${n}${d ? ` — ${d}` : ""}`);
   if (!ok) failures++;
 };
@@ -109,7 +105,7 @@ check(
   (await stored())[id] !== dragged[id],
   `daemon ${(await stored())[id]} vs browser ${dragged[id]}`,
 );
-console.log(`      (proxy holding ${(await j<ProxyState>(`${PROXY}/__state`)).held} socket(s))`);
+console.log(`      (proxy holding ${(await j<ProxyHttpState>(`${PROXY}/__state`)).held} socket(s))`);
 
 await j(`${PROXY}/__heal`, { method: "POST" });
 const t2 = await waitFor(async () => (await stored())[id] === dragged[id]);

@@ -11,16 +11,19 @@
 // (keepNames) — and Playwright ships an evaluate body to the browser as SOURCE,
 // where that helper does not exist, so the page throws
 // `ReferenceError: __name is not defined` at a line that reads perfectly well.
-// Anonymous inline arrows are not name-bound and cross intact, which is why
-// most of the bodies below are still functions. `VISIBILITY_JS` is a string
-// because its body binds a name — the `get:` accessor — and is therefore the
-// one that would break. Anything added here that introduces a `const q = …`
-// inside a body has to become a string too; see auth.mts, which is all strings.
+// Anonymous inline arrows are not name-bound and cross intact.
+//
+// Every body here is therefore a FUNCTION, and deliberately: a body passed as a
+// string is opaque to tsc, so stringifying is buying the workaround by giving up
+// exactly the checking this conversion was for. Write the body so it binds no
+// name instead — that is a constraint on style, not a reason to opt out. The
+// visibility stub below is where that bit: it used a `get:` accessor (a bound
+// name) and now uses `value:`, which is what sweep.mts already did.
 //
 // Run from `daemon/`, where tsx resolves:
 //   (cd daemon && node --import tsx ../scripts/verify/surface.mts)
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
-import type { HealthResponse, SessionsResponse } from "./api.mjs";
+import type { Detail, HealthResponse, SessionsResponse } from "./api.mjs";
 
 const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5370";
 const DAEMON = process.env.DAEMON ?? "http://127.0.0.1:4370"; // past the proxy — ground truth
@@ -32,7 +35,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const j = async <T,>(u: string, i?: RequestInit): Promise<T> =>
   (await fetch(u, i)).json() as Promise<T>;
 let failures = 0;
-const check = (n: string, ok: boolean, d: unknown = "") => {
+const check = (n: string, ok: boolean, d: Detail = "") => {
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${n}${d ? ` — ${d}` : ""}`);
   if (!ok) failures++;
 };
@@ -43,15 +46,23 @@ const geo = (page: Page): Promise<number[]> =>
   );
 
 /**
- * Being in another tab, as the desk sees it — a STRING body, see the note at
- * the top of this file. The `get:` accessor is bound to a name, so under tsx's
- * transform this exact body is the one that arrives in the page carrying an
- * undefined `__name` call.
+ * Being in another tab, as the desk sees it.
+ *
+ * `value:` rather than the `get: () => window.__vis` this used to carry. The
+ * two are equivalent here — nothing ever reassigned `__vis` — but an accessor
+ * is a name-bound function, which is the one shape tsx's transform breaks in
+ * the page (see the note at the top). Same form sweep.mts uses.
+ *
+ * Deliberately narrower than sweep's: only `visibilityState`, with no
+ * `document.hidden` and no `visibilitychange` event. This is not pretending to
+ * be a backgrounded tab — it stubs the one API the recovery loop consults, and
+ * the branch under test is the one that reschedules rather than waiting for an
+ * event that may never arrive.
  */
-const VISIBILITY_JS = `(() => {
-  window.__vis = "hidden";
-  Object.defineProperty(document, "visibilityState", { get: () => window.__vis });
-})()`;
+const hideTab = (page: Page): Promise<void> =>
+  page.evaluate(() => {
+    Object.defineProperty(document, "visibilityState", { value: "hidden", configurable: true });
+  });
 
 async function drag(page: Page, dx: number, dy: number): Promise<void> {
   const b = await page.locator(".frame .bar").first().boundingBox();
@@ -159,10 +170,7 @@ console.log("\n2. how the degraded state presents (DRY-58)");
 console.log("\n3. a tab nobody is looking at doesn't wedge");
 {
   const { ctx, page } = await open(browser);
-  // Stub the API the loop consults. Not a perfect background tab, but it does
-  // exercise the branch — and the branch's whole job is to reschedule rather
-  // than sit waiting for an event that may never arrive.
-  await page.evaluate(VISIBILITY_JS);
+  await hideTab(page);
   await fetch(`${PROXY}/__break?mode=503`, { method: "POST" });
   await drag(page, 100, 60);
   await sleep(1500);

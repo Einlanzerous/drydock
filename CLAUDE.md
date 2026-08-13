@@ -21,10 +21,12 @@ bun run shell      # dev shell   → :5320 (Vite)
   `node scripts/build-native.mjs` to do this. If PTY spawns crash after a
   dependency change, rebuild with that script — not `bun x node-gyp`.
 - Typecheck: `bun run --filter '@drydock/daemon' typecheck` (and the shell build
-  runs `vue-tsc`). `scripts/` is a **third** program with its own tsconfig —
-  `bun run typecheck:scripts` (DRY-80). It needs the DOM lib for the
-  `page.evaluate` bodies and pulls `SessionInfo` and friends out of `daemon/src`
-  through `scripts/verify/api.mts`, so it can't join either of the others.
+  runs `vue-tsc`). `scripts/` is checked separately — `bun run typecheck:scripts`
+  (DRY-80) — and is itself TWO projects: `scripts/tsconfig.json` for the Node
+  half and `scripts/tsconfig.browser.json` for the Playwright half. The split is
+  load-bearing rather than tidy: the browser harnesses need the DOM lib, and the
+  in-process ones import real daemon modules, so one combined project would
+  check `tracker/cache.ts` against both the DOM's and `@types/node`'s `fetch`.
 - `daemon/src/protocol.ts` is duplicated **verbatim** in
   `shell/src/lib/protocol.ts`. If you touch one, mirror the other.
 
@@ -1157,15 +1159,26 @@ restart it to test things.
   filters on purpose: a required check that never reports on a docs-only PR
   would leave it unmergeable.
 - **Everything under `scripts/` is TypeScript** (DRY-80), with two recorded
-  exceptions: `build-native.mjs` is the postinstall and `node --import tsx` does
-  not resolve from the repo root (tsx is a daemon-workspace dependency), and
-  `scripts/verify/drift.sh` orchestrates `docker` and `psql`. Copy the shape of
-  the `.mts` neighbour with the same job. The one cost the conversion carries:
-  a Playwright `page.evaluate` body containing a **named** inner function has to
-  be a STRING, because tsx's esbuild transform wraps such functions in a
-  `__name(...)` helper that doesn't exist in the page — it fails as
-  `ReferenceError: __name is not defined` at a line that reads perfectly well.
-  Anonymous inline arrows are fine, which is what makes the rule look optional.
+  exceptions: `build-native.mjs` is the postinstall, which runs while the
+  dependency tree is still being assembled and so cannot rely on a loader being
+  installed, and `scripts/verify/drift.sh` orchestrates `docker` and `psql`.
+  Copy the shape of the `.mts` neighbour with the same job. Two costs the
+  conversion carries, both easy to trip over:
+  - A Playwright `page.evaluate` body may not bind a **name** to a function.
+    tsx's esbuild transform wraps those in a `__name(...)` helper that doesn't
+    exist in the page, so a `const q = (s) => …` inside a body fails as
+    `ReferenceError: __name is not defined` at a line that reads perfectly well.
+    Anonymous inline arrows are fine, which is what makes the rule look
+    optional. Write the helper out rather than passing the body as a string: a
+    string dodges the transform but is opaque to tsc, which gives up the
+    checking the conversion was for.
+  - **`scripts/up.mts` runs on Node (`node --import tsx`), not Bun.** Bun
+    auto-loads `.env` and `$`-expands the values, while this repo's own parsers
+    (`daemon/src/env.ts`, and `loadEnv` in that file, which mirrors it) treat
+    them literally. Since `loadEnv` skips keys already in `process.env`, under
+    Bun the expanded value silently wins — `docker compose` then initdb's the
+    database with one password while a daemon started any other way reads
+    another.
 - Comment style: explain *why* and the non-obvious constraint (see
   `daemon/src/tracker/jira.ts` for the house style); reference the DRY-NN
   ticket that introduced a behavior.

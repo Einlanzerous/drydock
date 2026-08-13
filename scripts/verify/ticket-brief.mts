@@ -20,6 +20,7 @@ import {
   MAX_COMMENTS,
 } from "../../daemon/src/tracker/context.js";
 import type { TicketDetail } from "../../daemon/src/tracker/types.js";
+import type { Detail } from "./api.mjs";
 
 const base: TicketDetail = {
   key: "DRY-1",
@@ -40,7 +41,7 @@ let failures = 0;
  * anyway; they read fine, since template interpolation formats them, but the
  * declaration was a lie nothing was checking.
  */
-function check(name: string, cond: boolean, detail?: unknown) {
+function check(name: string, cond: boolean, detail?: Detail) {
   if (!cond) failures++;
   console.log(`${cond ? "ok  " : "FAIL"}  ${name}${cond || !detail ? "" : `\n        ${detail}`}`);
 }

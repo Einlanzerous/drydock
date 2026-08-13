@@ -28,6 +28,19 @@ interface Pair {
   up: net.Socket;
 }
 
+/**
+ * What the control port answers. Exported so a harness names the shape this
+ * file serves rather than keeping its own copy (DRY-80); `import type` erases,
+ * so naming it does not start a proxy.
+ */
+export interface ProxyTcpState {
+  partitioned: boolean;
+  /** Connections accepted while partitioned and never served. */
+  parked: number;
+  /** Established pairs currently held (frozen, if partitioned). */
+  live: number;
+}
+
 let partitioned = false;
 /** Connections accepted while partitioned, never served. */
 const parked = new Set<net.Socket>();
@@ -92,7 +105,8 @@ http
         pair.up.destroy();
       }
     }
+    const state: ProxyTcpState = { partitioned, parked: parked.size, live: live.size };
     res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ partitioned, parked: parked.size, live: live.size }));
+    res.end(JSON.stringify(state));
   })
   .listen(CONTROL, "127.0.0.1");

@@ -7,18 +7,17 @@
     "daemon",
     "shell"
   ],
-  "comment": "scripts/up.mts runs under BUN and scripts/build-native.mjs under NODE, and neither is interchangeable. build-native must be plain JavaScript on plain node: it is the postinstall, so it runs while the dependency tree is still in flux, and `node --import tsx` does not resolve from this directory at all (tsx is a daemon-workspace dependency, so there is no node_modules/.bin/tsx here). up only orchestrates and loads no native addon, so bun runs its TypeScript directly (DRY-80).",
   "scripts": {
     "postinstall": "node scripts/build-native.mjs",
-    "up": "bun scripts/up.mts",
-    "up:local": "bun scripts/up.mts --local",
+    "up": "node --import tsx scripts/up.mts",
+    "up:local": "node --import tsx scripts/up.mts --local",
     "daemon": "bun run --filter '@drydock/daemon' dev",
     "daemon:local": "DRYDOCK_HOST=127.0.0.1 bun run --filter '@drydock/daemon' dev",
     "shell": "bun run --filter '@drydock/shell' dev",
     "dev": "bun run --filter '*' dev",
-    "typecheck:scripts": "tsc --noEmit -p scripts/tsconfig.json",
-    "db:up": "bun scripts/up.mts --db-only",
-    "db:down": "bun scripts/up.mts --db-down",
+    "typecheck:scripts": "tsc --noEmit -p scripts/tsconfig.json && tsc --noEmit -p scripts/tsconfig.browser.json",
+    "db:up": "node --import tsx scripts/up.mts --db-only",
+    "db:down": "node --import tsx scripts/up.mts --db-down",
     "db:psql": "docker exec -it drydock-db psql -U drydock -d drydock"
   },
   "engines": {
@@ -27,6 +26,7 @@
   "devDependencies": {
     "@types/node": "^22.10.0",
     "playwright": "^1.62.1",
+    "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }
 }

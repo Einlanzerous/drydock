@@ -38,6 +38,11 @@
 // Run from `daemon/`, where tsx resolves (DRY-80):
 //   (cd daemon && node --import tsx ../scripts/verify/epic-children.mts)
 import { chromium, type Page } from "playwright";
+// The stub's own declarations of what it serves (DRY-80). `/__reset` answers
+// the COUNTERS and `/__state` the full envelope — typing both as the envelope
+// is a guess a typecheck blesses rather than catches.
+import type { StubCounts, StubState } from "./stub-tracker.mjs";
+import type { Detail } from "./api.mjs";
 
 const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5395";
 const STUB = process.env.STUB_URL ?? "http://127.0.0.1:4396";
@@ -47,28 +52,19 @@ const EPIC = process.env.EPIC ?? "DRY-10";
 const OPEN_KIDS = (process.env.OPEN_KIDS ?? "DRY-11,DRY-12").split(",");
 const CLOSED_KID = process.env.CLOSED_KID ?? "DRY-13";
 
-/** `stub-tracker.mts`'s `/__state`. `lookup` is DRY-83's extra key→UUID hop. */
-interface StubState {
-  mode: string;
-  latencyMs: number;
-  inflight: number;
-  list: number;
-  epicList: number;
-  children: number;
-  lookup: number;
-  total: number;
-}
-
 let failures = 0;
-function check(name: string, ok: boolean, extra: unknown = ""): void {
+function check(name: string, ok: boolean, extra: Detail = ""): void {
   if (!ok) failures++;
   console.log(`${ok ? "  ok  " : "FAIL  "}${name}${extra ? ` — ${extra}` : ""}`);
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const stubState = (): Promise<StubState> =>
   fetch(`${STUB}/__state`).then((r) => r.json() as Promise<StubState>);
-const stubReset = (): Promise<StubState> =>
-  fetch(`${STUB}/__reset`, { method: "POST" }).then((r) => r.json() as Promise<StubState>);
+// `/__reset` answers the counters ALONE — no mode, no latencyMs, no inflight.
+// Typed as the full envelope it would be a shape this file never receives, and
+// the typecheck would bless the guess instead of catching it.
+const stubReset = (): Promise<StubCounts> =>
+  fetch(`${STUB}/__reset`, { method: "POST" }).then((r) => r.json() as Promise<StubCounts>);
 
 /**
  * Poll until `fn` holds. Fixed sleeps are what make a browser harness flaky —
@@ -108,59 +104,60 @@ interface Snapshot {
 }
 
 /**
- * What the sidebar is showing — a STRING body, not a function.
+ * What the sidebar is showing — a FUNCTION body, with the `txt` and `epicRow`
+ * helpers it used to have written out at each site (DRY-80).
  *
- * `tsx`'s esbuild transform wraps NAME-BOUND functions in a `__name(...)`
- * helper (keepNames), and Playwright ships an evaluate body to the browser as
- * SOURCE, where that helper does not exist. `txt` and `epicRow` below are
- * exactly such bindings, so as a function this body arrives in the page as
- * `ReferenceError: __name is not defined` at a line that reads perfectly well
- * (DRY-80's trap 3). Strings are not transformed, so they cross intact.
+ * Those helpers are the shape tsx breaks: its esbuild transform wraps
+ * NAME-BOUND functions in a `__name(...)` helper (keepNames), and Playwright
+ * ships an evaluate body to the browser as SOURCE, where that helper does not
+ * exist — so the page throws `ReferenceError: __name is not defined` at a line
+ * that reads perfectly well. Passing the body as a string avoids that and is
+ * what auth.mts does, but a string is opaque to tsc, which would exempt this
+ * body from the very typecheck the conversion added. Written out instead.
+ *
+ * The epic key arrives as an ARGUMENT rather than through a `window.__EPIC__`
+ * planted by `addInitScript` — the arg is typed, and a string body could not
+ * take one.
  *
  * Rows are read as KEYS rather than counted. A count can be satisfied by the
  * wrong rows — and the failure mode here is specifically "the wrong set of
  * children", so the identities are the assertion.
  */
-const SNAP_JS = `(() => {
-  const txt = (el) => el?.textContent?.trim() ?? null;
-  const epicRow = (key) =>
-    [...document.querySelectorAll(".sidebar .row.epic")].find(
-      (r) => txt(r.querySelector(".key")) === key,
-    );
-  const rows = [...document.querySelectorAll(".sidebar .row")];
-  return {
-    groups: document.querySelectorAll(".sidebar .grp").length,
-    // The header's "shown/total", which describes the PULL. An expansion that
-    // leaked into it would be the backlog toggle wearing a chevron.
-    count: txt(document.querySelector(".sidebar .count")),
-    backlogOn: !!document.querySelector(".sidebar .backlog input:checked"),
-    // Every row on screen, in order, tagged by whether it is nested under an
-    // epic — order matters (active work is meant to sort above dormant).
-    rows: rows.map((r) => ({
-      key: txt(r.querySelector(".key")),
-      epic: r.classList.contains("epic"),
-      child: r.classList.contains("child"),
-      status: txt(r.querySelector(".slabel")),
-    })),
-    notes: [...document.querySelectorAll(".sidebar .child-note")].map((n) => n.textContent.trim()),
-    epic: (() => {
-      const r = epicRow(window.__EPIC__);
-      if (!r) return null;
-      return {
-        inert: r.classList.contains("inert"),
-        // The chevron is a <button> when there is something to reveal and a
-        // bare <span class="empty"> when there isn't, so its presence — not
-        // just the element — is the honest probe.
-        chevron: !!r.querySelector("button.epic-chev"),
-        open: !!r.querySelector("button.epic-chev.open"),
-        title: r.getAttribute("title"),
-      };
-    })(),
-  };
-})()`;
-
 function snap(page: Page): Promise<Snapshot> {
-  return page.evaluate<Snapshot>(SNAP_JS);
+  return page.evaluate((epicKey: string): Snapshot => {
+    const epicEl = [...document.querySelectorAll(".sidebar .row.epic")].find(
+      (r) => (r.querySelector(".key")?.textContent?.trim() ?? null) === epicKey,
+    );
+    return {
+      groups: document.querySelectorAll(".sidebar .grp").length,
+      // The header's "shown/total", which describes the PULL. An expansion that
+      // leaked into it would be the backlog toggle wearing a chevron.
+      count: document.querySelector(".sidebar .count")?.textContent?.trim() ?? null,
+      backlogOn: !!document.querySelector(".sidebar .backlog input:checked"),
+      // Every row on screen, in order, tagged by whether it is nested under an
+      // epic — order matters (active work is meant to sort above dormant).
+      rows: [...document.querySelectorAll(".sidebar .row")].map((r) => ({
+        key: r.querySelector(".key")?.textContent?.trim() ?? null,
+        epic: r.classList.contains("epic"),
+        child: r.classList.contains("child"),
+        status: r.querySelector(".slabel")?.textContent?.trim() ?? null,
+      })),
+      notes: [...document.querySelectorAll(".sidebar .child-note")].map((n) =>
+        (n.textContent ?? "").trim(),
+      ),
+      epic: epicEl
+        ? {
+            inert: epicEl.classList.contains("inert"),
+            // The chevron is a <button> when there is something to reveal and a
+            // bare <span class="empty"> when there isn't, so its presence — not
+            // just the element — is the honest probe.
+            chevron: !!epicEl.querySelector("button.epic-chev"),
+            open: !!epicEl.querySelector("button.epic-chev.open"),
+            title: epicEl.getAttribute("title"),
+          }
+        : null,
+    };
+  }, EPIC);
 }
 
 const keysOf = (s: Snapshot) => s.rows.filter((r) => !r.epic).map((r) => r.key);
@@ -170,7 +167,6 @@ async function main(): Promise<void> {
   const browser = await chromium.launch();
   const page = await browser.newPage({ viewport: { width: 1500, height: 900 } });
   page.on("pageerror", (e) => check(`no page error (${e.message})`, false));
-  await page.addInitScript(`window.__EPIC__ = ${JSON.stringify(EPIC)}`);
   await page.goto(SHELL, { waitUntil: "domcontentloaded" });
 
   // ---- (a) the epic row offers an expansion at all -------------------------

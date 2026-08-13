@@ -20,27 +20,24 @@
 // Setup + overrides: see README.md. Run from `daemon/`, where tsx resolves:
 //   (cd daemon && node --import tsx ../scripts/verify/sidebar.mts)
 import { chromium, type Page } from "playwright";
+// The proxy's own declaration of what it serves, rather than a copy of it here
+// (DRY-80). `import type` erases, so this does not start a second proxy.
+import type { ProxyTrackerState } from "./proxy-tracker.mjs";
+import type { Detail } from "./api.mjs";
 
 const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5375";
 const PROXY = process.env.PROXY ?? "http://127.0.0.1:4375";
 
-/** `proxy-tracker.mts`'s control surface. `held` is sockets parked by "hang". */
-interface ProxyState {
-  mode: string;
-  blocked: number;
-  held: number;
-}
-
 let failures = 0;
-function check(name: string, ok: boolean, extra: unknown = ""): void {
+function check(name: string, ok: boolean, extra: Detail = ""): void {
   if (!ok) failures++;
   console.log(`${ok ? "  ok  " : "FAIL  "}${name}${extra ? ` — ${extra}` : ""}`);
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const post = (p: string): Promise<ProxyState> =>
-  fetch(`${PROXY}${p}`, { method: "POST" }).then((r) => r.json() as Promise<ProxyState>);
-const state = (): Promise<ProxyState> =>
-  fetch(`${PROXY}/__state`).then((r) => r.json() as Promise<ProxyState>);
+const post = (p: string): Promise<ProxyTrackerState> =>
+  fetch(`${PROXY}${p}`, { method: "POST" }).then((r) => r.json() as Promise<ProxyTrackerState>);
+const state = (): Promise<ProxyTrackerState> =>
+  fetch(`${PROXY}/__state`).then((r) => r.json() as Promise<ProxyTrackerState>);
 
 /**
  * Poll until `fn` holds. Fixed sleeps are what make a browser harness flaky:
@@ -75,49 +72,52 @@ interface Snapshot {
 }
 
 /**
- * A STRING body, not a function — and this file is the reason the rule reads as
- * mandatory rather than optional (DRY-80's trap 3). `tsx`'s esbuild transform
- * wraps NAME-BOUND functions in a `__name(...)` helper (keepNames), and
- * Playwright ships an evaluate body to the browser as SOURCE, where that helper
- * does not exist. The `const q = (s) => …` below is exactly such a binding, so
- * as a function this body arrives in the page as
- * `ReferenceError: __name is not defined`, pointing at a line that reads fine.
- * Strings are not transformed, so they cross intact. See auth.mts, which
- * documents the same constraint at length.
+ * A FUNCTION body, with `document.querySelector` written out rather than behind
+ * the `const q = (s) => …` helper it used to have (DRY-80).
+ *
+ * That helper is the shape tsx breaks: its esbuild transform wraps NAME-BOUND
+ * functions in a `__name(...)` helper (keepNames), and Playwright ships an
+ * evaluate body to the browser as SOURCE, where that helper does not exist — so
+ * the page throws `ReferenceError: __name is not defined` at a line that reads
+ * perfectly well. A string body dodges that, and auth.mts takes that route; but
+ * a string is opaque to tsc, and this is the largest DOM-reading body in the
+ * directory, so stringifying it would exempt exactly the code this conversion
+ * was meant to start checking. Repetition is the cheaper price.
  */
-const SNAP_JS = `(() => {
-  const q = (s) => document.querySelector(s);
-  const notices = [...document.querySelectorAll(".notice")].map((n) => n.textContent.trim());
-  return {
-    // Repo groups render COLLAPSED, so \`.row\` counts nothing until one is
-    // expanded — a \`.row\`-based check reads zero against a full sidebar and
-    // passes every assertion about an empty one for the wrong reason.
-    groups: document.querySelectorAll(".sidebar .grp").length,
-    count: q(".sidebar .count")?.textContent?.trim() ?? null,
-    unreachable: q(".sidebar .unreachable-head")?.textContent?.trim() ?? null,
-    why: q(".sidebar .unreachable-why")?.textContent?.trim() ?? null,
-    retry: !!q(".sidebar .retry"),
-    empty: q(".sidebar .empty")?.textContent?.trim() ?? null,
-    stale: !!q(".sidebar .stale"),
-    staleTitle: q(".sidebar .stale")?.getAttribute("title") ?? null,
-    dotDown: !!q(".sidebar .live.down"),
-    // The dot is a 6px empty span in a flex row: \`flex: 0 0 auto\` is the only
-    // thing keeping it from being the first casualty of an overflowing
-    // header, and a clamped one is invisible in exactly the case it's for.
-    dotWidth: q(".sidebar .live")?.getBoundingClientRect().width ?? 0,
-    staleWidth: q(".sidebar .stale")?.getBoundingClientRect().width ?? 0,
-    notices,
-    // Identified by its OWN copy, not by count. Any other notice in the strip
-    // (session-history, workspace-store) would otherwise fail "exactly one"
-    // and, worse, a run with zero tracker notices and one unrelated one would
-    // pass it.
-    trackerNotices: notices.filter((t) => /Tickets aren't (loading|refreshing)/.test(t)),
-    errors: [...document.querySelectorAll(".error")].map((n) => n.textContent.trim()),
-  };
-})()`;
-
 function snap(page: Page): Promise<Snapshot> {
-  return page.evaluate<Snapshot>(SNAP_JS);
+  return page.evaluate((): Snapshot => {
+    const notices = [...document.querySelectorAll(".notice")].map((n) =>
+      (n.textContent ?? "").trim(),
+    );
+    const stale = document.querySelector(".sidebar .stale");
+    return {
+      // Repo groups render COLLAPSED, so `.row` counts nothing until one is
+      // expanded — a `.row`-based check reads zero against a full sidebar and
+      // passes every assertion about an empty one for the wrong reason.
+      groups: document.querySelectorAll(".sidebar .grp").length,
+      count: document.querySelector(".sidebar .count")?.textContent?.trim() ?? null,
+      unreachable:
+        document.querySelector(".sidebar .unreachable-head")?.textContent?.trim() ?? null,
+      why: document.querySelector(".sidebar .unreachable-why")?.textContent?.trim() ?? null,
+      retry: !!document.querySelector(".sidebar .retry"),
+      empty: document.querySelector(".sidebar .empty")?.textContent?.trim() ?? null,
+      stale: !!stale,
+      staleTitle: stale?.getAttribute("title") ?? null,
+      dotDown: !!document.querySelector(".sidebar .live.down"),
+      // The dot is a 6px empty span in a flex row: `flex: 0 0 auto` is the only
+      // thing keeping it from being the first casualty of an overflowing
+      // header, and a clamped one is invisible in exactly the case it's for.
+      dotWidth: document.querySelector(".sidebar .live")?.getBoundingClientRect().width ?? 0,
+      staleWidth: stale?.getBoundingClientRect().width ?? 0,
+      notices,
+      // Identified by its OWN copy, not by count. Any other notice in the strip
+      // (session-history, workspace-store) would otherwise fail "exactly one"
+      // and, worse, a run with zero tracker notices and one unrelated one would
+      // pass it.
+      trackerNotices: notices.filter((t) => /Tickets aren't (loading|refreshing)/.test(t)),
+      errors: [...document.querySelectorAll(".error")].map((n) => (n.textContent ?? "").trim()),
+    };
+  });
 }
 
 const browser = await chromium.launch();

@@ -30,7 +30,23 @@ const LISTEN = Number(process.env.PROXY_PORT ?? 4398);
 const TARGET = Number(process.env.TARGET_PORT ?? 4399);
 const DELAY_MS = Number(process.env.DELAY_MS ?? 6000);
 
-type Mode = "ok" | "503" | "hang" | "delay";
+export type Mode = "ok" | "503" | "hang" | "delay";
+
+/**
+ * `GET /__state`, and the reason it is exported (DRY-80): the harnesses that
+ * drive this proxy used to each re-declare this shape, which is the duplication
+ * `api.mts` exists to prevent one layer up. Declared where it is SERVED, so the
+ * response below is checked against it rather than against a copy that can
+ * drift. `import type` erases completely, so a harness naming this type does
+ * not start a proxy.
+ */
+export interface ProxyHttpState {
+  mode: Mode;
+  /** Sockets parked by "hang" and not yet released. */
+  held: number;
+  /** How many writes "delay" has held and forwarded. */
+  delayed: number;
+}
 
 let mode: Mode = "ok";
 /** Sockets parked by "hang", released on heal. */
@@ -56,8 +72,9 @@ const server = http.createServer((req, res) => {
     return res.end(JSON.stringify({ mode }));
   }
   if (url.pathname === "/__state") {
+    const state: ProxyHttpState = { mode, held: held.size, delayed };
     res.writeHead(200, { "Content-Type": "application/json" });
-    return res.end(JSON.stringify({ mode, held: held.size, delayed }));
+    return res.end(JSON.stringify(state));
   }
 
   const cors: Record<string, string> = {

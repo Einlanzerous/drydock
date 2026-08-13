@@ -50,8 +50,18 @@ interface StubTicket {
   parent?: { key: string; title: string };
 }
 
-/** What `/__state` reports. Each counter answers a different question. */
-interface Counts {
+/**
+ * The request counters — the reason this stub exists. Each answers a different
+ * question; see where they are incremented below.
+ *
+ * This is what `POST /__reset` answers, and it is deliberately NOT the same
+ * shape as `/__state`: the two routes were both typed as the full envelope
+ * once, which is the kind of guess a typecheck blesses instead of catching
+ * (DRY-80). Exported, so the harnesses name the shapes this file really serves
+ * rather than each keeping a copy — `import type` erases, so naming them does
+ * not start a stub.
+ */
+export interface StubCounts {
   list: number;
   epicList: number;
   children: number;
@@ -59,17 +69,26 @@ interface Counts {
   total: number;
 }
 
-type Mode = "ok" | "502" | "hang";
+/** What `GET /__state` reports: the counters, plus what the stub is doing. */
+export interface StubState extends StubCounts {
+  mode: Mode;
+  latencyMs: number;
+  /**
+   * Requests open right now. Reported but never reset: it is what lets a
+   * harness wait for a BACKGROUND refresh to land before asserting on counts,
+   * which counting alone cannot do — under latency there is a gap between a
+   * provider's sequential queries where the totals sit still, and a "has it
+   * stopped changing" probe reads that as finished.
+   */
+  inflight: number;
+}
+
+export type Mode = "ok" | "502" | "hang";
 
 let mode: Mode = "ok";
 let latencyMs = 0;
-const counts: Counts = { list: 0, epicList: 0, children: 0, lookup: 0, total: 0 };
+const counts: StubCounts = { list: 0, epicList: 0, children: 0, lookup: 0, total: 0 };
 const held = new Set<http.ServerResponse>();
-// Requests the daemon has open right now. Reported but never reset: it's what
-// lets a harness wait for a BACKGROUND refresh to land before asserting on
-// counts. Counting alone can't — under latency there's a gap between a
-// provider's sequential queries where the totals sit still, and a "has it
-// stopped changing" probe reads that as finished.
 let inflight = 0;
 
 // One epic with two children (one of them closed, so childStats has something
@@ -192,10 +211,14 @@ const server = http.createServer(async (req, res) => {
     return json(200, { latencyMs });
   }
   if (url.pathname === "/__reset") {
-    for (const k of Object.keys(counts) as (keyof Counts)[]) counts[k] = 0;
-    return json(200, counts);
+    for (const k of Object.keys(counts) as (keyof StubCounts)[]) counts[k] = 0;
+    const reset: StubCounts = counts;
+    return json(200, reset);
   }
-  if (url.pathname === "/__state") return json(200, { mode, latencyMs, inflight, ...counts });
+  if (url.pathname === "/__state") {
+    const state: StubState = { mode, latencyMs, inflight, ...counts };
+    return json(200, state);
+  }
 
   // --- the tracker itself ---
   counts.total++;

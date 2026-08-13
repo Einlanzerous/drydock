@@ -24,12 +24,13 @@
 // harnesses, so tsx resolves:
 //   (cd daemon && node --import tsx ../scripts/verify/backlog-toggle.mts)
 import { chromium, type Page } from "playwright";
+// The proxy's own declaration of what it serves, rather than a copy of it here
+// (DRY-80). `import type` erases, so this does not start a second proxy.
+import type { ProxyTrackerState } from "./proxy-tracker.mjs";
 
 const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5375";
 const PROXY = process.env.PROXY ?? "http://127.0.0.1:4375";
 
-/** `proxy-tracker.mjs`'s control surface. `held` is sockets parked by `hang`. */
-type ProxyState = { mode: string; blocked: number; held: number };
 
 let failures = 0;
 function check(name: string, ok: boolean, extra = "") {
@@ -37,10 +38,10 @@ function check(name: string, ok: boolean, extra = "") {
   console.log(`${ok ? "  ok  " : "FAIL  "}${name}${extra ? ` — ${extra}` : ""}`);
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const post = (p: string): Promise<ProxyState> =>
-  fetch(`${PROXY}${p}`, { method: "POST" }).then((r) => r.json() as Promise<ProxyState>);
-const state = (): Promise<ProxyState> =>
-  fetch(`${PROXY}/__state`).then((r) => r.json() as Promise<ProxyState>);
+const post = (p: string): Promise<ProxyTrackerState> =>
+  fetch(`${PROXY}${p}`, { method: "POST" }).then((r) => r.json() as Promise<ProxyTrackerState>);
+const state = (): Promise<ProxyTrackerState> =>
+  fetch(`${PROXY}/__state`).then((r) => r.json() as Promise<ProxyTrackerState>);
 
 /** Seconds waited, or null on timeout — so a caller can report which it was. */
 async function waitFor(fn: () => Promise<boolean>, ms = 40_000): Promise<number | null> {

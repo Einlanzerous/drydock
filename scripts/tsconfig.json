@@ -1,15 +1,28 @@
 {
-  // scripts/ is checked separately from the daemon and the shell (DRY-80).
+  // scripts/, the NODE half (DRY-80). See tsconfig.browser.json for the other.
   //
-  // It cannot join daemon/tsconfig.json: that one is `"include": ["src"]` with
-  // `"types": ["node"]` and no DOM lib, while these files are half Node (a
-  // harness driving the daemon's HTTP API) and half browser (the `page.evaluate`
-  // bodies that read the shell's DOM). Checking them under the daemon's config
-  // either drops the DOM types or leaks them into the daemon's own build.
+  // Why scripts/ is checked apart from the daemon and the shell at all: before
+  // this existed, a `.mts` here was TypeScript that tsx STRIPPED rather than
+  // TypeScript anything CHECKED — which bought the syntax and none of the
+  // safety. auth.mts had carried two live type errors since it was written, and
+  // the first run of this config found seven more in two other files.
   //
-  // Before this existed, a `.mts` here was TypeScript that tsx STRIPPED rather
-  // than TypeScript anything CHECKED — which bought the syntax and none of the
-  // safety. auth.mts had carried two live type errors since it was written.
+  // WHY TWO CONFIGS. The browser harnesses need the DOM lib for their
+  // `page.evaluate` bodies; the in-process ones (ticket-brief,
+  // tracker-getticket, tracker-cache-unit) import real daemon modules —
+  // tracker/cache.ts, tracker/jira.ts, tracker/switchyard.ts — which then land
+  // in this program too. Checking those under DOM as well as under the daemon's
+  // own node-only config means the same source is held against two different
+  // definitions of `fetch`, `Response` and `setTimeout`. They happen to agree
+  // today (measured), and that is not a property to build on: it would fail as
+  // a red gate here on code the daemon's own gate calls fine. So daemon code is
+  // only ever reached from THIS project, which has no DOM lib.
+  //
+  // Drift is loud rather than silent, which is the other half of the point. The
+  // include is a recursive glob, so a new file anywhere under scripts/ is picked
+  // up automatically and lands here by default; if it turns out to be a browser
+  // harness it fails with "Cannot find name 'document'" and wants moving to the
+  // list in tsconfig.browser.json. Nothing new is silently unchecked.
   "compilerOptions": {
     "target": "ES2022",
     "module": "ESNext",
@@ -19,16 +32,29 @@
     "skipLibCheck": true,
     "forceConsistentCasingInFileNames": true,
     "noEmit": true,
-    // DOM is here for the `page.evaluate` bodies. Note it only types the ones
-    // written as functions — a body passed as a STRING (which is what Playwright
-    // plus tsx's esbuild transform forces on any body containing a named inner
-    // function; see the comment at the top of auth.mts) is opaque to tsc by
-    // construction, so those declare their shape through the evaluate generic.
-    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "lib": ["ES2023"],
     "types": ["node"]
   },
-  // The harnesses only. `build-native.mjs` stays JavaScript on purpose (it runs
-  // in postinstall under plain `node`, where there is no tsx to import), and
+  "include": ["**/*.mts", "**/*.ts"],
+  // Kept identical to tsconfig.browser.json's `include`, and it is the only
+  // duplication here — the two files partition scripts/ between them.
+  //
+  // `build-native.mjs` is not listed because it is not matched: it stays
+  // JavaScript on plain Node (it is the postinstall, and `node --import tsx`
+  // has nothing to resolve while the tree is still being installed), and
   // `verify/drift.sh` is shell orchestrating docker and psql.
-  "include": ["*.mts", "verify/*.mts"]
+  "exclude": [
+    "verify/auth.mts",
+    "verify/backlog-toggle.mts",
+    "verify/epic-children.mts",
+    "verify/gate-actions.mts",
+    "verify/hang.mts",
+    "verify/race.mts",
+    "verify/roam.mts",
+    "verify/sidebar.mts",
+    "verify/surface.mts",
+    "verify/sweep.mts",
+    "verify/tombstone.mts",
+    "verify/tracker-cache.mts"
+  ]
 }

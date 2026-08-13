@@ -29,32 +29,27 @@
 // Setup + overrides: see README.md. Run from `daemon/`, where tsx resolves:
 //   (cd daemon && node --import tsx ../scripts/verify/tracker-cache.mts)
 import { chromium } from "playwright";
-import type { TicketsResponse } from "./api.mjs";
+import type { Detail, TicketsResponse } from "./api.mjs";
+// The stub's own declaration of what it serves (DRY-80) — `import type`
+// erases, so this does not start a second stub.
+import type { StubState } from "./stub-tracker.mjs";
 
 const DAEMON = process.env.DAEMON_URL ?? "http://127.0.0.1:4385";
 const STUB = process.env.STUB_URL ?? "http://127.0.0.1:4386";
 const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5385";
 
-/** `stub-tracker.mts`'s `/__state` — the counters every claim here is about. */
-interface StubState {
-  mode: string;
-  latencyMs: number;
-  inflight: number;
-  list: number;
-  epicList: number;
-  children: number;
-  lookup: number;
-  total: number;
-}
-
 let failures = 0;
-function check(name: string, ok: boolean, extra: unknown = ""): void {
+function check(name: string, ok: boolean, extra: Detail = ""): void {
   if (!ok) failures++;
   console.log(`${ok ? "  ok  " : "FAIL  "}${name}${extra ? ` — ${extra}` : ""}`);
 }
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const ctl = (p: string): Promise<StubState> =>
-  fetch(`${STUB}${p}`, { method: "POST" }).then((r) => r.json() as Promise<StubState>);
+// The control routes answer three different shapes — `/__heal` a mode,
+// `/__latency` a latency, `/__reset` the counters — and nothing here reads any
+// of them. `unknown` says that; naming one of the three would be a guess two
+// thirds wrong (DRY-80).
+const ctl = (p: string): Promise<unknown> =>
+  fetch(`${STUB}${p}`, { method: "POST" }).then((r) => r.json());
 const stubState = (): Promise<StubState> =>
   fetch(`${STUB}/__state`).then((r) => r.json() as Promise<StubState>);
 
@@ -138,7 +133,19 @@ try {
   await settle();
   let s = await stubState();
   check("every pull answered", burst.every((r) => r.status === 200), JSON.stringify(burst.map((r) => r.status)));
-  check("all six got the same list", new Set(burst.map((r) => r.body.tickets?.length)).size === 1, `${burst.map((r) => r.body.tickets?.length).join(",")}`);
+  // `-1` for a pull that returned no list at all, NOT `undefined`. `?.length`
+  // reads as a tidy way to satisfy the compiler and quietly makes this vacuous:
+  // six failed pulls are six `undefined`s, which is a Set of size 1, so the
+  // check passes precisely when nothing was returned. The sizes must also be
+  // non-zero for the same reason — "all six agree that the list is empty" is
+  // not the claim. (Section (a) is where a cache serving nothing very
+  // efficiently would otherwise look like a pass.)
+  const sizes = burst.map((r) => r.body.tickets?.length ?? -1);
+  check(
+    "all six got the same list",
+    new Set(sizes).size === 1 && sizes[0] > 0,
+    sizes.join(","),
+  );
   check("the tracker saw ONE list query, not six", s.list === 1, `list=${s.list}`);
   // At MOST one fan-out, not exactly one: the child-stats TTL is minutes and
   // deliberately outlives a harness run, so a second run against the same daemon
