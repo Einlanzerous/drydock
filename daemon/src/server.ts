@@ -8,6 +8,7 @@ import { describe, log, type LogFields } from "./log.js";
 import { SessionManager } from "./manager.js";
 import type { PtySession, SpawnOptions } from "./session.js";
 import { expandHome, resolveRepoCwd } from "./repos.js";
+import { sanitizeSpawnEnv } from "./spawn-env.js";
 import { sessionsDir } from "./sessions-dir.js";
 import {
   ensureWorktree,
@@ -799,6 +800,15 @@ const server = http.createServer(async (req, res) => {
       if (!body.command || typeof body.command !== "string") {
         return send(res, 400, { error: "command is required" });
       }
+      // Per-spawn environment (DRY-66). Checked here, with the other pure
+      // validation and BEFORE the worktree block below, because that block has
+      // a side effect: a refusal further down would leave a git worktree and a
+      // branch on disk for a spawn that never happened. See spawn-env.ts for
+      // why this field is refused rather than filtered, and for the narrow line
+      // its deny set actually draws — it is not, and cannot be, a boundary on a
+      // route that already takes `command` and `args`.
+      const env = sanitizeSpawnEnv(body.env);
+      if (!env.ok) return send(res, 400, { error: env.error });
       // cwd precedence: an explicit cwd wins; otherwise a ticket's repo name is
       // resolved to its real dir on this host (falling back to $HOME if unknown).
       let cwd = typeof body.cwd === "string" ? body.cwd : undefined;
@@ -843,6 +853,12 @@ const server = http.createServer(async (req, res) => {
       const spawnOpts: SpawnOptions = {
         command: body.command,
         args: Array.isArray(body.args) ? body.args : [],
+        // The daemon's own four keys are spread AFTER this map in session.ts,
+        // and DRY-59's strip runs after that again in the supervisor. So a
+        // caller can neither reassign the session key it would answer its own
+        // permission gates with, nor set a marker that gets deleted with no
+        // word said — the route refuses those outright instead.
+        env: env.env,
         cwd,
         ticket,
         // The tracker repo NAME, not just the cwd it resolved to (DRY-56):
