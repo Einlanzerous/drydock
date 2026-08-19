@@ -45,11 +45,16 @@ import { INHERITED_SESSION_MARKERS } from "./supervisor/markers.js";
 /**
  * Uppercase only, per the requesting consumer's own suggestion.
  *
- * It costs `http_proxy` and `no_proxy`, which are real and lowercase by
- * convention — and which are also the ones least worth handing to a caller,
- * since between them they redirect every request the agent makes. The pattern
- * additionally makes `=` and NUL in a key unrepresentable, which is what stops
- * a key from forging a second entry in the environ array.
+ * It costs the lowercase spellings — `http_proxy`, `no_proxy` — which are real
+ * and conventional. This comment used to present that as a convenience, on the
+ * grounds that they were the ones least worth handing to a caller. That was
+ * backwards, and review caught it: the pattern excludes the lowercase spelling
+ * and admits the UPPERCASE one, which is the spelling curl honours for
+ * `ALL_PROXY`. The pattern is a shape rule and nothing more; what a key is
+ * allowed to MEAN is the deny set's job, and the proxy family is in it now.
+ *
+ * What the pattern does buy is that `=` and NUL are unrepresentable in a key,
+ * which is what stops one from forging a second entry in the environ array.
  */
 const KEY = /^[A-Z][A-Z0-9_]*$/;
 
@@ -71,19 +76,86 @@ const DENIED_EXACT = new Set([
   "ENV",
   // Word splitting for every command the session's shell runs.
   "IFS",
+  // Bash imports these from the environment at startup, and `PS4` is executed
+  // as a prompt string once `xtrace` is among them — the same door as BASH_ENV,
+  // one step further along. Listed together because either alone is inert.
+  "SHELLOPTS",
+  "PS4",
+  // Where the login shell reads its startup files from, and — the sharper half —
+  // where `claude` reads `~/.claude/settings.json`, which it merges ON TOP of
+  // the `--settings` file the daemon passes. That file is what installs the
+  // PreToolUse hook, so `HOME` is a way to edit the gate's own configuration.
+  "HOME",
+  // Does not pick the executable — `CONFIG.defaultShell` was resolved from the
+  // DAEMON's env at boot — but it is what anything downstream re-execs as "the
+  // user's shell", so it belongs with HOME rather than on its own.
+  "SHELL",
+  // The proxy family, and the reason this list gained a section rather than a
+  // key (review, measured on curl 8.5.0 against a plain-http daemon URL):
+  // `ALL_PROXY` is honoured, and the DRY-27 hooks reach the daemon through a
+  // bare `curl`. So a caller can answer their own PreToolUse gate without
+  // replacing a binary at all — the harm PATH is denied for, by a shorter road.
+  // `HTTP_PROXY` (uppercase) curl deliberately ignores, because CGI turns a
+  // `Proxy:` header into exactly that variable; almost every other client
+  // honours it. The family goes in whole rather than leaving keys that work for
+  // some of what an agent runs and not others.
+  "ALL_PROXY",
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "FTP_PROXY",
+  "NO_PROXY",
+  // Passed through by DRY-59 as host config — which is the reason it cannot be
+  // set per spawn, not an argument that it can. `transcripts.ts` reads the
+  // DAEMON's copy to find a run's transcript, under a comment saying in as many
+  // words that daemon and agent always agree on it and that this lookup answers
+  // for the wrong directory if they ever stop. A caller setting it here is that
+  // divergence: the agent writes its transcript somewhere the daemon does not
+  // scan, every such run comes back `transcriptMissing`, and DRY-62 then offers
+  // "Start again" over a conversation that exists — the direction CLAUDE.md
+  // singles out as worse than the bug it was guarding against.
+  "CLAUDE_CONFIG_DIR",
+  // Set by the daemon AFTER this map is spread (session.ts), so accepting it
+  // would 201 a value that never reaches the PTY. That is the one thing this
+  // channel may not do, and it was the only key left that could still do it.
+  "TERM",
 ]);
 const DENIED_PREFIXES = ["LD_", "DYLD_", "DRYDOCK_"];
+
+/**
+ * Why a specific key is refused, where "it changes what the daemon runs" is not
+ * the honest answer.
+ *
+ * The point is the same one that gives DRY-59's markers their own message: a
+ * caller who reads "refused" and cannot tell policy from physics goes looking
+ * for a knob. `PATH` has a knob (set it on the daemon); `TERM` does not, and
+ * `CLAUDE_CONFIG_DIR` has one that is deliberately host-wide.
+ */
+const DENIED_WHY: Record<string, string> = {
+  TERM: "the daemon sets it after this map is applied, so it could only ever look like it worked",
+  CLAUDE_CONFIG_DIR:
+    "the daemon reads its OWN copy to find a run's transcript, so a per-spawn one takes Resume away from the session afterwards (DRY-62). Set it on the daemon if the host wants it moved",
+  HOME: "it moves the login shell's startup files and `~/.claude/settings.json`, which is where this session's permission-gate hook is installed",
+};
+const PROXY_WHY =
+  "the session's hooks reach the daemon through a bare `curl`, so a proxy can answer its own permission gates";
+for (const k of ["ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "FTP_PROXY", "NO_PROXY"]) {
+  DENIED_WHY[k] = PROXY_WHY;
+}
 
 /** DRY-59's strip runs last and would delete these unannounced. See markers.ts. */
 const STRIPPED = new Set<string>(INHERITED_SESSION_MARKERS);
 
 /**
- * Bounds. `POST /api/sessions` reads its body uncapped (`readJson`), which has
- * never mattered because the control payloads are a few hundred bytes — `env`
- * is the first field on this route that invites a blob, and it is one that gets
- * written to the sessions-dir index file and handed to `execve`. Capped here
- * rather than by swapping the route's reader, so the autonomous `input` prompt
- * keeps its own (deliberately generous) length.
+ * Bounds on what is STORED — written to the sessions-dir index file and handed
+ * to `execve`. `env` is the first field on this route that invites a blob, and
+ * these caps are what keep it from being one.
+ *
+ * They are not bounds on what was READ. This comment used to imply the two were
+ * the same choice, and that capping here was what let the autonomous `input`
+ * prompt keep its generous length — review pointed out that `readJsonCapped`
+ * takes a size, so both are available. The route now passes it 1 MiB and these
+ * stay as they are: the read cap stops an unauthenticated allocation, and these
+ * stop a 900 KiB environment block reaching a PTY.
  */
 const MAX_KEYS = 64;
 const MAX_VALUE_BYTES = 4096;
@@ -131,9 +203,11 @@ export function sanitizeSpawnEnv(raw: unknown): SpawnEnvResult {
       return {
         ok: false,
         error:
-          `env.${key} is refused: it is part of how the daemon runs the session ` +
-          `(which executable resolves, or its own channel into the PTY). ` +
-          `Set it on the daemon's own environment if the host wants it.`,
+          `env.${key} is refused: ` +
+          (DENIED_WHY[key] ??
+            "it is part of how the daemon runs the session (which executable resolves, " +
+              "or its own channel into the PTY). Set it on the daemon's own environment " +
+              "if the host wants it"),
       };
     }
     if (STRIPPED.has(key)) {
@@ -168,7 +242,15 @@ export function sanitizeSpawnEnv(raw: unknown): SpawnEnvResult {
     if (bytes > MAX_VALUE_BYTES) {
       return { ok: false, error: `env.${key} is ${bytes} bytes; the cap is ${MAX_VALUE_BYTES}` };
     }
-    total += Buffer.byteLength(key, "utf8") + bytes;
+    // `key.length`, not `Buffer.byteLength`: the KEY regex above has already
+    // established `[A-Z][A-Z0-9_]*`, so a multi-byte key is unreachable and
+    // measuring for one reads as though it weren't (review).
+    //
+    // The `+ 2` is the `=` and the NUL that every `environ` entry carries. Two
+    // bytes a key is not what makes or breaks a 16 KiB budget; the reason to
+    // count them is that the cap should name the thing it bounds, and the thing
+    // it bounds is the block handed to `execve`.
+    total += key.length + bytes + 2;
     if (total > MAX_TOTAL_BYTES) {
       return { ok: false, error: `env exceeds the ${MAX_TOTAL_BYTES} byte cap` };
     }

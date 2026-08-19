@@ -48,6 +48,11 @@
  * interactive terminal cannot contain the variables only an IDE terminal sets,
  * so an env-dump census comes up short by exactly the cases it can't observe.
  * Re-derive from the binary, not from `env`, if a CLI upgrade moves things.
+ *
+ * `as const` because two readers now share it (review): a `push` from either
+ * one would move the supervisor's strip and the spawn route's refusal set at
+ * the same time, in opposite directions of safety, with nothing to catch it.
+ * Both `new Set(...)` and `for…of` take a readonly array, so it costs nothing.
  */
 export const INHERITED_SESSION_MARKERS = [
   // What the CLI injects into every child process it spawns.
@@ -73,4 +78,4 @@ export const INHERITED_SESSION_MARKERS = [
   // string does not occur anywhere in the v2.1.220 binary, so a spawned claude
   // cannot act on it. Stripping it would be decoration in a list whose whole
   // claim is that every entry was checked against the CLI that reads it.
-];
+] as const;

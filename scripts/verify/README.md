@@ -791,7 +791,11 @@ tracker. A few seconds.
 `DRYDOCK_WORKTREES_ROOT` is not decoration: one refusal case spawns against a
 throwaway git repo with a ticket, which is what puts the DRY-15 worktree block —
 the side-effectful code upstream of the guard — in play. Point it somewhere
-disposable, because that is precisely where a regression will write.
+disposable, because that is precisely where a regression will write. Unset, it
+falls back to `~/.drydock/worktrees`, which the dev and prod daemons share.
+(The harness's own header block omitted this line until review; the in-file rig
+is the copy anybody reading the harness will actually paste, so the two have to
+agree.)
 
 **Run it from a shell whose env still carries the prod daemon's config, and you
 will test the prod daemon's config.** The `env -u` list CLAUDE.md gives for the
@@ -821,6 +825,15 @@ What it holds down:
   doesn't exist.
 - **Empty is not refusal.** Omitted, `null` and `{}` all spawn, so a client that
   always sends the field doesn't have to special-case having nothing to put in it.
+- **The four keys review found reachable each have a case**, because each one
+  crosses the line the deny set draws by a different door: `ALL_PROXY` (the
+  hooks' `curl` obeys it, so a caller answers their own gate without replacing a
+  binary), `TERM` (accepted, then silently overwritten by the daemon's own
+  spread — the one thing this channel may not do), `CLAUDE_CONFIG_DIR` (the
+  daemon reads its own copy to find transcripts, so a per-spawn one strips
+  Resume), and `HOME` (the `-l` shell's startup files, and the
+  `~/.claude/settings.json` that the gate hook is installed through). The `TERM`
+  case doubles as the only route-visible test of the spread-order claim.
 
 The `NOTE` line about claude markers is **reported, not counted**, and DRY-59
 trap 1 is why: from a bare terminal there is nothing to inherit, so it would
@@ -829,8 +842,22 @@ daemon under test was itself started from inside a `claude` session — which, i
 you are reading this from an agent, it probably was.
 
 Discrimination (see [the section below](#making-sure-a-harness-still-discriminates)):
-against `main` it fails **31 of 34**. The three that survive are the empty cases,
-which is correct — they assert the field is optional, and it was optional before.
+against `main` it fails **41 of 47**. Six survive, and all six should:
+
+- `spawn accepted`, `the daemon's own keys are intact` and `the session key is a
+  uuid` — the arrival section's checks that don't depend on the field being
+  read. A 201 arrives either way, and the daemon sets its own keys either way.
+  They are context for the three beside them, not the claim.
+- the three empty cases (omitted / `null` / `{}`), which assert the field is
+  optional — and it was optional before, by being ignored.
+
+Both numbers were wrong on the first pass (31 of 34, "the three that survive are
+the empty cases") and review caught it. Worth stating why that matters more than
+a typo: CLAUDE.md makes discrimination the precondition for trusting a green run,
+so a reader who runs this and sees a different total cannot tell a stale doc from
+a harness that has quietly gained or lost assertions. **Re-measure both numbers
+when adding a case here** — do not count them by hand, which is how they were
+wrong.
 
 ## Workspace store: why a proxy and not `docker stop`
 

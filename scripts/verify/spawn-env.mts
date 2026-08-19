@@ -19,7 +19,15 @@
 // RIG (throwaway daemon, per CLAUDE.md's second-instance pattern):
 //   cd daemon
 //   DRYDOCK_PORT=4366 DRYDOCK_HOST=127.0.0.1 DRYDOCK_SESSIONS_DIR=/tmp/d66 \
-//     DRYDOCK_STATE_FILE=/tmp/dry66-state.json node --import tsx src/index.ts
+//     DRYDOCK_STATE_FILE=/tmp/dry66-state.json DRYDOCK_TRACKER=fixture \
+//     DRYDOCK_WORKTREES_ROOT=/tmp/dry66-wt node --import tsx src/index.ts
+//
+// DRYDOCK_WORKTREES_ROOT is not optional here, and this block omitted it once
+// (review). One refusal case spawns with a ticket against a git repo, which is
+// what puts the DRY-15 worktree block in play — and unset, that block writes to
+// ~/.drydock/worktrees, the root the dev and prod daemons share. Against a
+// REGRESSED route this harness is supposed to leave evidence; it should not
+// leave it there.
 // then, from another terminal:
 //   (cd daemon && node --import tsx ../scripts/verify/spawn-env.mts)
 // and afterwards kill the supervisors it left behind — CLAUDE.md's loop over
@@ -88,6 +96,14 @@ async function refused(
     `${status} ${JSON.stringify(json.error ?? json)}`,
   );
   check(`${name} started nothing`, after === before, `${before} -> ${after}`);
+  // Clean up the session this SHOULDN'T have started. Only reachable when the
+  // guard has regressed — which is exactly when somebody is running this file,
+  // and when leaving it would mean a detached supervisor per refusal (fourteen
+  // of them, plus their sessions-dir entries) surviving the daemon that spawned
+  // them. Missing on the first pass; found in review.
+  if (json.session?.id) {
+    await fetch(`${DAEMON}/api/sessions/${json.session.id}/kill`, { method: "POST" });
+  }
 }
 
 // --- 1. it arrives ----------------------------------------------------------
@@ -209,6 +225,29 @@ await refused(
   { CLAUDE_CODE_SSE_PORT: "12345" },
   /CLAUDE_CODE_SSE_PORT[\s\S]*DRY-59/,
 );
+// The four the first pass let through, all of them keys that cross the line
+// this file's own header draws (review). Each is here because a curl, a shell
+// or the daemon itself reads it — not because it sounds dangerous.
+//
+// ALL_PROXY is the sharpest: the DRY-27 hooks reach the daemon through a bare
+// `curl`, so this needs no shimmed binary to answer its own permission gate.
+// Measured on curl 8.5.0 — the uppercase spelling IS honoured (unlike
+// HTTP_PROXY, which curl ignores by design), and the key pattern admits it.
+await refused("ALL_PROXY", { ALL_PROXY: "http://127.0.0.1:1" }, /ALL_PROXY[\s\S]*curl/);
+// TERM was accepted and then silently overwritten by session.ts's spread — a
+// 201 for a value that never reached the PTY, which is the one thing this
+// channel may not do. It is also the only key by which the spread-order claim
+// was observable through the route, so this case is that claim's test.
+await refused("TERM", { TERM: "dumb" }, /TERM[\s\S]*after this map/);
+// Host config that DRY-59 passes through ON PURPOSE — which is the reason it
+// cannot be per-spawn, not an argument that it can. Divergence here makes
+// transcripts.ts scan the wrong directory, and DRY-62 then offers "Start again"
+// over a conversation that exists.
+await refused("CLAUDE_CONFIG_DIR", { CLAUDE_CONFIG_DIR: "/tmp/cfg" }, /CLAUDE_CONFIG_DIR[\s\S]*transcript/);
+// The `$SHELL -l` a `shell` session is reads $HOME's startup files, and claude
+// merges ~/.claude/settings.json over the --settings file that installs the
+// gate hook.
+await refused("HOME", { HOME: "/tmp/notahome" }, /HOME[\s\S]*settings\.json/);
 await refused("a lowercase key", { subtask: "x" }, /subtask/);
 await refused("a key with =", { "A=B": "x" }, /A=B/);
 await refused("a non-string value", { DRY66_N: 1 }, /DRY66_N[\s\S]*string/);
@@ -224,6 +263,15 @@ await refused(
   /65 keys/,
 );
 await refused("an oversized value", { DRY66_BIG: "x".repeat(4097) }, /4097 bytes/);
+// The aggregate, which was the one branch of the sanitizer with no case (review)
+// — every value here is under the per-value cap, so only the running total can
+// refuse it. That total counts `KEY=VALUE` plus its NUL, so the cap names the
+// block execve actually receives.
+await refused(
+  "an oversized env in aggregate",
+  Object.fromEntries(Array.from({ length: 8 }, (_, i) => [`DRY66_T${i}`, "x".repeat(4000)])),
+  /16384 byte cap/,
+);
 
 // The empty cases are NOT refusals: a client that always sends the field must
 // not have to special-case having nothing to put in it.

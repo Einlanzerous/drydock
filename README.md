@@ -100,10 +100,13 @@ A spawn may carry per-run environment variables (`env`, DRY-66) — for values
 two concurrent agents need to differ on, which is exactly what the daemon's own
 environment cannot express. Keys are `[A-Z][A-Z0-9_]*` and refused with the key
 named, not filtered, since a scoping value that vanishes in transit is worse
-than a spawn that fails. `PATH`, `LD_*`, `NODE_OPTIONS` and `DRYDOCK_*` are
-refused: not as a boundary — the same request already chooses the `command` —
-but because they change what the daemon's own spawn resolves to and what its
-permission-gate hooks call back with.
+than a spawn that fails. `PATH`, `LD_*`, `NODE_OPTIONS`, `HOME`, the proxy
+family and `DRYDOCK_*` are refused: not as a boundary — the same request already
+chooses the `command` — but because they change what the daemon's own spawn
+resolves to, and what its permission-gate hooks call back through. So are the
+two keys the daemon would otherwise silently overrule: `TERM`, which it sets
+itself, and `CLAUDE_CONFIG_DIR`, which it reads its own copy of to find a
+finished run's transcript.
 
 Give it a password (`DRYDOCK_AUTH_PASSWORD`, or a hash from
 `scripts/hash-password.mts`) and it requires a sign-in: the shell shows a login

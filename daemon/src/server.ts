@@ -796,7 +796,29 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (pathname === "/api/sessions" && req.method === "POST") {
-      const body = await readJson(req);
+      // Bounded since DRY-66, and the cap is generous rather than tight. The
+      // reader was `readJson`, which buffers whatever it is handed — fine while
+      // every field here was a few hundred bytes of control payload, and no
+      // longer the whole story now that `env` invites a map. The sanitizer's own
+      // 16 KiB cap bounds what is STORED and handed to execve; it cannot bound
+      // what was allocated to reach it, because the parse has already happened.
+      // On the default `off` posture that allocation needs no credential, and
+      // since DRY-57 inverted the crash posture an OOM here takes the desk down
+      // rather than being ridden out.
+      //
+      // 1 MiB, not 16 KiB: `input` (DRY-49's initial prompt) legitimately has no
+      // small bound, and a cap that made a long prompt fail would trade one
+      // silent failure for a louder one nobody asked for.
+      let body: any;
+      try {
+        body = await readJsonCapped(req, 1_048_576, "spawn body");
+      } catch (err) {
+        if (err instanceof PayloadTooLarge) return send(res, 413, { error: err.message });
+        return send(res, 400, { error: `invalid JSON body: ${String(err)}` });
+      }
+      if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return send(res, 400, { error: "body must be a JSON object" });
+      }
       if (!body.command || typeof body.command !== "string") {
         return send(res, 400, { error: "command is required" });
       }
@@ -807,8 +829,8 @@ const server = http.createServer(async (req, res) => {
       // why this field is refused rather than filtered, and for the narrow line
       // its deny set actually draws — it is not, and cannot be, a boundary on a
       // route that already takes `command` and `args`.
-      const env = sanitizeSpawnEnv(body.env);
-      if (!env.ok) return send(res, 400, { error: env.error });
+      const spawnEnv = sanitizeSpawnEnv(body.env);
+      if (!spawnEnv.ok) return send(res, 400, { error: spawnEnv.error });
       // cwd precedence: an explicit cwd wins; otherwise a ticket's repo name is
       // resolved to its real dir on this host (falling back to $HOME if unknown).
       let cwd = typeof body.cwd === "string" ? body.cwd : undefined;
@@ -858,7 +880,7 @@ const server = http.createServer(async (req, res) => {
         // caller can neither reassign the session key it would answer its own
         // permission gates with, nor set a marker that gets deleted with no
         // word said — the route refuses those outright instead.
-        env: env.env,
+        env: spawnEnv.env,
         cwd,
         ticket,
         // The tracker repo NAME, not just the cwd it resolved to (DRY-56):
