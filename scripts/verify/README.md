@@ -41,6 +41,11 @@ Three groups:
   or either provider's handling of it. **Run `tracker-cache.mts` too** — the
   stub is shared, and an epic added to it changes the child-stats counts that
   harness pins exactly.
+- **Per-spawn env (DRY-66)** —
+  [its own section](#per-spawn-env-on-post-apisessions-dry-66). A throwaway
+  daemon, no browser, seconds. Run it when touching `daemon/src/spawn-env.ts`,
+  the spawn route's body handling, or `INHERITED_SESSION_MARKERS` — the last of
+  which now has two readers, since the route refuses what the supervisor strips.
 - **The tombstone's resume button (DRY-62)** —
   [its own section](#the-tombstones-resume-button-dry-62). A browser and a
   throwaway Postgres, about a minute. Run it when touching
@@ -769,6 +774,90 @@ requires `!shiftKey`, so it never claimed ctrl+shift+letter and `_keyDown`
 returned before `cancel()`; the proposed fix of returning `false` for those two
 would have been a no-op. Copy was the only gap, and only on `Ctrl+Shift+C`, which
 no browser generates a `copy` event for.
+
+## Per-spawn env on `POST /api/sessions` (DRY-66)
+
+A throwaway daemon and nothing else — no browser, no vite, no database, no
+tracker. A few seconds.
+
+```sh
+(cd daemon && DRYDOCK_PORT=4366 DRYDOCK_HOST=127.0.0.1 DRYDOCK_SESSIONS_DIR=/tmp/d66 \
+   DRYDOCK_STATE_FILE=/tmp/dry66-state.json DRYDOCK_TRACKER=fixture \
+   DRYDOCK_WORKTREES_ROOT=/tmp/dry66-wt node --import tsx src/index.ts &)
+
+(cd daemon && node --import tsx ../scripts/verify/spawn-env.mts)
+```
+
+`DRYDOCK_WORKTREES_ROOT` is not decoration: one refusal case spawns against a
+throwaway git repo with a ticket, which is what puts the DRY-15 worktree block —
+the side-effectful code upstream of the guard — in play. Point it somewhere
+disposable, because that is precisely where a regression will write. Unset, it
+falls back to `~/.drydock/worktrees`, which the dev and prod daemons share.
+(The harness's own header block omitted this line until review; the in-file rig
+is the copy anybody reading the harness will actually paste, so the two have to
+agree.)
+
+**Run it from a shell whose env still carries the prod daemon's config, and you
+will test the prod daemon's config.** The `env -u` list CLAUDE.md gives for the
+second-instance pattern applies here in full: a session spawned by Drydock
+inherits `DRYDOCK_AUTH_PASSWORD` and `DRYDOCK_DATABASE_URL`, and every
+unauthenticated `fetch` in this harness then 401s against a daemon it thinks is
+open.
+
+What it holds down:
+
+- **A 201 is not evidence.** The daemon answered 201 to a body carrying `env`
+  for the entire time the field was being dropped — that IS the ticket. So the
+  session writes its own environment to a file and the harness reads it back
+  through `/api/sessions/:id/file`: the only route those bytes can have taken is
+  `execve`. Assert on what arrived, never on what was accepted.
+- **A refusal must start nothing.** Every refusal is checked for its 400, for
+  the key being NAMED in the message, and for the session count not moving. The
+  count is the one that catches a guard placed after `manager.create`, where
+  every message assertion still passes over a real PTY.
+- **And it must not have DONE anything either.** The worktree block runs `git`;
+  a guard below it leaves a branch and a checkout for a spawn that was refused.
+  Asserted with `git branch --list` against the harness's own repo.
+- **The two refusals with different messages are different claims.** A denied
+  key is policy ("this is how the daemon runs the session"); a DRY-59 marker is
+  physics ("the supervisor deletes it, so this could only ever look like it
+  worked"). One message for both sends the caller hunting for a knob that
+  doesn't exist.
+- **Empty is not refusal.** Omitted, `null` and `{}` all spawn, so a client that
+  always sends the field doesn't have to special-case having nothing to put in it.
+- **The four keys review found reachable each have a case**, because each one
+  crosses the line the deny set draws by a different door: `ALL_PROXY` (the
+  hooks' `curl` obeys it, so a caller answers their own gate without replacing a
+  binary), `TERM` (accepted, then silently overwritten by the daemon's own
+  spread — the one thing this channel may not do), `CLAUDE_CONFIG_DIR` (the
+  daemon reads its own copy to find transcripts, so a per-spawn one strips
+  Resume), and `HOME` (the `-l` shell's startup files, and the
+  `~/.claude/settings.json` that the gate hook is installed through). The `TERM`
+  case doubles as the only route-visible test of the spread-order claim.
+
+The `NOTE` line about claude markers is **reported, not counted**, and DRY-59
+trap 1 is why: from a bare terminal there is nothing to inherit, so it would
+pass just as cleanly against a deleted strip. It only means something when the
+daemon under test was itself started from inside a `claude` session — which, if
+you are reading this from an agent, it probably was.
+
+Discrimination (see [the section below](#making-sure-a-harness-still-discriminates)):
+against `main` it fails **41 of 47**. Six survive, and all six should:
+
+- `spawn accepted`, `the daemon's own keys are intact` and `the session key is a
+  uuid` — the arrival section's checks that don't depend on the field being
+  read. A 201 arrives either way, and the daemon sets its own keys either way.
+  They are context for the three beside them, not the claim.
+- the three empty cases (omitted / `null` / `{}`), which assert the field is
+  optional — and it was optional before, by being ignored.
+
+Both numbers were wrong on the first pass (31 of 34, "the three that survive are
+the empty cases") and review caught it. Worth stating why that matters more than
+a typo: CLAUDE.md makes discrimination the precondition for trusting a green run,
+so a reader who runs this and sees a different total cannot tell a stale doc from
+a harness that has quietly gained or lost assertions. **Re-measure both numbers
+when adding a case here** — do not count them by hand, which is how they were
+wrong.
 
 ## Workspace store: why a proxy and not `docker stop`
 

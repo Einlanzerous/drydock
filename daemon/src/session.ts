@@ -29,6 +29,15 @@ export interface SpawnOptions {
   title?: string;
   cols?: number;
   rows?: number;
+  /**
+   * Extra variables for the PTY, on top of the daemon's own environment.
+   *
+   * Since DRY-66 a caller can fill this over HTTP (`POST /api/sessions`), which
+   * is why `sanitizeSpawnEnv` exists — this type says nothing about what may be
+   * in here, and the route is the only place that can. Note the two things that
+   * outrank it: the daemon's own keys are spread after it just below, and the
+   * supervisor's DRY-59 strip runs after that.
+   */
   env?: Record<string, string>;
   /** Tracker ticket this session is scoped to; surfaced to the SessionStart hook. */
   ticket?: string;
@@ -547,6 +556,11 @@ export class PtySession {
       // Logged because it decides whether this run can ask for anything at all;
       // "why did nothing ever gate?" should be answerable from the log.
       permissionMode,
+      // KEYS ONLY, never values (DRY-66). Being able to reconstruct what a run
+      // was told is the point of the field — it replaces a prompt file in a
+      // temp dir — but a caller may put anything in a value, so the log records
+      // that a channel was used and leaves reading it to the sessions-dir entry.
+      env: Object.keys(opts.env ?? {}).join(",") || undefined,
     });
 
     if (opts.input) session.scheduleInitialInput(opts.input);
