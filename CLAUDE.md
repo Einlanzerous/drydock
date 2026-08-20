@@ -101,14 +101,22 @@ supervisor on the host passes it.** The dev and prod daemons' supervisors are
 the same `node` binary as your throwaway's, so a loop that only checks the exe
 kills live agents belonging to daemons you are not testing — including the one
 holding the terminal you are typing in. (Done it, mid-ticket, from inside a
-Drydock session: the cleanup ended the session running the cleanup.) Match on
-the throwaway `DRYDOCK_SESSIONS_DIR` instead: it is in every supervisor's argv,
-because that is where the metadata file it was started with lives, and it is
-unique to your daemon for the same reason that directory is per-port.
+Drydock session: the cleanup ended the session running the cleanup.) Add the
+throwaway `DRYDOCK_SESSIONS_DIR`, which is in every supervisor's argv because
+that is where the metadata file it was started with lives, and is unique to your
+daemon for the same reason that directory is per-port.
+
+**Both filters, not one instead of the other.** The sessions-dir match on its own
+puts the self-kill straight back: the shell running this loop has BOTH
+`supervisor/main` and the directory in its own command line — they are literals
+in the command — so it matches `pgrep` and then matches the grep. The exe test
+is what excludes it, because that shell is `zsh` and a supervisor is `node`.
 
 ```sh
 for p in $(pgrep -f "supervisor/main"); do
-  tr '\0' ' ' < /proc/$p/cmdline | grep -q "/tmp/d79/" && kill -9 "$p"
+  case "$(readlink /proc/$p/exe)" in *node*)
+    tr '\0' ' ' < /proc/$p/cmdline | grep -q "/tmp/d79/" && kill -9 "$p";;
+  esac
 done
 ```
 
@@ -723,10 +731,39 @@ exists gives `greet()` a `child` to report that isn't there yet.
    live; only output that STOPS distinguishes the two. That is why this survived
    DRY-57 to DRY-79 and why the DRY-27 harness note above worked around it
    instead of reporting it.
+4. **Seed the ring in `bind`, not in its callers.** The bug WAS a caller that
+   forgot — `adopt` seeded, `spawn` didn't — so the fix that only adds the line
+   back leaves the same hole open for a third construction path. `bind` is the
+   one thing both do.
+5. **A seeded buffer has to be CHUNKED before it enters the ring.** `onData`'s
+   trim is whole-chunk and guarded by `scrollback.length > 1`, so a seed
+   installed as one buffer survives until the first live byte pushes the ring
+   over cap and then goes entirely, in a single `shift()`. Measured on a 200 KB
+   ring seeded to ~199 KB and then sent 50 KB: **51,010 bytes retained as one
+   buffer against 186,006 chunked**. It bites hardest on an adopt, and the
+   pre-attach block is always the oldest chunk there is.
+6. **`replayBytes` is the SEEDED count, not `scrollbackBytes`.** `bind` flushes
+   the link's `pendingData` on its way past — output that shared a TCP segment
+   with Ready — so reading the ring after it reports the window plus some live
+   output, on the log line the sizing decision above is made from.
+7. **The exit CODE goes missing in the same window, and costs more.** A session
+   that ends before the daemon dials broadcast its Exit frame to an empty client
+   set; the socket the daemon then dialled closes 250ms later with nothing left
+   to say, and the daemon concluded `-1`. So a `printf` that exited 0 was a
+   FAILED run: a failure card, DRY-49's handoff, a tracker comment saying nobody
+   was watching, and `endReason: failed` on DRY-64's stream. `SupervisorLink`
+   now reads the exit record the supervisor flushes BEFORE it broadcasts, and
+   keeps `-1` only for a supervisor that left nothing behind. Same misreading as
+   DRY-49's trap 2 and DRY-56's trap 3, reached from the other side.
+8. **DRY-49's settle timer can't see seeded output either.** It is driven from
+   `onData`, which a seed never passes through, so a CLI whose banner finished
+   inside the window and then went quiet waits out the 15s ceiling instead of
+   the 1.2s settle. `scheduleInitialInput` arms it when the ring is already
+   non-empty.
 
 Harness: `scripts/verify/spawn-replay.mts`, rig in its README — a throwaway
 daemon, no browser, under a minute. Confirm it discriminates: against the
-unpatched `spawn` it fails 5 or 6 of 12, the variance being whether the attach
+unpatched `spawn` it fails 7 or 8 of 17, the variance being whether the attach
 lands inside the bulk case's burst or after it.
 
 ## Verifying session history (DRY-56)

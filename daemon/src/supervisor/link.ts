@@ -15,7 +15,7 @@ import * as fs from "node:fs";
 import * as net from "node:net";
 import { fileURLToPath } from "node:url";
 import { log } from "../log.js";
-import { forget, probeSocket, sessionPaths, writeMeta } from "../sessions-dir.js";
+import { forget, probeSocket, readExitRecord, sessionPaths, writeMeta } from "../sessions-dir.js";
 import {
   FrameReader,
   Frame,
@@ -273,12 +273,32 @@ export class SupervisorLink {
     }
     if (this.disposed || this.ended) return;
     this.ended = true;
+    // Ask the disk how it went before giving up on knowing (DRY-79). The
+    // supervisor writes its exit record BEFORE broadcasting the Exit frame, so
+    // a record here means the child ended properly and we merely weren't
+    // listening — which is routine for a session that ends inside the attach
+    // window: the frame was broadcast to an empty client set, and the socket we
+    // then dialled closed 250ms later with nothing left to say. Reporting -1
+    // for that made a `printf` that exited 0 a FAILED run, with DRY-49's
+    // handoff and a tracker comment to match, and `session-exit` carrying
+    // `endReason: failed` (DRY-64) — the same misreading DRY-49's trap 2 and
+    // DRY-56's trap 3 are about, arrived at from the other side.
+    //
+    // -1 stays the answer when there is no record, and it still means what it
+    // always meant: the supervisor is gone and nothing wrote down why.
+    const record = readExitRecord(this.id);
+    const code = record?.exitCode ?? -1;
     log.warn("supervisor is gone without an exit frame — treating the session as ended", {
       id: this.id,
       supervisorPid: this.helloValue?.pid,
+      // Named rather than implied: "we found the record" and "we guessed" are
+      // different enough that a log reader should not have to infer it from the
+      // code being 0.
+      exitCode: code,
+      from: record ? "exit record" : "unknown",
     });
-    if (this.exitCb) this.exitCb(-1);
-    else this.pendingExit = -1;
+    if (this.exitCb) this.exitCb(code);
+    else this.pendingExit = code;
   }
 
   write(data: string): void {

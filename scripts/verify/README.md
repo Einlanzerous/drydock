@@ -872,10 +872,16 @@ a minute, most of it the bulk case.
 ```sh
 (cd daemon && DRYDOCK_PORT=4379 DRYDOCK_HOST=127.0.0.1 DRYDOCK_SESSIONS_DIR=/tmp/d79 \
    DRYDOCK_STATE_FILE=/tmp/dry79-state.json DRYDOCK_TRACKER=fixture \
-   node --import tsx src/index.ts &)
+   DRYDOCK_SCROLLBACK_BYTES=1048576 node --import tsx src/index.ts &)
 
 (cd daemon && node --import tsx ../scripts/verify/spawn-replay.mts)
 ```
+
+`DRYDOCK_SCROLLBACK_BYTES` is in that line for the same reason
+`DRYDOCK_WORKTREES_ROOT` is in DRY-66's: the bulk case asserts an EXACT character
+count over a ~300 KB payload, so a host whose `.env` turns the ring down fails
+this file for a reason that isn't the ticket. It pins the default rather than
+changing it, and a short count prints a NOTE naming the variable.
 
 The same `env -u` sweep CLAUDE.md gives for the second-instance pattern applies
 — run this from a shell inside a Drydock session and every unauthenticated
@@ -903,6 +909,12 @@ What it holds down:
 - **The one-shot case is the sharpest.** `printf` and exit: everything the
   session will ever print falls inside the window, so the pane was empty and the
   run read as a command that did nothing.
+- **And its exit CODE takes the same window.** The supervisor broadcast its Exit
+  frame to an empty client set, so the socket the daemon then dialled closed with
+  nothing left to say and the daemon synthesized `-1`: a `printf` that exited 0
+  presented as a FAILED run, with DRY-49's handoff and a tracker comment behind
+  it. Asserted as both the code and the consequence (`failure` unset), because
+  the number on its own doesn't say what it costs.
 - **The window is not "a few frames".** The bulk case prints 100k box-drawing
   characters (~300 KB) and the harness reports how much of it was already
   buffered when the pane attached. Runs here saw 110 KB, 114 KB — and, twice, the
@@ -919,17 +931,25 @@ and copying them is a no-op — an assertion would pass against both spellings,
 which is worse than none.
 
 Discrimination (see [the section below](#making-sure-a-harness-still-discriminates)):
-against `main` it fails **5 or 6 of 12**, and the variable one is honest rather
+against `main` it fails **7 or 8 of 17**, and the variable one is honest rather
 than flaky. `the bulk session finished writing` waits for an END marker: when the
 unpatched daemon's window swallows the whole burst, nothing arrives at all and it
 fails; when the attach lands mid-burst, END arrives live and it passes while the
-count beside it reports something like `11288 of 100000`. The five that always
-survive should: `the replay is a snapshot` and `nothing was decoded across a
-chunk boundary` are vacuously true of an empty replay (both are shape checks on
-what arrived, guarded by the count checks beside them), `live output still
-arrives after it` and `and the rest of the session with it, once` exercise the
-live path, which was never broken, and `the one-shot session has exited` is
-context for the assertion under it.
+count beside it reports something like `29088 of 100000`. Re-measure both numbers
+when adding a case here — DRY-66's section explains why that matters more than a
+typo, and the first version of this paragraph said 12 when the file emitted 11.
+
+The nine that always survive should. Four are attach preconditions (`a later pane
+attaches`, `a pane attaches to the exited session`, `the bulk pane attached`, and
+`the one-shot session has exited`) — they exist so that a socket that never
+opened reads as its own FAIL line instead of as the claim beneath it failing.
+`the replay is a snapshot` and `nothing was decoded across a chunk boundary` are
+vacuously true of an empty replay: both are shape checks on what arrived, guarded
+by the count checks beside them. And `live output still arrives after it`, `and
+the rest of the session with it, once` and the bulk case's byte total exercise
+the live path, which was never broken — they are the context that makes the
+failures beside them mean "the replay was dropped" rather than "the socket is
+broken".
 
 ## Workspace store: why a proxy and not `docker stop`
 

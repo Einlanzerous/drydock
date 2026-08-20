@@ -30,7 +30,13 @@
 //   cd daemon
 //   DRYDOCK_PORT=4379 DRYDOCK_HOST=127.0.0.1 DRYDOCK_SESSIONS_DIR=/tmp/d79 \
 //     DRYDOCK_STATE_FILE=/tmp/dry79-state.json DRYDOCK_TRACKER=fixture \
-//     node --import tsx src/index.ts
+//     DRYDOCK_SCROLLBACK_BYTES=1048576 node --import tsx src/index.ts
+//
+// The scrollback cap is in that line because the bulk case below asserts an
+// EXACT character count over a ~300 KB payload: a host whose `.env` turns the
+// ring down to, say, 128 KB fails this file for a reason that has nothing to do
+// with the ticket. 1048576 is the default — the line pins it rather than
+// changing it.
 // then, from another terminal:
 //   (cd daemon && node --import tsx ../scripts/verify/spawn-replay.mts)
 // and afterwards kill the supervisors it left behind — CLAUDE.md's loop over
@@ -81,29 +87,41 @@ class Pane {
   replay = "";
   live = "";
   private ws: WebSocket;
-  private replayed: Promise<void>;
+  private replayed: Promise<boolean>;
 
   constructor(id: string) {
     this.ws = new WebSocket(`${WS}/api/sessions/${id}/attach`);
-    this.replayed = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("no replay frame within 5s")), 5_000);
+    // Resolves false rather than REJECTING, and that is not tidiness: every
+    // call site here is a top-level `await`, so a rejection would end the whole
+    // run as an unhandled rejection — no FAIL line for the case that failed,
+    // and every later case silently skipped. A harness's own failure has to
+    // present as a failed check.
+    this.replayed = new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => resolve(false), 5_000);
       timer.unref?.();
       this.ws.onmessage = (ev: MessageEvent) => {
         const msg = JSON.parse(String(ev.data)) as ServerMessage;
         if (msg.type === "replay") {
           this.replay = msg.data;
           clearTimeout(timer);
-          resolve();
+          resolve(true);
           return;
         }
         if (msg.type === "data") this.live += msg.data;
       };
-      this.ws.onerror = () => reject(new Error("attach socket errored"));
+      this.ws.onerror = () => {
+        clearTimeout(timer);
+        resolve(false);
+      };
     });
   }
 
-  /** Resolves on the one-shot scrollback dump; everything after it is `live`. */
-  ready(): Promise<void> {
+  /**
+   * The one-shot scrollback dump; everything after it is `live`. False means the
+   * socket never delivered one — checked at every call site, since an attach
+   * that didn't happen makes every assertion below it meaningless.
+   */
+  ready(): Promise<boolean> {
     return this.replayed;
   }
 
@@ -157,7 +175,10 @@ if (!id) {
 }
 
 const pane = new Pane(id);
-await pane.ready();
+if (!(await pane.ready())) {
+  check("the pane attached", false, "no replay frame — nothing below can be asserted");
+  process.exit(1);
+}
 check("the pane's replay carries the pre-attach marker", pane.replay.includes("DRY79-PRE"), JSON.stringify(pane.replay));
 // The window, in bytes, for the ticket's first question. Reported rather than
 // asserted: it is a race with the child, so any threshold would be flaky. What
@@ -185,7 +206,8 @@ check(
 // rather than the socket that was open at the time. A fix that handed the replay
 // to the first client without keeping it would pass every check above.
 const second = new Pane(id);
-await second.ready();
+const secondAttached = await second.ready();
+check("a later pane attaches", secondAttached, secondAttached ? "" : "no replay frame");
 check(
   "a later pane replays the pre-attach marker too",
   occurrences(second.replay, "DRY79-PRE") === 1,
@@ -207,6 +229,17 @@ await kill(id);
 // nothing. Nothing is attached while it runs — the attach happens after it has
 // already exited.
 const oneShot = await spawn(["printf 'DRY79-ONESHOT\\n'"], "dry79-oneshot");
+if (!oneShot) {
+  // Said out loud because the FAIL above it names a status code and nothing
+  // else. This session exits in single-digit milliseconds and its supervisor
+  // then holds the socket open for only 250ms (`supervisor/main.ts`), so on a
+  // loaded host the daemon's 25ms poll can arrive after the socket is gone and
+  // `POST /api/sessions` 500s. That is the linger, not this ticket — rerun.
+  console.log(
+    "  NOTE  a one-shot spawn can lose the race with the supervisor's 250ms" +
+      " post-exit linger; if this repeats, it is not the replay",
+  );
+}
 if (oneShot) {
   await sleep(1_500);
   const sessions = ((await (await fetch(`${DAEMON}/api/sessions`)).json()) as SessionsResponse)
@@ -215,8 +248,20 @@ if (oneShot) {
   // Context for the check below rather than a claim of its own: a session that
   // is somehow still running would make an empty pane unremarkable.
   check("the one-shot session has exited", info?.status === "exited", info?.status ?? "gone");
+  // The exit CODE takes the same window, and lost the same way. The Exit frame
+  // was broadcast to an empty client set — the daemon hadn't dialled yet — so
+  // the socket it did dial closed with nothing left to say, and the daemon
+  // synthesized -1: a `printf` that exited 0 presented as a failed run, with
+  // DRY-49's handoff and a tracker comment behind it. The record the supervisor
+  // flushes before it goes is now read instead.
+  check("its exit code survived the window too", info?.exitCode === 0, `${info?.exitCode}`);
+  // The consequence rather than the number, and the reason the number matters:
+  // a non-zero code with no `stoppedByRequest` beside it is what draws a failed
+  // card and writes a handoff.
+  check("and it is not reported as a failure", info?.failure === undefined, info?.failure?.reason ?? "");
   const dead = new Pane(oneShot);
-  await dead.ready();
+  const deadAttached = await dead.ready();
+  check("a pane attaches to the exited session", deadAttached, deadAttached ? "" : "no replay frame");
   check(
     "its only output survived it",
     dead.replay.includes("DRY79-ONESHOT"),
@@ -248,9 +293,10 @@ if (oneShot) {
 // that was empty and stayed empty, for a session that had printed 300 KB.
 const LINE = "─".repeat(100);
 // 100k characters, ~300 KB — comfortably past REPLAY_CHUNK_BYTES and comfortably
-// under DRYDOCK_SCROLLBACK_BYTES (1 MiB), which is the other bound that matters:
-// a payload over the ring's cap would be TRIMMED, and the exact count below
-// would then fail for a reason that has nothing to do with this ticket.
+// under DRYDOCK_SCROLLBACK_BYTES, which is the other bound that matters: over
+// the ring's cap the oldest chunks are TRIMMED and the exact count below fails
+// for a reason that is not this ticket. The rig pins the cap at its 1 MiB
+// default for that reason, and a short count says so below.
 const LINES = 1_000;
 const big = await spawn(
   [`i=0; while [ $i -lt ${LINES} ]; do printf '%s\\n' '${LINE}'; i=$((i+1)); done; `,
@@ -259,7 +305,8 @@ const big = await spawn(
 );
 if (big) {
   const bulk = new Pane(big);
-  await bulk.ready();
+  const bulkAttached = await bulk.ready();
+  check("the bulk pane attached", bulkAttached, bulkAttached ? "" : "no replay frame");
   const arrived = await bulk.waitSeen("DRY79-END", 20_000);
   const all = bulk.replay + bulk.live;
   check("the bulk session finished writing", arrived, `${Buffer.byteLength(all)} bytes seen`);
@@ -269,16 +316,22 @@ if (big) {
   // the daemon binding the link and the pane attaching. Case 1's number is the
   // window alone, because nothing is printed after it.
   console.log(`  NOTE  replay at attach: ${Buffer.byteLength(bulk.replay)} bytes`);
+  const seen = occurrences(all, "─");
+  check("every character printed arrived exactly once", seen === LINES * 100, `${seen} of ${LINES * 100}`);
+  if (seen > 0 && seen < LINES * 100) {
+    // A partial count has two very different causes and the number alone can't
+    // separate them: a dropped replay (this ticket) or a ring smaller than the
+    // payload (host config). Say so rather than let the next reader guess.
+    console.log(
+      "  NOTE  a PARTIAL count can also mean DRYDOCK_SCROLLBACK_BYTES is below" +
+        ` ${Buffer.byteLength(all)} bytes on this daemon — check the rig line above`,
+    );
+  }
   check(
-    "every character printed arrived exactly once",
-    occurrences(all, "─") === LINES * 100,
-    `${occurrences(all, "─")} of ${LINES * 100}`,
+    "nothing was decoded across a chunk boundary",
+    !all.includes("\uFFFD"),
+    `${occurrences(all, "\uFFFD")} replacement characters`,
   );
-  check(
-  "nothing was decoded across a chunk boundary",
-  !all.includes("\uFFFD"),
-  `${occurrences(all, "\uFFFD")} replacement characters`,
-);
   bulk.close();
   await kill(big);
 }
