@@ -22,6 +22,16 @@ import type {
   SessionVisibility,
 } from "./protocol.js";
 
+/**
+ * How finely a seeded replay is cut before it enters the ring (DRY-79).
+ *
+ * Only the trim's granularity — the buffer is concatenated again on every
+ * attach — so this trades a few array entries for a ring that degrades by
+ * 64 KiB rather than by everything it was seeded with. Independent of the
+ * supervisor's REPLAY_CHUNK_BYTES, which sizes a frame on a socket.
+ */
+const SEED_CHUNK_BYTES = 64 * 1024;
+
 export interface SpawnOptions {
   command: string;
   args?: string[];
@@ -332,6 +342,8 @@ export class PtySession {
   /** Capped scrollback so a next-day reattach gets full history, not a flood. */
   private scrollback: Buffer[] = [];
   private scrollbackBytes = 0;
+  /** What `seedScrollback` last installed, before any live byte was appended. */
+  private seededBytes = 0;
 
   private readonly clients = new Set<WebSocket>();
   private readonly pending = new Map<string, PendingPermission>();
@@ -542,6 +554,12 @@ export class PtySession {
 
     const link = await SupervisorLink.start(meta);
     const session = new PtySession(meta, notifyGate, notifyRunEnd, notifyEnded);
+    // `bind` takes the link's buffered replay, which is what this path used to
+    // skip (DRY-79) — see its comment. Not the SIZES, though, which is the half
+    // of `adopt` that must not be copied here: it takes `hello.cols`/`rows`
+    // because a previous client negotiated them, whereas at spawn the request's
+    // own dimensions are the newest thing anybody has said and the supervisor is
+    // only echoing them back.
     session.bind(link);
 
     log.info("session spawned", {
@@ -561,6 +579,14 @@ export class PtySession {
       // temp dir — but a caller may put anything in a value, so the log records
       // that a channel was used and leaves reading it to the sessions-dir entry.
       env: Object.keys(opts.env ?? {}).join(",") || undefined,
+      // What the child printed before the daemon could attach (DRY-79). The
+      // SEEDED count, not `scrollbackBytes`: `bind` flushes the link's
+      // `pendingData` on its way past — output that arrived live in the same
+      // segment as Ready — so the ring is already wider than the window by the
+      // time this line runs, and this number is read as the window (CLAUDE.md
+      // sizes the spawn-then-bind decision on it). Zero is the normal case for
+      // a quiet command and is not a symptom.
+      replayBytes: session.seededBytes,
     });
 
     if (opts.input) session.scheduleInitialInput(opts.input);
@@ -582,10 +608,10 @@ export class PtySession {
     notifyEnded: SessionEndNotifier = () => {},
   ): PtySession {
     const session = new PtySession(meta, notifyGate, notifyRunEnd, notifyEnded);
-    session.seedScrollback(link.takeReplay());
     // Whatever size the last client negotiated, not what the spawn asked for.
     session.cols = link.hello.cols;
     session.rows = link.hello.rows;
+    // The scrollback comes back inside `bind`, the same as it does for a spawn.
     session.bind(link);
     log.info("session adopted after a daemon restart", {
       id: meta.id,
@@ -594,7 +620,7 @@ export class PtySession {
       command: meta.command,
       ticket: meta.ticket,
       autonomous: meta.autonomous || undefined,
-      replayBytes: session.scrollbackBytes,
+      replayBytes: session.seededBytes,
       ageSec: Math.round((Date.now() - meta.createdAt) / 1000),
     });
     return session;
@@ -642,15 +668,43 @@ export class PtySession {
     return session;
   }
 
-  /** Replace the buffer wholesale — the supervisor's copy is authoritative. */
+  /**
+   * Replace the buffer wholesale — the supervisor's copy is authoritative.
+   *
+   * SPLIT INTO CHUNKS, not installed as one buffer, because `onData`'s trim is
+   * whole-chunk: `scrollback.length > 1` guards it, so a single seed chunk
+   * survives until the first live byte pushes the ring over cap and then goes
+   * ENTIRELY, in one `shift()`. Measured on a 200 KB ring, seeded to ~199 KB
+   * and then sent 50 KB of live output: 51,010 bytes retained as one buffer
+   * against 186,006 chunked. A session adopted with a full ring lost three
+   * quarters of its scrollback to its next few keystrokes, and a spawn's
+   * pre-attach block — the bytes DRY-79 is about — is always the oldest chunk
+   * there is, so it is always the first to go.
+   */
   private seedScrollback(replay: Buffer): void {
-    this.scrollback = replay.byteLength ? [replay] : [];
+    this.scrollback = [];
+    for (let at = 0; at < replay.byteLength; at += SEED_CHUNK_BYTES) {
+      this.scrollback.push(replay.subarray(at, at + SEED_CHUNK_BYTES));
+    }
     this.scrollbackBytes = replay.byteLength;
+    this.seededBytes = replay.byteLength;
   }
 
-  /** Wire a link's output, exit and reattach into this session. */
+  /**
+   * Wire a link's output, exit and reattach into this session — and take the
+   * scrollback it buffered during the handshake.
+   *
+   * THE SEED LIVES HERE so that it cannot be forgotten by one caller, which is
+   * exactly what DRY-79 was: `adopt` seeded and `spawn` did not, so everything
+   * a PTY printed between starting and the daemon dialling its supervisor was
+   * dropped — out of the pane, out of the ring, and so out of every later
+   * reattach and out of DRY-49's handoff. There is ALWAYS something in that
+   * buffer, because the supervisor spawns the PTY before it binds its socket
+   * and the daemon then polls for that socket before it can send Attach.
+   */
   private bind(link: SupervisorLink): void {
     this.link = link;
+    this.seedScrollback(link.takeReplay());
     link.onReattach((replay) => {
       // A dropped-and-recovered connection hands back the whole buffer. Replace
       // rather than append: we can't know how much of it we already had, and
@@ -691,6 +745,12 @@ export class PtySession {
    */
   private scheduleInitialInput(text: string): void {
     this.initialInput = text;
+    // Output that landed before the daemon attached counts as the first output
+    // (DRY-79). `noteOutputForInitialInput` is driven from `onData`, which the
+    // seeded replay never passes through, so a CLI whose banner finished inside
+    // that window and then went quiet would wait out the 15s ceiling below
+    // instead of the 1.2s settle.
+    if (this.scrollbackBytes) this.noteOutputForInitialInput();
     // Ceiling, in case the CLI never falls quiet (spinners, animated banners).
     const cap = setTimeout(() => this.flushInitialInput(), 15_000);
     cap.unref?.();

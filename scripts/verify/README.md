@@ -46,6 +46,11 @@ Three groups:
   daemon, no browser, seconds. Run it when touching `daemon/src/spawn-env.ts`,
   the spawn route's body handling, or `INHERITED_SESSION_MARKERS` — the last of
   which now has two readers, since the route refuses what the supervisor strips.
+- **A session's first output (DRY-79)** —
+  [its own section](#a-sessions-first-output-dry-79). A throwaway daemon, no
+  browser, under a minute. Run it when touching `PtySession.spawn` / `adopt` /
+  `seedScrollback`, `SupervisorLink`'s handshake, or the order in which
+  `supervisor/main.ts` spawns its PTY and binds its socket.
 - **The tombstone's resume button (DRY-62)** —
   [its own section](#the-tombstones-resume-button-dry-62). A browser and a
   throwaway Postgres, about a minute. Run it when touching
@@ -858,6 +863,93 @@ so a reader who runs this and sees a different total cannot tell a stale doc fro
 a harness that has quietly gained or lost assertions. **Re-measure both numbers
 when adding a case here** — do not count them by hand, which is how they were
 wrong.
+
+## A session's first output (DRY-79)
+
+A throwaway daemon and nothing else — no browser, no database, no tracker. Under
+a minute, most of it the bulk case.
+
+```sh
+(cd daemon && DRYDOCK_PORT=4379 DRYDOCK_HOST=127.0.0.1 DRYDOCK_SESSIONS_DIR=/tmp/d79 \
+   DRYDOCK_STATE_FILE=/tmp/dry79-state.json DRYDOCK_TRACKER=fixture \
+   DRYDOCK_SCROLLBACK_BYTES=1048576 node --import tsx src/index.ts &)
+
+(cd daemon && node --import tsx ../scripts/verify/spawn-replay.mts)
+```
+
+`DRYDOCK_SCROLLBACK_BYTES` is in that line for the same reason
+`DRYDOCK_WORKTREES_ROOT` is in DRY-66's: the bulk case asserts an EXACT character
+count over a ~300 KB payload, so a host whose `.env` turns the ring down fails
+this file for a reason that isn't the ticket. It pins the default rather than
+changing it, and a short count prints a NOTE naming the variable.
+
+The same `env -u` sweep CLAUDE.md gives for the second-instance pattern applies
+— run this from a shell inside a Drydock session and every unauthenticated
+`fetch` here meets the prod daemon's auth.
+
+What it holds down:
+
+- **The bytes are on a WebSocket, so no curl can see them.** The replay is one
+  `{"type":"replay","data":…}` frame on `/api/sessions/:id/attach`. `POST
+  /api/sessions` answered 201 and `/api/sessions` listed a healthy session for
+  the entire time every session's first output was being dropped — which is why
+  this went unnoticed from DRY-57 to DRY-79.
+- **The marker must be output that STOPS.** A command that keeps printing proves
+  nothing: the socket catches it live and the check passes over a dropped
+  replay. So the session prints `PRE` once, sleeps two seconds, then prints
+  `POST` — and the harness asserts `PRE` is in the replay while `POST` is *not*,
+  which is what makes the first assertion mean anything.
+- **Once, not merely present.** The seed and the link's `pendingData` flush are
+  two paths onto one buffer; DRY-57's trap 4 applies a layer down, so the count
+  is asserted rather than the presence.
+- **It has to be in the daemon's RING, not just handed to the pane that was
+  open.** A second pane attaches and must replay the same marker — that is the
+  form the loss actually took for a reattach, for a second browser and for
+  DRY-49's handoff document.
+- **The one-shot case is the sharpest.** `printf` and exit: everything the
+  session will ever print falls inside the window, so the pane was empty and the
+  run read as a command that did nothing.
+- **And its exit CODE takes the same window.** The supervisor broadcast its Exit
+  frame to an empty client set, so the socket the daemon then dialled closed with
+  nothing left to say and the daemon synthesized `-1`: a `printf` that exited 0
+  presented as a FAILED run, with DRY-49's handoff and a tracker comment behind
+  it. Asserted as both the code and the consequence (`failure` unset), because
+  the number on its own doesn't say what it costs.
+- **The window is not "a few frames".** The bulk case prints 100k box-drawing
+  characters (~300 KB) and the harness reports how much of it was already
+  buffered when the pane attached. Runs here saw 110 KB, 114 KB — and, twice, the
+  whole 302 KB, i.e. a session that printed 300 KB and then showed an empty pane
+  forever. Five concurrent chatty spawns measured 57-193 KB each. The exact
+  character count is asserted; the ~300 KB payload also crosses
+  `REPLAY_CHUNK_BYTES` when the window is that large, exercising the
+  concatenate-before-decode that keeps a 256 KiB cut from landing mid-character.
+
+**What it deliberately does not check** is the half of `adopt` that must not be
+copied into `spawn`: `hello.cols`/`hello.rows`. At spawn the supervisor's sizes
+came from the meta the daemon just handed it, so its hello echoes the request
+and copying them is a no-op — an assertion would pass against both spellings,
+which is worse than none.
+
+Discrimination (see [the section below](#making-sure-a-harness-still-discriminates)):
+against `main` it fails **7 or 8 of 17**, and the variable one is honest rather
+than flaky. `the bulk session finished writing` waits for an END marker: when the
+unpatched daemon's window swallows the whole burst, nothing arrives at all and it
+fails; when the attach lands mid-burst, END arrives live and it passes while the
+count beside it reports something like `29088 of 100000`. Re-measure both numbers
+when adding a case here — DRY-66's section explains why that matters more than a
+typo, and the first version of this paragraph said 12 when the file emitted 11.
+
+The nine that always survive should. Four are attach preconditions (`a later pane
+attaches`, `a pane attaches to the exited session`, `the bulk pane attached`, and
+`the one-shot session has exited`) — they exist so that a socket that never
+opened reads as its own FAIL line instead of as the claim beneath it failing.
+`the replay is a snapshot` and `nothing was decoded across a chunk boundary` are
+vacuously true of an empty replay: both are shape checks on what arrived, guarded
+by the count checks beside them. And `live output still arrives after it`, `and
+the rest of the session with it, once` and the bulk case's byte total exercise
+the live path, which was never broken — they are the context that makes the
+failures beside them mean "the replay was dropped" rather than "the socket is
+broken".
 
 ## Workspace store: why a proxy and not `docker stop`
 
