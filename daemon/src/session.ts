@@ -542,6 +542,21 @@ export class PtySession {
 
     const link = await SupervisorLink.start(meta);
     const session = new PtySession(meta, notifyGate, notifyRunEnd, notifyEnded);
+    // A spawn has a replay too, and skipping it dropped every session's first
+    // output (DRY-79). The supervisor spawns the PTY before it binds its socket,
+    // and `start` above then polls for that socket every 25ms before it can dial
+    // and send Attach — so the child has been writing into the supervisor's ring
+    // for at least one poll interval before anything here is listening, and what
+    // it wrote arrives as Replay frames during the handshake. Unread, it was
+    // gone from the pane, from the daemon's scrollback, and therefore from every
+    // later reattach and from DRY-49's handoff. A short session that printed
+    // once and exited showed an EMPTY pane.
+    //
+    // NOT the sizes, which is the half of `adopt` that must not be copied here:
+    // it takes `hello.cols`/`hello.rows` because a previous client negotiated
+    // them, whereas at spawn the request's own dimensions are the newest thing
+    // anyone has said and the supervisor is only echoing them back.
+    session.seedScrollback(link.takeReplay());
     session.bind(link);
 
     log.info("session spawned", {
@@ -561,6 +576,11 @@ export class PtySession {
       // temp dir — but a caller may put anything in a value, so the log records
       // that a channel was used and leaves reading it to the sessions-dir entry.
       env: Object.keys(opts.env ?? {}).join(",") || undefined,
+      // What the child printed before the daemon could attach (DRY-79). Zero is
+      // the normal case for a quiet command and is not itself a symptom; a
+      // number that grows with the fleet's busyness is what would argue for
+      // binding the socket before spawning the PTY in supervisor/main.ts.
+      replayBytes: session.scrollbackBytes,
     });
 
     if (opts.input) session.scheduleInitialInput(opts.input);
