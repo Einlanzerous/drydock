@@ -50,6 +50,12 @@ Three groups:
   [its own section](#a-prod-deploy-keeps-the-sessions-dry-87). Owns its own
   systemd unit; no browser, about thirty seconds. Run it when touching
   `deploy/drydock-daemon.service` or `deploy/install-prod.sh`.
+- **The deploy's health check (DRY-81)** —
+  [its own section](#the-deploys-health-check-dry-81). Two throwaway daemons it
+  starts itself; no browser, no systemd, about a minute. Run it when touching
+  the tail of `deploy/install-prod.sh`, and **whenever `/api/sessions` changes
+  what it answers an anonymous caller** — that status code is the whole premise,
+  and this file asserts it directly rather than assuming it.
 - **A session's first output (DRY-79)** —
   [its own section](#a-sessions-first-output-dry-79). A throwaway daemon, no
   browser, under a minute. Run it when touching `PtySession.spawn` / `adopt` /
@@ -1014,7 +1020,7 @@ against `main` it fails **41 of 47**. Six survive, and all six should:
 - the three empty cases (omitted / `null` / `{}`), which assert the field is
   optional — and it was optional before, by being ignored.
 
-Both numbers were wrong on the first pass (31 of 34, "the three that survive are
+Both numbers were wrong on the first pass (31 of 35, "the three that survive are
 the empty cases") and review caught it. Worth stating why that matters more than
 a typo: CLAUDE.md makes discrimination the precondition for trusting a green run,
 so a reader who runs this and sees a different total cannot tell a stale doc from
@@ -1299,6 +1305,138 @@ the relaunch guard, whose predicate is "am I inside the drydock-daemon cgroup".
 There is no honest way to fake that from inside the harness, so run this file
 from a Drydock session (which is where somebody deploys from, and the entire
 reason the guard exists) to see it.
+
+## The deploy's health check (DRY-81)
+
+`install-prod.sh` ends by polling the daemon it just restarted, and that poll
+was `curl -fsS .../api/sessions`. `-f` exits non-zero on 4xx, so on a host with
+`DRYDOCK_AUTH_PASSWORD` set the route's **correct** 401 to an anonymous caller
+read as "daemon not answering": every deploy printed an error naming
+`journalctl`, and exited 1, over a daemon that was up and serving. The first
+install is clean because auth isn't configured yet — the bug arrives with the
+second deploy.
+
+```sh
+node --import tsx scripts/verify/deploy-probe.mts
+```
+
+No browser, no database, no systemd, no second terminal: this file starts its
+own daemons in both auth postures. It takes `:4381` (`PORT=` to move it), one
+ephemeral port and `/tmp/dry81*`, and cleans up after a failure too. About a
+minute, most of it the probes that are supposed to wait.
+
+**What it drives:** `DRYDOCK_DEPLOY_PROBE=1 deploy/install-prod.sh`, a mode of
+the real script that resolves the port from the prod `.env`, runs the real
+probe, and exits having touched nothing. Same argument as DRY-87's
+`DRYDOCK_DEPLOY_PRINT_UNIT`: a harness with its own copy of the curl would be
+verifying the copy. It is worth knowing about on its own — "would this host's
+deploy call its daemon healthy?" is now a question you can ask without deploying.
+
+Five claims, and the middle ones are what a naive fix gets wrong:
+
+- **A 401 means the daemon is up.** The posture is a real daemon with a real
+  password, and its anonymous status code is asserted **before** the probe runs
+  against it. The control beside it runs the literal old command (`curl -fsS`)
+  against the same daemon and requires it to FAIL — without that, the check
+  below it could pass because auth wasn't actually on. That posture is `single`;
+  the claim that `multi` answers an anonymous caller identically is reasoned in
+  a comment there rather than measured, because `multi` needs Postgres and this
+  file deliberately takes none. Don't read it as covering all three postures.
+- **Anything else on the port does not.** "Any HTTP response means it's up"
+  cures the ticket and then reports a healthy deploy while prod is down behind a
+  proxy — 502/503/504 is exactly what a reverse proxy with a dead upstream
+  answers. And rejecting 5xx is not enough either: a stray web server's plain
+  200 page cannot be told from the daemon by status code, so the probe requires
+  `"sessions"` in a 200 body and `"authRequired"` in a 401 one. Squatters
+  answering 404, 503 **and 200** must all fail, naming what they saw. This is a
+  deploy-path case, not a lab one — if something is already holding `:4318` the
+  daemon loses the bind and exits, and the squatter is what answers.
+- **The probe cannot hang the deploy, and cannot give up on it either.** It had
+  no timeout at all, so a listener that accepts and never answers waited forever
+  with nothing on stdout; `-m 5` bounds an attempt, and a black-hole listener
+  must give up, asserted on wall-clock. The budget for the whole poll went the
+  other way — it was five one-second sleeps, and prod reconciles its sessions
+  before it binds (DRY-57), so a host with enough live agents gets this ticket's
+  sentence again through a slow boot. Sixty seconds now, with
+  `DRYDOCK_DEPLOY_PROBE_BUDGET` for this harness's seven failing cases.
+- **The probed path is the deploy's path.** Static reads of the script: one
+  curl, no `-f`, and the deploy tail calling `probe_daemon`. They exist to catch
+  a second, differently-spelled curl being added to the tail — which is the
+  shape this bug had.
+- **And it reads the `.env` the way the daemon does.** That file is hand-edited
+  on a prod host, so `DRYDOCK_PORT="4318"` is an ordinary thing to find in it —
+  and `cut` alone probes `:"4318"` while the daemon is on 4318, which is this
+  ticket again in a different spelling. Appending a second `DRYDOCK_PORT` line
+  is the same trap and worse, since neither port looks wrong in the file:
+  `env.ts` takes the FIRST occurrence, so `tail -1` probes a port the daemon is
+  not on. There are checks for both shapes.
+
+The failure line is asserted on too, in three arms, because it decides where
+somebody looks next. Nothing listening is a `journalctl`. A **5xx** is either a
+proxy with a dead upstream or the daemon's own catch-all — `server.ts` turns any
+unhandled throw into a 500 — so it is a journal too. Anything else means
+somebody has the port and the journal will only say the daemon could not bind.
+Both halves of that shipped wrong once, in opposite directions: one hint for
+every failure, then a split that asserted the daemon could never be the
+answerer.
+
+### Making sure this one still discriminates
+
+Thirteen mutations, all measured, each failing a different section:
+
+| mutation | fails |
+|---|---|
+| accept only `200` (the ticket's bug) | **3 of 35**, all in "auth on" |
+| accept any HTTP response (the overcorrection) | **8 of 35**, every squatter check |
+| accept on the status code alone, body unread | **2 of 35**, the 200 squatter |
+| drop `-m 5` from the curl (unbounded) | **2 of 35**, the black-hole pair |
+| put `-f` back on the curl (either line) | **4 of 35**, "auth on" plus the static check |
+| `prod_port` without its quote/space trim | **2 of 35**, the quoted and spaced `.env` |
+| `prod_port` back to `tail -1` | **1 of 35**, the duplicate-key `.env` |
+| `prod_port` back to a bare `^KEY=` anchor | **2 of 35**, the indented and spaced `.env` |
+| drop `probe_failure`'s 5xx arm | **2 of 35**, the 503 and 500 squatters |
+| a journal hint on every arm | **2 of 35**, the 404 and 200 squatters |
+| the probe budget back to five seconds | **1 of 35**, the static budget check |
+| the deploy tail with its own inline port lookup | **2 of 35**, two static checks |
+| `prod_port` reading only `$PROD_DIR/.env` | **1 of 35**, the `daemon/.env` case |
+
+The last two rows exist because everything else here drives
+`DRYDOCK_DEPLOY_PROBE`, which calls `prod_port`, `probe_daemon` and
+`probe_failure` directly — so a deploy tail that grew its own inline `grep …
+| tail -1` would leave every behavioural check green. The static block binds all
+three, and asserts the default budget rather than waiting it out, since the
+failing probes here run at a turned-down one.
+
+The journal pair is a **pair with disjoint failures** — the 5xx squatters assert
+the hint is present, the 404 and 200 ones assert it is absent — so each mutation
+leaves the other's checks green. Review caught this table naming the wrong pair,
+which is worse than a missing row: the table is what the next person runs to
+decide whether this file still works, and two unexpected failures read as the
+mutation having hit something else.
+
+The `^KEY=` row is the one to read if you are reworking the `.env` checks. It
+failed **0 of 30** when those checks only asserted `exit 0`: `prod_port` falls
+back to 4318, which on a developer's machine is the REAL prod daemon answering
+401, so the probe exited 0 with a healthy verdict about somebody else's daemon —
+against the exact bug the check was written for. They assert the reported port
+now.
+
+The `-f` row is worth its own note, because it changed hands during review.
+While the probe read only the status code, `-f` was harmless — `-w
+'%{http_code}'` still prints 401 and the flag only sets exit 22, which the
+`|| true` swallows — so the static check on it was about idiom. Now that a 401
+has to carry `"authRequired"`, `-f` discards the body on a 4xx and brings DRY-81
+back in full. Run it with the flag on the curl's **second** line too: the static
+check folds line continuations before matching, and did not before review.
+
+Two notes for anyone reworking it. Its servers live in this process, so the
+probe runs with `spawn` and not `spawnSync` — `spawnSync` blocks the event loop,
+and under it every squatter accepted curl's connection into the kernel backlog
+and answered nothing, so all four squatter checks passed while testing the
+black-hole path a second time. And the free port for the "it reads the `.env`"
+case is asked of the kernel rather than computed as `PORT + 1`: this host runs
+several agents at once, each with a throwaway daemon in the 43xx range, and that
+check first went green against somebody else's.
 
 ## The agent's pre-filled prompt (DRY-88)
 
