@@ -1,5 +1,24 @@
 # Changelog
 
+## [1.5.0](https://github.com/Einlanzerous/drydock/compare/v1.4.0...v1.5.0) (2026-08-21)
+
+
+### Features
+
+* **daemon:** reap worktrees whose work is finished (DRY-90) ([2f95dc6](https://github.com/Einlanzerous/drydock/commit/2f95dc6368956a7d730b9dbcdf8ddc3c0d9bed88))
+* **daemon:** reap worktrees whose work is finished (DRY-90) ([01b2075](https://github.com/Einlanzerous/drydock/commit/01b207519ed970bff181a0a6c93a3762819a9579))
+
+
+### Bug Fixes
+
+* **daemon:** close five review findings on the worktree reaper (DRY-90) ([4cff530](https://github.com/Einlanzerous/drydock/commit/4cff5304f40ae7aef073e183efbdaa505099b844))
+* **daemon:** correct the harness count and say what the floor covers (DRY-88) ([84cad17](https://github.com/Einlanzerous/drydock/commit/84cad17bb50cb07a68d606f93bd2247fb03ceb77))
+* **daemon:** let the daemon type a supervised spawn's prompt (DRY-88) ([7458065](https://github.com/Einlanzerous/drydock/commit/745806544b6cfeac6fd6637c45b083c89520a5fb))
+* **daemon:** let the daemon type a supervised spawn's prompt (DRY-88) ([f84f8aa](https://github.com/Einlanzerous/drydock/commit/f84f8aaf3af69cdc93471a9966491f3033d2fe3e))
+* **deploy:** close the review findings on the deploy renderer (DRY-87) ([4ca4a36](https://github.com/Einlanzerous/drydock/commit/4ca4a36dc65ff0cba9f2c31dae7afda60c6fdf53))
+* **deploy:** keep live agents alive across a prod restart (DRY-87) ([42af4ab](https://github.com/Einlanzerous/drydock/commit/42af4ab87f7b1bedc2d718a84fb19a1ecd727092))
+* **deploy:** keep live agents alive across a prod restart (DRY-87) ([ccce78d](https://github.com/Einlanzerous/drydock/commit/ccce78d96c2c229c98ae605bdf8b80525e5a4fc9))
+
 ## [1.4.0](https://github.com/Einlanzerous/drydock/compare/v1.3.0...v1.4.0) (2026-08-20)
 
 
