@@ -233,3 +233,86 @@ export function probeSocket(sock: string): Promise<SocketProbe> {
     socket.setTimeout(2_000, () => done("stale"));
   });
 }
+
+/**
+ * Every directory on this host where a daemon may be recording live sessions
+ * (DRY-90).
+ *
+ * The index is per-PORT by design (see the header), which makes it exactly the
+ * wrong shape for the one question the worktree reaper has to ask: worktrees
+ * are NOT per-port. `DRYDOCK_WORKTREES_ROOT` defaults to one host-wide
+ * `~/.drydock/worktrees`, so the prod daemon on :4318 can see — and would
+ * happily reap — a worktree the dev daemon on :4317 has a live agent inside.
+ * Its own registry answers "not in use" perfectly truthfully and the agent
+ * loses its checkout mid-run (`git worktree remove` does not care that a
+ * process is cwd'd in there).
+ *
+ * So liveness is read from disk, host-wide, rather than from this process's
+ * memory. Two places are searched: the parent of whatever this daemon was
+ * configured with, and the default `~/.drydock` — the second because a daemon
+ * moved with `DRYDOCK_SESSIONS_DIR` must still see the ones that weren't.
+ *
+ * Residual gap, stated rather than papered over: a daemon whose sessions dir is
+ * BOTH explicitly configured and outside those two parents is invisible here.
+ * That is the same class of thing as a worktree root nobody shares, and the
+ * answer is the same — if you move one, move the other.
+ */
+export function hostSessionsDirs(): string[] {
+  const mine = sessionsDir();
+  const parents = new Set([path.dirname(mine), expandHome("~/.drydock")]);
+  const dirs = new Set([mine]);
+  for (const parent of parents) {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(parent, { withFileTypes: true });
+    } catch {
+      continue; // no ~/.drydock on this host yet, or not ours to read
+    }
+    for (const entry of entries) {
+      if (entry.isDirectory() && entry.name.startsWith("sessions-")) {
+        dirs.add(path.join(parent, entry.name));
+      }
+    }
+  }
+  return [...dirs];
+}
+
+/**
+ * Every directory a session on this host is running in — its cwd and, when it
+ * has one, its isolated worktree (DRY-90).
+ *
+ * Deliberately does NOT probe the sockets to tell a live supervisor from a
+ * corpse (DRY-57 trap 1). A meta file that outlives its process belongs to a
+ * daemon that was killed hard and has not restarted; reconciliation cleans it
+ * up on that daemon's next boot, and until then the only cost of believing it
+ * is one worktree that doesn't get reaped. Believing the opposite costs
+ * somebody's running agent.
+ */
+export function occupiedDirs(): string[] {
+  const out: string[] = [];
+  for (const dir of hostSessionsDirs()) {
+    let entries: string[];
+    try {
+      entries = fs.readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.endsWith(SUFFIX.meta) || entry.endsWith(SUFFIX.exit) || entry.endsWith(".tmp")) {
+        continue;
+      }
+      // Read directly rather than through `parseMeta`, which logs a warning for
+      // a protocol mismatch: another daemon on a different build is a NORMAL
+      // thing to find here, and its sessions occupy their worktrees just the
+      // same. Anything with a cwd counts, whatever version wrote it.
+      try {
+        const meta = JSON.parse(fs.readFileSync(path.join(dir, entry), "utf8")) as Partial<SessionMeta>;
+        if (typeof meta.cwd === "string") out.push(meta.cwd);
+        if (typeof meta.worktree === "string") out.push(meta.worktree);
+      } catch {
+        /* half-written or not ours — nothing to learn from it */
+      }
+    }
+  }
+  return out;
+}

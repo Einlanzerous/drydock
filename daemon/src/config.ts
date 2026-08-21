@@ -405,6 +405,28 @@ export const CONFIG = {
   worktrees: {
     enabled: process.env.DRYDOCK_WORKTREES !== "0",
     root: process.env.DRYDOCK_WORKTREES_ROOT ?? "~/.drydock/worktrees",
+    /**
+     * How often to look for worktrees whose work is finished and remove them
+     * (DRY-90), in ms. Zero turns the reaper off entirely — the behaviour that
+     * shipped from DRY-15 until DRY-90, i.e. nothing ever reaps and a host
+     * accumulates a full checkout per ticket forever.
+     *
+     * Six hours because the event this is standing in for — somebody merging a
+     * PR — is not one anything here can be told about, and there is no hurry
+     * about noticing: the cost of a late sweep is a directory, and the cost of
+     * an eager one is a git walk of every managed worktree. The sweep at BOOT
+     * is what actually catches most merges, since a laptop's daemon is rarely
+     * up when one lands.
+     *
+     * Through `msOrOff`, not `num()`: a deliberate 0 must mean "never reap",
+     * and `num()` rejects 0 and would silently restore this default — DRY-60's
+     * trap 9 and DRY-72's trap 6, on a knob whose off switch guards deletion.
+     *
+     * Turning it off does NOT disable `POST /api/worktrees/remove`: that is
+     * somebody pressing a button, and this knob is about what happens with
+     * nobody present.
+     */
+    reapEveryMs: msOrOff(process.env.DRYDOCK_WORKTREE_REAP_MS, 6 * 60 * 60 * 1000),
   },
 
   /**

@@ -9,14 +9,18 @@ import { SessionManager } from "./manager.js";
 import type { PtySession, SpawnOptions } from "./session.js";
 import { expandHome, resolveRepoCwd } from "./repos.js";
 import { sanitizeSpawnEnv } from "./spawn-env.js";
-import { sessionsDir } from "./sessions-dir.js";
+import { occupiedDirs, sessionsDir } from "./sessions-dir.js";
 import {
+  describeManagedWorktree,
   ensureWorktree,
   isGitWorkTree,
   planWorktree,
   removeWorktree,
+  samePath,
   worktreeExists,
+  WorktreeNotSafe,
 } from "./worktree.js";
+import { WorktreeReaper } from "./worktree-reaper.js";
 import type { ClientMessage, EventMessage, SessionVisibility } from "./protocol.js";
 import { Auth, BadRequest, NotSupported, type Identity } from "./auth/index.js";
 import { createTracker, trackerInfo } from "./tracker/index.js";
@@ -53,6 +57,45 @@ const ticketCache = new TicketListCache(CONFIG.tracker.cache.ticketsMs);
 // here rather than inside the session so PtySession keeps knowing nothing about
 // trackers or the filesystem.
 manager.onRunEnd(runEndHandler(tracker));
+
+/**
+ * Worktrees whose work is finished (DRY-90).
+ *
+ * Both of its questions are asked of things it is deliberately not allowed to
+ * import: the session registry, because a worktree with a session in it is
+ * never reaped whatever the ticket says, and the tracker, because a merge that
+ * happened while this daemon was down leaves no other trace. Injected for the
+ * same reason `runEndHandler` is — the reaper stays a thing that reasons about
+ * git.
+ */
+const reaper = new WorktreeReaper({
+  // Two sources, and the second is the one that matters. This daemon's registry
+  // holds every session it knows about — running or exited, since an exited one
+  // is still a card on somebody's desk that DRY-62's Resume spawns back into.
+  // But `~/.drydock/worktrees` is shared by every daemon on the host while the
+  // registry is per-process, so the registry alone answers "not in use" for the
+  // dev daemon's live agents when the PROD daemon sweeps (review, DRY-92).
+  // `occupiedDirs()` reads the on-disk session index of every daemon here.
+  //
+  // Both `worktree` and `cwd` are checked on both sides, because a spawn that
+  // fell back to the plain repo cwd (the DRY-15 catch) records only the latter.
+  inUse: (wtPath) =>
+    manager.list().some((s) => samePath(s.worktree, wtPath) || samePath(s.cwd, wtPath)) ||
+    occupiedDirs().some((dir) => samePath(dir, wtPath)),
+  ticketDone: async (key) => {
+    try {
+      const ticket = await tracker.getTicket(key);
+      return ticket.status.category === "done";
+    } catch (err) {
+      // An outage, an unknown key, a provider with no such ticket. All of them
+      // mean "couldn't tell", which is not "no" and certainly not "yes" — the
+      // caller keeps the worktree. Logged at warn because a tracker that always
+      // fails here is a reaper that has silently stopped reaping.
+      log.warn("worktree reaper couldn't ask the tracker", { ticket: key, err: String(err) });
+      return undefined;
+    }
+  },
+});
 
 // Retained session history, on the tiers that keep any (DRY-56). `store.history`
 // is undefined on the file store, which makes every call below a no-op — the
@@ -960,6 +1003,13 @@ const server = http.createServer(async (req, res) => {
     // Prune a worktree on demand (DRY-15 cleanup policy). Worktrees are kept on
     // session close; this is the explicit removal path — e.g. the panel's "Reset"
     // when reusing a stale worktree. The branch is left for the human to merge.
+    //
+    // Refuses by default since DRY-90: `removeWorktree` used to pass `--force`
+    // unconditionally, so this route was "delete it whatever it holds" and the
+    // only thing standing between a stale worktree and its uncommitted contents
+    // was that nothing automatic ever called it. A 409 carries the safety report
+    // so the panel can say what would be lost; `force: true` is the human having
+    // read that and meant it.
     if (pathname === "/api/worktrees/remove" && req.method === "POST") {
       const body = await readJson(req);
       const repoDir =
@@ -972,11 +1022,48 @@ const server = http.createServer(async (req, res) => {
         return send(res, 400, { error: "repo (or cwd) and worktree are required" });
       }
       try {
-        removeWorktree(repoDir, body.worktree);
+        removeWorktree(repoDir, body.worktree, { force: body.force === true });
         return send(res, 200, { ok: true });
       } catch (err) {
+        if (err instanceof WorktreeNotSafe) {
+          return send(res, 409, { error: err.message, safety: err.safety });
+        }
         return send(res, 500, { error: `worktree remove: ${String(err)}` });
       }
+    }
+
+    // Consider ONE worktree against the reaper's policy and remove it if it
+    // passes (DRY-90) — the explicit trigger, for a window somebody closed.
+    //
+    // It applies exactly the policy the scheduled sweep does, which is the
+    // point: a close is a trigger for evaluating the predicate, never a way
+    // round it. So a dirty or unmerged worktree comes back `removed: false`
+    // with a reason, and the caller says nothing rather than prompting about
+    // something that would be refused anyway.
+    //
+    // Scoped to worktrees the daemon manages — `describeManagedWorktree` refuses
+    // anything whose parent directory isn't DRYDOCK_WORKTREES_ROOT. The route
+    // above will act on any path it is given, as it always has; this one, being
+    // the one a client calls without a human reading a confirmation first,
+    // deliberately cannot.
+    if (pathname === "/api/worktrees/reap" && req.method === "POST") {
+      const body = await readJson(req);
+      if (typeof body.worktree !== "string") {
+        return send(res, 400, { error: "worktree is required" });
+      }
+      const managed = describeManagedWorktree(body.worktree);
+      if (!managed) {
+        return send(res, 404, { error: `${body.worktree} is not a drydock-managed worktree` });
+      }
+      const decision = await reaper.reapOne(managed);
+      return send(res, 200, {
+        removed: decision.verdict === "reaped",
+        verdict: decision.verdict,
+        reason: decision.reason,
+        worktree: managed.path,
+        branch: managed.branch,
+        ticket: managed.ticket,
+      });
     }
 
     const killMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/kill$/);
@@ -1659,4 +1746,10 @@ server.listen(CONFIG.port, CONFIG.host, () => {
       fix: "set DRYDOCK_AUTH_PASSWORD, or bind DRYDOCK_HOST=127.0.0.1",
     });
   }
+  // Look for finished worktrees (DRY-90). AFTER the port is bound and never
+  // awaited: it walks git repos, and the reason `manager.reconcile()` above sits
+  // where it does is that nothing may delay a daemon answering for its sessions.
+  // Boot is the trigger that matters — a merge lands while the daemon is down
+  // far more often than while it is up.
+  reaper.start();
 });

@@ -414,8 +414,48 @@ export async function resolveRepoCwd(repo: string, ticket?: string): Promise<Rep
   return body;
 }
 
-/** Prune a ticket's worktree on demand (DRY-15). Kept on close, removed here. */
-export async function removeWorktree(opts: { repo: string; worktree: string }): Promise<void> {
+/**
+ * What the daemon found in a worktree it was asked to remove (DRY-90).
+ *
+ * Only interesting when it REFUSED: the removal route answers 409 with this
+ * attached rather than a bare error, because "there are three uncommitted
+ * changes in there" and "there are two commits nobody has pushed" want
+ * different words from whoever is deciding to discard it.
+ */
+export interface WorktreeSafety {
+  clean: boolean;
+  /** Commits the upstream doesn't have; -1 when there is no upstream to compare. */
+  unpushed: number;
+  merged: boolean;
+  defaultBranch?: string;
+  safe: boolean;
+  reason?: string;
+}
+
+/** A removal the daemon refused because the worktree holds something (DRY-90). */
+export class WorktreeNotSafe extends Error {
+  constructor(
+    message: string,
+    readonly safety?: WorktreeSafety,
+  ) {
+    super(message);
+    this.name = "WorktreeNotSafe";
+  }
+}
+
+/**
+ * Prune a ticket's worktree on demand (DRY-15). Kept on close, removed here.
+ *
+ * Refused since DRY-90 when the checkout holds uncommitted or unpushed work —
+ * `force` is the caller having shown the person what that is and been told to
+ * go ahead. Not a flag to pass "just in case": it is the difference between
+ * this and `rm -rf`.
+ */
+export async function removeWorktree(opts: {
+  repo: string;
+  worktree: string;
+  force?: boolean;
+}): Promise<void> {
   const res = await authFetch(`${DAEMON_HTTP}/api/worktrees/remove`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -423,8 +463,44 @@ export async function removeWorktree(opts: { repo: string; worktree: string }): 
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
+    if (res.status === 409) {
+      throw new WorktreeNotSafe(body.error ?? "the worktree holds uncommitted work", body.safety);
+    }
     throw new Error(body.error ?? "failed to remove worktree");
   }
+}
+
+/** What the daemon decided about a worktree it was asked to reap (DRY-90). */
+export interface ReapResult {
+  removed: boolean;
+  /** `reaped` | `in-use` | `unsafe` | `unfinished` | `error`. */
+  verdict: string;
+  reason: string;
+  worktree: string;
+  branch?: string;
+  ticket?: string;
+}
+
+/**
+ * Ask the daemon to reap a worktree IF its work is finished and it holds
+ * nothing unrecoverable (DRY-90).
+ *
+ * The offer half of the reaper: the scheduled sweep would get here eventually,
+ * and closing a window somebody is finished with is a good moment to look. The
+ * daemon applies the whole policy — a session still using it, uncommitted
+ * changes, unpushed commits, a ticket that is still open all come back
+ * `removed: false`, and the caller says nothing. A close is a TRIGGER for the
+ * predicate, never a way past it, which is also why the automatic sweep
+ * (DRY-60) does not call this.
+ */
+export async function reapWorktree(worktree: string): Promise<ReapResult | null> {
+  const res = await authFetch(`${DAEMON_HTTP}/api/worktrees/reap`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ worktree }),
+  });
+  if (!res.ok) return null; // not managed here, or the daemon can't say — no news
+  return (await res.json()) as ReapResult;
 }
 
 /**

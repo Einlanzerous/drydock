@@ -34,6 +34,7 @@ import {
   fetchSessionHistory,
   killSession,
   listSessions,
+  reapWorktree,
   takeOverRun,
   type SessionRecord,
 } from "./lib/daemon.js";
@@ -146,6 +147,19 @@ const ticketZ = ref(0);
 // refresh() on its very next line, in the same task that set it (DRY-51).
 const error = ref<string | null>(null);
 const actionError = ref<string | null>(null);
+
+/**
+ * The same shape as `actionError` — a past event nothing will re-raise, sticky
+ * and dismissible — for an outcome that is not a failure (DRY-90).
+ *
+ * A fourth surface rather than a fifth colour on one of the three. It exists
+ * because the reaper deletes a checkout, and "a directory disappeared and
+ * nothing said so" is indistinguishable from losing work, which is the anxiety
+ * that feature has to not create. It cannot be a `notice`: a notice is a
+ * CONDITION its owner clears when it stops holding, and a removal is over the
+ * moment it happens — nothing would ever take the line down again.
+ */
+const actionNote = ref<string | null>(null);
 
 // Markdown doc viewer (DRY-35): opened by Ctrl/Cmd-clicking a file token in
 // any terminal pane. Like the ticket detail it's a floating non-window (no
@@ -529,6 +543,38 @@ async function endWindow(id: string): Promise<string[] | null> {
     clearing.delete(id);
     // The guard is down; anything already in flight predates it. See deskEpoch.
     deskEpoch++;
+  }
+}
+
+/**
+ * Offer the closed window's worktree back to the daemon (DRY-90).
+ *
+ * Called ONLY from the two paths a person drives — the window ✕ and the rail's
+ * dismiss — and deliberately not from `endWindow`, which DRY-60's automatic
+ * sweep and `Clear finished` also go through. That is the ticket's hard
+ * constraint: the sweep closes windows with nobody present, so a deletion
+ * hanging off it would destroy worktrees overnight.
+ *
+ * It is not a decision, either. The daemon applies the whole reaper policy and
+ * usually says no — a just-finished agent's branch is neither merged nor its
+ * ticket closed — so the common outcome is that nothing happens and nothing is
+ * said. Which is the point: prompting about something that would be refused
+ * anyway is noise, and the only case worth a line is the one where a checkout
+ * actually went away.
+ *
+ * Never awaited by its callers: the window has already gone, and a reap that is
+ * slow (or refused) must not hold up the ✕.
+ */
+async function reapClosedWorktree(worktree: string | undefined): Promise<void> {
+  if (!worktree) return;
+  try {
+    const result = await reapWorktree(worktree);
+    if (!result?.removed) return;
+    actionNote.value =
+      `Removed the finished worktree ${result.worktree} (${result.reason})` +
+      (result.branch ? ` — its branch ${result.branch} is kept.` : ".");
+  } catch {
+    /* the worktree is still there, which is the safe outcome and not news */
   }
 }
 
@@ -1334,10 +1380,18 @@ async function closeWindow(id: string) {
   // there is a poll between the kill landing and the window going, and this path
   // has always had it — long enough for reconcile to answer a deliberate close
   // with a DRY-56 tombstone, or with the file tier's lost-session notice.
+  //
+  // The worktree path is read BEFORE the kill: `endWindow` drops the session from
+  // the daemon's registry synchronously and the reap has to happen after that (a
+  // session in the registry is one of the reasons the daemon refuses), so this
+  // is the last moment the path is knowable (DRY-90).
+  const worktree = sessionsById[id]?.worktree;
   const failed = await endWindow(id);
   if (failed?.length) {
     actionError.value = `Couldn't stop that session — it may still be running: ${failed.join("; ")}`;
+    return;
   }
+  void reapClosedWorktree(worktree);
 }
 
 // --- visible windows + computed rects ---
@@ -1431,6 +1485,7 @@ async function dismissRun(sessionId: string): Promise<void> {
   // endWindow handles the no-window case (an unwatched run has no window to
   // find, so it just kills the session), and brings the `clearing` guard with
   // it — this path raced reconcile exactly as closeWindow did.
+  const worktree = sessionsById[sessionId]?.worktree;
   const failed = await endWindow(sessionId);
   if (failed?.length) {
     // Keep the card: dismissing it is only meaningful once the daemon has
@@ -1438,6 +1493,7 @@ async function dismissRun(sessionId: string): Promise<void> {
     actionError.value = `Couldn't dismiss that run: ${failed.join("; ")}`;
     return;
   }
+  void reapClosedWorktree(worktree);
   await refresh();
 }
 
@@ -1866,6 +1922,13 @@ onBeforeUnmount(stopDesk);
       {{ actionError }}
       <button class="banner-x" title="Dismiss" @click="actionError = null">✕</button>
     </p>
+    <!-- Sticky like the one above and for the same reason, but not a failure:
+         something was removed on your behalf and you get to read about it
+         (DRY-90). -->
+    <p v-if="actionNote" class="note">
+      {{ actionNote }}
+      <button class="banner-x" title="Dismiss" @click="actionNote = null">✕</button>
+    </p>
     <!-- Continuing conditions (DRY-58): something still works, just not the way
          you'd assume. Muted rather than red, and NOT dismissible — whoever
          raised it clears it when it stops being true, so an ✕ would only hide a
@@ -2181,6 +2244,18 @@ onBeforeUnmount(stopDesk);
   font-size: 12.5px;
   border-bottom: 1px solid #5c2b2b;
 }
+/* An action's outcome that isn't a failure (DRY-90). Dismissible like .error —
+   it is a past event, not a condition — but slate-and-green rather than red:
+   the commonest one says a finished worktree was tidied away, which is the
+   thing working rather than the thing breaking. */
+.note {
+  margin: 0;
+  padding: 7px 14px;
+  background: #15211b;
+  color: #b6d8c4;
+  font-size: 12.5px;
+  border-bottom: 1px solid #2c4a39;
+}
 /* Deliberately quieter than .error: amber-on-slate, one line, no dismiss
    affordance. It reports a condition you should know about while you keep
    working — not a fault to go and deal with (DRY-58). */
@@ -2217,6 +2292,11 @@ onBeforeUnmount(stopDesk);
 }
 .banner-x:hover {
   opacity: 1;
+}
+/* The ✕ takes .error's pink from the rule above, which reads as an alert on a
+   line that isn't one. */
+.note .banner-x {
+  color: inherit;
 }
 .body {
   flex: 1;
