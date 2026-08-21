@@ -66,6 +66,15 @@ render_unit() {
   # a tool that silently stops resolving is how this would present), and dedupe:
   # a PATH assembled by nested shells repeats itself, and the unit is read by
   # people.
+  #
+  # The `\n` in the printf feeding this loop is load-bearing. Without it `read`
+  # sets `entry` on the
+  # final field — which has no delimiter after it — and then returns non-zero, so
+  # the body never runs for it and the LAST directory on PATH is dropped.
+  # Silently, too, since the announcement below lives in the body that was
+  # skipped: this change's own bug, arriving through this change. A deploying
+  # shell whose PATH ends in ~/.local/bin, ~/.bun/bin or /snap/bin would have
+  # that directory stop resolving inside every spawned session.
   unit_path=""
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
@@ -79,7 +88,7 @@ render_unit() {
     esac
     case ":$unit_path:" in *":$entry:"*) continue ;; esac
     unit_path="${unit_path:+$unit_path:}$entry"
-  done < <(printf '%s' "$PATH" | tr ':' '\n')
+  done < <(printf '%s\n' "$PATH" | tr ':' '\n')
   case ":$unit_path:" in *":$node_dir:"*) ;; *) unit_path="$node_dir${unit_path:+:$unit_path}" ;; esac
 
   # Substituted with bash expansion rather than sed: these are paths, and `&`,

@@ -108,8 +108,21 @@ function testUnit(unit: string, opts: { killMode: boolean }): string {
     out = out.replace(/^KillMode=process$/m, "# KillMode=process  <- removed by the harness");
   }
   // The real unit deliberately carries no DRYDOCK_* (prod's config lives in its
-  // .env). A throwaway one has no .env to read, so its config is passed here —
-  // which changes nothing about the cgroup behaviour under test.
+  // .env), so a throwaway one passes its config here. None of it touches the
+  // cgroup behaviour under test.
+  //
+  // The empty four are the `env -u` sweep CLAUDE.md prescribes, in the only form
+  // available here. The sibling harnesses have an operator start their daemon
+  // and can tell them to strip the environment; this file starts its own, with
+  // `WorkingDirectory=<repo>/daemon` — so `env.ts` walks up and loads the
+  // CHECKOUT's `.env`, and on any host that has run `bun run db:up` or set a
+  // password the throwaway daemon comes up on the Postgres tier, or demanding
+  // auth, and every unauthenticated fetch below 401s for reasons that have
+  // nothing to do with this ticket. An empty value is what removes them: the
+  // loader skips a `key in process.env` (true for an empty string), and config
+  // reads each of these through `|| undefined`, so empty means unset. Note
+  // SESSIONS_DIR is on this list too by being set above — a `.env` supplying
+  // prod's would have this daemon adopt prod's live agents.
   const extra = [
     `Environment=DRYDOCK_PORT=${PORT}`,
     "Environment=DRYDOCK_HOST=127.0.0.1",
@@ -117,6 +130,10 @@ function testUnit(unit: string, opts: { killMode: boolean }): string {
     `Environment=DRYDOCK_STATE_FILE=${STATE_FILE}`,
     `Environment=DRYDOCK_LOG_FILE=${LOG_FILE}`,
     "Environment=DRYDOCK_TRACKER=fixture",
+    "Environment=DRYDOCK_DATABASE_URL=",
+    "Environment=DRYDOCK_AUTH_PASSWORD=",
+    "Environment=DRYDOCK_AUTH_PASSWORD_HASH=",
+    "Environment=DRYDOCK_MULTI_USER=",
   ].join("\n");
   const patched = out.replace(/^Environment=PATH=.*$/m, (line) => `${line}\n${extra}`);
   if (patched === out) throw new Error("template has no `Environment=PATH=` line to extend");
@@ -332,7 +349,14 @@ async function checkRenderer(): Promise<string> {
   // reachable through the doctored PATH or the renderer cannot run at all.
   const nodeDir = path.dirname(exec);
   const fnmish = "/run/user/1000/fnm_multishells/999999_1787000000000/bin";
-  const doctoredPath = [fnmish, "/tmp/dry87-fake-bin", nodeDir, "/usr/bin", "/bin", "/usr/bin"].join(":");
+  // The duplicate is deliberately NOT last, and something distinctive is. Review
+  // found this file's first version ending in the duplicate `/usr/bin`, and the
+  // renderer dropping every PATH's final entry — so the one directory the dedupe
+  // check watched was the one the bug ate, and `duplicates collapse` passed
+  // whether or not the dedupe existed at all. Two different properties, so they
+  // need two different entries.
+  const last = "/opt/dry87-last-entry";
+  const doctoredPath = [fnmish, "/tmp/dry87-fake-bin", nodeDir, "/usr/bin", "/bin", "/usr/bin", last].join(":");
   const doctored = render({ ...process.env, PATH: doctoredPath });
   const dPath = /^Environment=PATH=(.*)$/m.exec(doctored.out)?.[1] ?? "";
   const entries = dPath.split(":");
@@ -355,6 +379,12 @@ async function checkRenderer(): Promise<string> {
     entries.filter((e) => e === "/usr/bin").length === 1,
     `/usr/bin x${entries.filter((e) => e === "/usr/bin").length}`,
   );
+  // A PATH's LAST entry survives. `read` returns non-zero on a final field with
+  // no delimiter after it, so a loop fed without a trailing newline silently
+  // drops it — and drops it without the announcement above, since that lives in
+  // the body that was skipped. ~/.local/bin, ~/.bun/bin and /snap/bin are all
+  // common last entries, and this PATH is inherited by every spawned session.
+  check("and the last entry is not eaten", entries.includes(last), dPath);
 
   // An ephemeral node itself must REFUSE. A hard link is enough to produce one:
   // /proc/self/exe — which is what node reports as process.execPath — names the
@@ -397,6 +427,18 @@ async function checkRenderer(): Promise<string> {
  * Checked with a stub `systemd-run` on PATH, because the real one would run the
  * real deploy. The guard `exec`s, so the stub replaces the script and nothing
  * past that line ever runs — no clone, no install, no systemctl.
+ *
+ * "Nothing past that line ever runs" is the thing under test, though, so it is
+ * not something this may DEPEND on. If the guard ever stops firing — a reworked
+ * cgroup predicate, a renamed unit, a layout that no longer matches — the rest
+ * of `install-prod.sh` runs for real: it would render over
+ * `$HOME/.config/systemd/user/drydock-daemon.service` and `systemctl --user
+ * restart drydock-daemon.service`, which on the host this is meant to be run
+ * from is a live prod daemon full of other people's agents. And the check that
+ * would report it fires AFTER the damage. So a scratch `HOME` (the installer
+ * uses it for nothing but `PROD_DIR` and `UNIT_DIR`) and a stub `systemctl`
+ * beside the stub `systemd-run`: a guard that doesn't fire then produces a
+ * failed check instead of a deploy.
  */
 function checkRelaunch(): void {
   console.log("\nA deploy launched from inside a Drydock session");
@@ -416,17 +458,28 @@ function checkRelaunch(): void {
   }
   const stubDir = "/tmp/dry87-stub-bin";
   const argvFile = "/tmp/dry87-systemd-run-argv";
+  const systemctlFile = "/tmp/dry87-systemctl-called";
+  const scratchHome = "/tmp/dry87-scratch-home";
   fs.mkdirSync(stubDir, { recursive: true });
+  fs.mkdirSync(scratchHome, { recursive: true });
   fs.rmSync(argvFile, { force: true });
+  fs.rmSync(systemctlFile, { force: true });
   fs.writeFileSync(
     `${stubDir}/systemd-run`,
     `#!/usr/bin/env bash\nprintf '%s\\n' "$@" >${argvFile}\nprintf 'DETACHED=%s\\n' "\${DRYDOCK_DEPLOY_DETACHED:-}" >>${argvFile}\nexit 0\n`,
+    { mode: 0o755 },
+  );
+  // The backstop, not part of the assertion: nothing here should reach it.
+  fs.writeFileSync(
+    `${stubDir}/systemctl`,
+    `#!/usr/bin/env bash\nprintf '%s\\n' "$*" >>${systemctlFile}\nexit 0\n`,
     { mode: 0o755 },
   );
   const deployPath = [stubDir, process.env.PATH ?? ""].join(":");
   const r = sh("bash", [INSTALLER, "some-ref"], {
     ...process.env,
     PATH: deployPath,
+    HOME: scratchHome,
     DRYDOCK_PROD_DIR: "/tmp/dry87-prod-dir-that-is-never-touched",
   });
   const argv = fs.existsSync(argvFile) ? fs.readFileSync(argvFile, "utf8").split("\n") : [];
@@ -446,7 +499,22 @@ function checkRelaunch(): void {
   // The args have to survive the hop, or `install-prod.sh v0.1.0` deploys main.
   check("passes the ref through", argv.includes("some-ref"), argv.join(" ").slice(0, 200));
   check("and nothing past the exec ran", !fs.existsSync("/tmp/dry87-prod-dir-that-is-never-touched"));
+  // Reported separately from the line above, because these are what a guard that
+  // failed to fire would have done to the HOST rather than to the scratch dir —
+  // and they say so having been caught by a stub instead of by a daemon that is
+  // no longer running.
+  check(
+    "and no unit was rendered",
+    !fs.existsSync(path.join(scratchHome, ".config/systemd/user/drydock-daemon.service")),
+  );
+  check(
+    "and no daemon was restarted",
+    !fs.existsSync(systemctlFile),
+    fs.existsSync(systemctlFile) ? fs.readFileSync(systemctlFile, "utf8").trim() : "",
+  );
   fs.rmSync(stubDir, { recursive: true, force: true });
+  fs.rmSync(scratchHome, { recursive: true, force: true });
+  fs.rmSync(systemctlFile, { force: true });
   fs.rmSync(argvFile, { force: true });
 }
 

@@ -750,6 +750,19 @@ its MCP server, and an `amber serve` from a worktree. `KillMode=process` in
    dropped — that is where the toolchain lives, so dropping it would take
    `npm`/`corepack` with it — and anything else ephemeral is dropped with a line
    saying so.
+   - **The loop that does it is fed `printf '%s\n'`, and the `\n` is the whole
+     thing.** Without it `read` sets `entry` on the final field — which has no
+     delimiter after it — and then returns non-zero, so the body never runs and
+     the LAST directory on PATH is dropped. Silently, because the announcement
+     lives in the body that was skipped. This shipped in the first version of
+     the fix and review caught it: `~/.local/bin`, `~/.bun/bin` and `/snap/bin`
+     are all common last entries, so it was this section's own bug, arriving
+     through the change that adds this section. The harness now ends its
+     doctored PATH with something distinctive and asserts it survives — and note
+     WHY it missed the first time: that PATH ended in the duplicate `/usr/bin`,
+     so the entry the bug ate was the one the dedupe check watched, and
+     `duplicates collapse` passed whether or not any dedupe existed. **Two
+     properties need two entries.**
 7. **A deploy is run from inside the cgroup it restarts**, because a Drydock
    session is the obvious place to run one from. `install-prod.sh` re-execs
    itself under `systemd-run --user` when it finds `drydock-daemon.service` in
@@ -778,7 +791,7 @@ Harness: `scripts/verify/prod-restart.mts`, rig in its README — it owns a
 throwaway systemd unit, needs no browser or database, and takes about thirty
 seconds. Its control case runs every time and asserts the OLD behaviour still
 kills supervisors; confirm it discriminates by commenting out `KillMode=process`
-in the template, against which it fails 8 of 37. Note what still passes in that
+in the template, against which it fails 8 of 40. Note what still passes in that
 run: the daemon is up, healthy and answering with every agent on the host
 destroyed. That is why this needed a harness and not a curl, and why it hid
 behind a "healthy on :4318" line for the whole of DRY-19 to DRY-87.

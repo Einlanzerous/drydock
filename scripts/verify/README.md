@@ -1000,13 +1000,25 @@ the one line commented out and asserts the supervisors are **killed**. A run
 where that case reports "survived" means this file has stopped testing anything.
 
 To see the whole thing fail the way the bug did, comment out `KillMode=process`
-in `deploy/drydock-daemon.service` and run it again: **8 of 37** fail, measured
+in `deploy/drydock-daemon.service` and run it again: **8 of 40** fail, measured
 rather than counted by hand. One is the renderer's own check that the line is
 there at all; the other seven are the deploy section, out of its thirteen — the
 reloaded KillMode, the supervisors, the re-adoption, the log line, the re-attach,
 the scrollback and the driveable PTY. Everything else still passes, which is the
 point: a deploy that has just destroyed every live agent leaves a daemon that is
 up, healthy and answering — that is why this needed a harness and not a curl.
+
+Two things this file does for its own safety, both worth keeping if it is
+reworked. Its throwaway unit pins `DRYDOCK_DATABASE_URL`, `DRYDOCK_AUTH_PASSWORD`
+`_HASH` and `DRYDOCK_MULTI_USER` **empty** — it starts its own daemon with
+`WorkingDirectory=<repo>/daemon`, so `env.ts` walks up and loads the checkout's
+`.env`, and on a host that has run `bun run db:up` the daemon would come up on
+the Postgres tier and 401 every fetch here. That is CLAUDE.md's `env -u` sweep in
+the only form available to a unit file. And the relaunch check runs the real
+installer with a scratch `HOME` and a stub `systemctl` alongside the stub
+`systemd-run`: it depends on the guard `exec`ing before anything else runs, which
+is the very thing under test, so a guard that stops firing has to produce a
+failed check rather than a real deploy over the host's prod unit.
 
 One check **skips** rather than fails when this is run from a plain terminal —
 the relaunch guard, whose predicate is "am I inside the drydock-daemon cgroup".
