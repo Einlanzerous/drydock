@@ -28,7 +28,9 @@ The script maintains a separate checkout at `~/.drydock/prod` (override:
 real node-gyp), renders `deploy/drydock-daemon.service` into
 `~/.config/systemd/user/`, restarts the unit, and health-checks
 `:4318/api/sessions`. Rerun it to deploy a new ref — that's the whole update
-story.
+story. **A deploy no longer kills the agents that are running** — see
+[below](#a-deploy-does-not-kill-the-running-agents-dry-87), which is also where
+to look if prod won't start after a reboot.
 
 First run seeds `~/.drydock/prod/.env` from `.env.example` with
 `DRYDOCK_PORT=4318`; put the real `DRYDOCK_SWITCHYARD_TOKEN` and any
@@ -70,6 +72,79 @@ Prefer the file when working out why sessions died: it survives restarts of both
 the daemon and journald, and the last line before a gap names the sessions that
 went with it. Override with `DRYDOCK_LOG_FILE` in `~/.drydock/prod/.env`.
 
+### A deploy does not kill the running agents (DRY-87)
+
+It used to, every time. The unit set no `KillMode`, so systemd's default
+`control-group` applied and the `systemctl --user restart` at the end of a deploy
+SIGTERMed **every process in the unit's cgroup** — the detached supervisors along
+with the daemon, and every `claude`, login shell and MCP server under them.
+`setsid` gives a process its own session, not its own cgroup, so DRY-57's
+durability was real and the deploy went round it. The unit now sets
+`KillMode=process`: the signal goes to the daemon alone, the supervisors keep
+holding their PTYs, and the daemon that comes back re-adopts them.
+
+What that means in practice, and its limits:
+
+- **Deploying mid-run is now an ordinary thing to do.** Agents keep working, and
+  the pane reconnects on its own. An in-flight permission gate is still re-raised
+  rather than preserved (the hook curl retries), and the rail's action line
+  resets — so it is not literally free, just no longer destructive.
+- **A few journal lines per deploy are expected**: `Unit process N remains
+  running after unit stopped`. Those are the supervisors. They are the point.
+- **`systemctl --user stop` is not `restart`.** Stopping leaves the supervisors
+  running with nothing to adopt them until the unit starts again. That is the
+  right behaviour — it is what makes a deploy safe — but a host being shut down
+  for real wants the agents stopped first, not orphaned.
+- Verified rather than reasoned about: `scripts/verify/prod-restart.mts` deploys
+  over a live session on a throwaway unit and asserts the agent never noticed,
+  with a control that puts the old behaviour back and asserts the opposite.
+
+### Deploying from inside a Drydock session
+
+Which is the obvious place to deploy from, since the sessions are right there.
+The deploying shell is itself in the cgroup being restarted, so before this it
+died partway through its own deploy — after the daemon restarted, before anything
+that follows it ran, and with no error, because the shell was signalled rather
+than failed.
+
+`install-prod.sh` now detects this (it reads its own `/proc/self/cgroup`) and
+re-execs itself under `systemd-run --user`, which gives it a cgroup of its own.
+It still looks like an ordinary foreground command — same output, same exit
+status — and prints one line saying it did so. Nothing to remember, and nothing
+to arrange when deploying an OLD ref, which is the case that still needs it: the
+unit installed comes from the ref being deployed, so `install-prod.sh v0.1.0`
+puts a pre-DRY-87 unit in place and restarts under it.
+
+### If prod won't start after a reboot: the node path
+
+The unit pins an absolute path to `node`, and `install-prod.sh` used to render
+whatever `command -v node` answered in the deploying shell. Under fnm that is
+`/run/user/1000/fnm_multishells/<pid>_<ts>/bin/node` — a directory created for
+that one shell and reaped with it. The unit on this host was pinned to a shell
+that had exited days earlier and survived only because nothing had cleaned the
+directory up yet; the next reboot would have left prod unable to start, with a
+deploy log from days before saying it was healthy.
+
+The path is now resolved through `/proc/self/exe` (node's own `process.execPath`)
+to the version's real installation directory, and a path under `/run`, `/tmp` or
+`/dev/shm` is refused rather than rendered. `Environment=PATH` gets the same
+treatment, and it matters more: every spawned agent and shell inherits it, so a
+deploy from an odd shell used to change what `claude`, `git` or `bun` resolve to
+inside every session, silently. An fnm directory there is mapped onto the
+resolved node's directory rather than dropped, since that is where the toolchain
+lives; anything else ephemeral is dropped, and the drop is announced.
+
+To see what this host would install, without installing it:
+
+```sh
+DRYDOCK_DEPLOY_PRINT_UNIT=1 deploy/install-prod.sh    # prints the unit, exits
+```
+
+Note the version is pinned deliberately, alias and all: node-pty is compiled
+against this Node's ABI at install time, so a host that moves its default node
+underneath prod should get a rebuild — rerun the script — rather than a segfault
+on the first PTY spawn.
+
 ## Who may use it (DRY-27)
 
 The prod daemon binds `0.0.0.0:4318` and spawns commands as you. With no
@@ -90,8 +165,9 @@ DRYDOCK_AUTH_PASSWORD_HASH=scrypt$16384$8$1$...
 # DRYDOCK_AUTH_USER=owner                     # the login name; defaults to `owner`
 ```
 
-Restarting prod costs live sessions a reattach, not their lives (DRY-57) — but
-an in-flight gate's rail line resets, so do it when nothing is mid-run.
+Restarting prod costs live sessions a reattach, not their lives (DRY-57, and
+DRY-87 for the deploy path specifically) — but an in-flight gate's rail line
+resets, so prefer a moment when nothing is mid-run.
 
 The signing key lands in `~/.drydock/auth-key-4318` on first use and is what
 makes a restart (or a deploy, or a crash under `Restart=always`) not sign

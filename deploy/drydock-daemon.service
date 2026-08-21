@@ -42,8 +42,38 @@ WorkingDirectory=__APP_DIR__/daemon
 ExecStart=__NODE__ --import tsx src/index.ts
 Restart=always
 RestartSec=2
+# THE ONE LINE THAT MAKES DRY-57 TRUE OF A DEPLOY (DRY-87).
+#
+# systemd's default is KillMode=control-group: a stop or restart SIGTERMs every
+# process in the unit's cgroup. The supervisors are in there — `setsid` gives a
+# process its own session, not its own cgroup, and cgroup membership is
+# inherited across fork — and so is everything they spawned: `claude`, the
+# login shells, their MCP servers. `install-prod.sh` ends in `systemctl --user
+# restart`, so under the default EVERY deploy killed every live agent, which is
+# the exact thing DRY-57 exists to prevent. It presented as a caveat about
+# unlucky timing rather than as what happens every single time.
+#
+# `process` signals the main process only. The supervisors are left holding
+# their PTYs for the daemon that comes back to re-adopt them, which is the whole
+# design: the daemon is a client of its own sessions.
+#
+# NOT `mixed`, which is the tempting middle: it still SIGKILLs the whole cgroup
+# once TimeoutStopSec expires, so it costs exactly the agent that is slow to
+# exit — the one most likely to be mid-task.
+#
+# Measured on systemd 255 before trusting the deploy story: with the unit ALREADY
+# RUNNING under the old default, rendering this line and running `daemon-reload`
+# applies it to the running unit, so the `restart` that follows in install-prod.sh
+# already spares the supervisors. The deploy that ships this fix is the first one
+# to benefit from it; there is no one-time amnesty to arrange. The cost is a few
+# journal lines per deploy — "Unit process N remains running after unit stopped"
+# — which are the supervisors, and are the point.
+KillMode=process
 # Spawned agents and shells inherit this environment; keep the installing
 # user's real PATH so `claude`, git, bun, etc. resolve as in a login shell.
+# install-prod.sh sanitises it first: an entry under /run/user belongs to the
+# shell that ran the deploy and is reaped with it (DRY-87), and this PATH is
+# what `claude`, `git` and `bun` resolve through inside every session.
 Environment=PATH=__PATH__
 
 [Install]
