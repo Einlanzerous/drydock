@@ -46,6 +46,10 @@ Three groups:
   daemon, no browser, seconds. Run it when touching `daemon/src/spawn-env.ts`,
   the spawn route's body handling, or `INHERITED_SESSION_MARKERS` — the last of
   which now has two readers, since the route refuses what the supervisor strips.
+- **A prod deploy keeps the sessions (DRY-87)** —
+  [its own section](#a-prod-deploy-keeps-the-sessions-dry-87). Owns its own
+  systemd unit; no browser, about thirty seconds. Run it when touching
+  `deploy/drydock-daemon.service` or `deploy/install-prod.sh`.
 - **A session's first output (DRY-79)** —
   [its own section](#a-sessions-first-output-dry-79). A throwaway daemon, no
   browser, under a minute. Run it when touching `PtySession.spawn` / `adopt` /
@@ -950,6 +954,65 @@ the rest of the session with it, once` and the bulk case's byte total exercise
 the live path, which was never broken — they are the context that makes the
 failures beside them mean "the replay was dropped" rather than "the socket is
 broken".
+
+## A prod deploy keeps the sessions (DRY-87)
+
+The only harness here that owns its own systemd unit, and the only one whose
+subject is `deploy/`. It renders a throwaway unit from the REAL template through
+the REAL renderer, runs a daemon under it, and deploys over the top of a live
+session. No browser, no database, no second terminal, about thirty seconds.
+
+```sh
+(cd daemon && node --import tsx ../scripts/verify/prod-restart.mts)
+```
+
+Run it when touching `deploy/drydock-daemon.service` or `deploy/install-prod.sh`.
+It needs a systemd **user** manager (`systemctl --user` must answer) and takes
+`:4387` plus `/tmp/dry87*`; it cleans up its unit, its sessions dir and its
+supervisors on the way out, including after a failure.
+
+Two claims, neither of which a curl can see:
+
+- **`KillMode=process` spares the supervisors.** Nothing in the API changes, so
+  the only evidence is a pid still there afterwards and an agent that never
+  noticed. Under the default `control-group` a `systemctl restart` SIGTERMs the
+  whole cgroup — supervisors, `claude`, login shells, MCP servers — and
+  `install-prod.sh` ends in exactly that command, so **every** deploy did it.
+- **A changed `KillMode` applies to an already-RUNNING unit on `daemon-reload`.**
+  The "the deploy that ships the fix is the first one to benefit" story rests on
+  this entirely, and it is the kind of systemd detail that is easy to assert and
+  wrong. So the file reproduces install-prod.sh's order — start under the OLD
+  unit, spawn a session, render, `daemon-reload`, `restart` — rather than
+  starting with the fix already in place, which would test a much weaker claim.
+
+**Why it renders through `install-prod.sh` rather than substituting the template
+itself:** the fragile values are resolved from the deploying shell's own
+environment, so a copy of that logic here would verify the copy. Hence
+`DRYDOCK_DEPLOY_PRINT_UNIT=1`, which is a mode of the installer — it prints the
+unit this host would get and exits, touching nothing, and is worth knowing about
+on its own the next time prod won't start.
+
+### Making sure this one still discriminates
+
+The control case at the end is the discrimination check, and it runs on every
+invocation rather than being something to arrange: it installs the same unit with
+the one line commented out and asserts the supervisors are **killed**. A run
+where that case reports "survived" means this file has stopped testing anything.
+
+To see the whole thing fail the way the bug did, comment out `KillMode=process`
+in `deploy/drydock-daemon.service` and run it again: **8 of 37** fail, measured
+rather than counted by hand. One is the renderer's own check that the line is
+there at all; the other seven are the deploy section, out of its thirteen — the
+reloaded KillMode, the supervisors, the re-adoption, the log line, the re-attach,
+the scrollback and the driveable PTY. Everything else still passes, which is the
+point: a deploy that has just destroyed every live agent leaves a daemon that is
+up, healthy and answering — that is why this needed a harness and not a curl.
+
+One check **skips** rather than fails when this is run from a plain terminal —
+the relaunch guard, whose predicate is "am I inside the drydock-daemon cgroup".
+There is no honest way to fake that from inside the harness, so run this file
+from a Drydock session (which is where somebody deploys from, and the entire
+reason the guard exists) to see it.
 
 ## Workspace store: why a proxy and not `docker stop`
 
