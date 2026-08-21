@@ -21,6 +21,14 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Build the commit the revision label below claims (DRY-91). On a
+          # push these already agree; on workflow_dispatch `github.sha` is the
+          # branch tip resolved when the run was dispatched, so a push landing
+          # in between would leave the image built from one commit and stamped
+          # with another. A revision that can be wrong is worse than none —
+          # the whole point of preferring it to a digest is that it doesn't lie.
+          ref: ${{ github.sha }}
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -35,5 +43,37 @@ jobs:
           tags: |
             ghcr.io/einlanzerous/drydock/shell:latest
             ghcr.io/einlanzerous/drydock/shell:${{ github.sha }}
+          # OCI provenance (DRY-91). Switchyard's delivery matrix identifies a
+          # service either by asking it over HTTP or by inspecting its
+          # container's labels, and the daemon's HTTP surface isn't in this
+          # image — so for drydock-shell these labels are not one route among
+          # several, they are the only one. Without them it is the single
+          # first-party image that cannot appear in the matrix truthfully.
+          #
+          # `revision` is the load-bearing half. This workflow can build the
+          # same source twice seconds apart — the push to main and the
+          # release-please merge that follows it both touch package.json — so
+          # two digests routinely carry one commit, and comparing digests
+          # invents drift that does not exist (SERV-88). The commit is what
+          # makes "is this the same code" answerable.
+          #
+          # `version` is deliberately ABSENT, not forgotten. Nothing here has a
+          # semver to state: the images are tagged :latest and :<sha> and pinned
+          # by sha in construct-server's compose (DRYDOCK_TAG), and package.json
+          # carries the LAST released version at every commit on main — so
+          # filling the field from it would have every between-releases build
+          # claim to be a release it isn't. An absent version reads as an honest
+          # `unknown` beside a real revision, which is the trade the matrix
+          # wants; a confident wrong one is the failure mode it exists to avoid.
+          #
+          # Set through the action's `labels:` rather than ARG/LABEL in the
+          # Dockerfile on purpose. These change every build, and an ARG that
+          # changes every build invalidates every layer beneath it; labels are
+          # image config, so they cost no cache wherever they sit. It also keeps
+          # a plain local `docker build` honestly label-less instead of baking
+          # in a default that would go stale and be believed.
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/Einlanzerous/drydock
           cache-from: type=gha
           cache-to: type=gha,mode=max
