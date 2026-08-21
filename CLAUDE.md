@@ -796,6 +796,70 @@ run: the daemon is up, healthy and answering with every agent on the host
 destroyed. That is why this needed a harness and not a curl, and why it hid
 behind a "healthy on :4318" line for the whole of DRY-19 to DRY-87.
 
+## A deploy that worked says so (DRY-81)
+
+`install-prod.sh` ends by polling the daemon it has just restarted, and that
+poll was `curl -fsS "http://127.0.0.1:$PORT/api/sessions"`. `-f` exits non-zero
+on 4xx — so from the moment DRY-27 was configured, the route's **correct** 401
+to an anonymous caller read as "daemon not answering on :4318 — check:
+journalctl", and the script exited 1 over a daemon that was up and serving. The
+probe now reads the status code and treats 200 and 401 alike.
+
+The cost was never the wrong sentence. The exit status propagates, so anything
+wrapping the script — a deploy step, a `set -e` caller — treated every
+successful deploy as a failure; and the sentence sends somebody to go poking at
+a prod daemon holding live agent PTYs, which is the one thing docs/deploy.md
+tells them not to do. It only appears on a host that has turned auth ON, and
+the FIRST install is clean because auth isn't configured yet — so it arrives
+with the second deploy, on the host where a deploy is least casual.
+
+1. **`/healthz` is the tempting fix and the wrong one.** It is unauthenticated,
+   which is exactly the appeal, but it awaits `store.health()` and can block for
+   the pool's connect timeout when a configured Postgres is down — its own
+   comment in `server.ts` names this script as the reason nothing on the deploy
+   path waits on it. Swapping to it trades a false failure under auth for a slow
+   one under a database outage, and the daemon serves sessions fine in both.
+   `/api/auth/info` is thin and anonymous but answers before the session
+   registry is meaningfully up, which is most of what the probe is for.
+2. **200 and 401, not "any HTTP response".** The overcorrection cures this
+   ticket and then reports a healthy deploy while prod is down behind a proxy:
+   502/503/504 is precisely what a reverse proxy with a dead upstream answers.
+   The pair is exhaustive over this daemon's postures — anonymously
+   `/api/sessions` is 200 with auth off and 401 with it on under `single` AND
+   `multi`, because `Auth.identify` short-circuits on a missing credential
+   before it reads the accounts store, so the 503 a store outage produces for a
+   TOKEN-bearing caller is not reachable here. Check that if the route's
+   anonymous answer ever moves; the harness asserts it directly rather than
+   assuming it.
+3. **`-f` is no longer what would reproduce it.** With `-w '%{http_code}'` the
+   flag still prints 401 and merely exits 22 (measured, curl 8.5.0), which the
+   `|| true` swallows. What would bring the bug back is the old IDIOM — `if curl
+   -fsS …; then` — so the guard against it is a style check, and the
+   behavioural guard is a live 401 from a real daemon.
+4. **The probe had no timeout, and that is a second bug in the same two lines.**
+   A listener that accepts and never answers (a wedged event loop, a stale nginx
+   in front of prod) hung the deploy forever with nothing on stdout. `-m 5`
+   bounds an attempt.
+5. **`prod_port` needs its `|| true`.** The script runs under `set -eo
+   pipefail`, and both a missing `.env` and a `.env` with no `DRYDOCK_PORT` line
+   make that pipeline non-zero — which took the whole script down at the last
+   step rather than falling back to the default. Inherited from the inline
+   version; only reachable on a hand-edited prod `.env`, which is the file
+   people hand-edit.
+6. **One probe, called twice** — same reasoning as DRY-87's one renderer.
+   `DRYDOCK_DEPLOY_PROBE=1 deploy/install-prod.sh` runs it against this host's
+   configured daemon and exits, touching nothing, which is both what the harness
+   drives and a question worth being able to ask ("would this host's deploy call
+   its daemon healthy?"). A harness with its own copy of the curl would verify
+   the copy.
+
+Harness: `scripts/verify/deploy-probe.mts`, rig in its README — two daemons it
+starts itself, no browser, no systemd, about a minute. Its control runs the
+literal old command against the auth-on daemon and requires it to fail, so a
+posture that stopped being auth-on can't pass this file. Confirm it
+discriminates with any of three mutations: accept only 200 (**3 of 22**), accept
+any HTTP response (**4 of 22**), drop `-m 5` (**2 of 22**).
+
 ## A session's first output (DRY-79)
 
 Everything a PTY printed between starting and its pane attaching used to be

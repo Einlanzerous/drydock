@@ -50,6 +50,12 @@ Three groups:
   [its own section](#a-prod-deploy-keeps-the-sessions-dry-87). Owns its own
   systemd unit; no browser, about thirty seconds. Run it when touching
   `deploy/drydock-daemon.service` or `deploy/install-prod.sh`.
+- **The deploy's health check (DRY-81)** —
+  [its own section](#the-deploys-health-check-dry-81). Two throwaway daemons it
+  starts itself; no browser, no systemd, about a minute. Run it when touching
+  the tail of `deploy/install-prod.sh`, and **whenever `/api/sessions` changes
+  what it answers an anonymous caller** — that status code is the whole premise,
+  and this file asserts it directly rather than assuming it.
 - **A session's first output (DRY-79)** —
   [its own section](#a-sessions-first-output-dry-79). A throwaway daemon, no
   browser, under a minute. Run it when touching `PtySession.spawn` / `adopt` /
@@ -1161,6 +1167,71 @@ the relaunch guard, whose predicate is "am I inside the drydock-daemon cgroup".
 There is no honest way to fake that from inside the harness, so run this file
 from a Drydock session (which is where somebody deploys from, and the entire
 reason the guard exists) to see it.
+
+## The deploy's health check (DRY-81)
+
+`install-prod.sh` ends by polling the daemon it just restarted, and that poll
+was `curl -fsS .../api/sessions`. `-f` exits non-zero on 4xx, so on a host with
+`DRYDOCK_AUTH_PASSWORD` set the route's **correct** 401 to an anonymous caller
+read as "daemon not answering": every deploy printed an error naming
+`journalctl`, and exited 1, over a daemon that was up and serving. The first
+install is clean because auth isn't configured yet — the bug arrives with the
+second deploy.
+
+```sh
+node --import tsx scripts/verify/deploy-probe.mts
+```
+
+No browser, no database, no systemd, no second terminal: this file starts its
+own daemons in both auth postures. It takes `:4381` (`PORT=` to move it), one
+ephemeral port and `/tmp/dry81*`, and cleans up after a failure too. About a
+minute, most of it the probes that are supposed to wait.
+
+**What it drives:** `DRYDOCK_DEPLOY_PROBE=1 deploy/install-prod.sh`, a mode of
+the real script that resolves the port from the prod `.env`, runs the real
+probe, and exits having touched nothing. Same argument as DRY-87's
+`DRYDOCK_DEPLOY_PRINT_UNIT`: a harness with its own copy of the curl would be
+verifying the copy. It is worth knowing about on its own — "would this host's
+deploy call its daemon healthy?" is now a question you can ask without deploying.
+
+Four claims, and the middle two are the ones a naive fix gets wrong:
+
+- **A 401 means the daemon is up.** The posture is a real daemon with a real
+  password, and its anonymous status code is asserted **before** the probe runs
+  against it. The control beside it runs the literal old command (`curl -fsS`)
+  against the same daemon and requires it to FAIL — without that, the check
+  below it could pass because auth wasn't actually on.
+- **Anything else on the port does not.** "Any HTTP response means it's up"
+  cures the ticket and then reports a healthy deploy while prod is down behind a
+  proxy — 502/503/504 is exactly what a reverse proxy with a dead upstream
+  answers. Squatters answering 404 and 503 must both fail, naming what they saw.
+- **The probe cannot hang the deploy.** It had no timeout at all, so a listener
+  that accepts and never answers waited forever with nothing on stdout. A
+  black-hole listener must give up, and the assertion is on wall-clock.
+- **The probed path is the deploy's path.** Static reads of the script: one
+  curl, no `-f`, and the deploy tail calling `probe_daemon`. They exist to catch
+  a second, differently-spelled curl being added to the tail — which is the
+  shape this bug had.
+
+### Making sure this one still discriminates
+
+Three mutations of `probe_daemon`, all measured, and they fail in three
+different sections — which is why there are three:
+
+| mutation | fails |
+|---|---|
+| accept only `200` (the ticket's bug) | **3 of 22**, all in "auth on" |
+| accept any HTTP response (the overcorrection) | **4 of 22**, every squatter check |
+| drop `-m 5` from the curl (unbounded) | **2 of 22**, the black-hole pair |
+
+Two notes for anyone reworking it. Its servers live in this process, so the
+probe runs with `spawn` and not `spawnSync` — `spawnSync` blocks the event loop,
+and under it every squatter accepted curl's connection into the kernel backlog
+and answered nothing, so all four squatter checks passed while testing the
+black-hole path a second time. And the free port for the "it reads the `.env`"
+case is asked of the kernel rather than computed as `PORT + 1`: this host runs
+several agents at once, each with a throwaway daemon in the 43xx range, and that
+check first went green against somebody else's.
 
 ## The agent's pre-filled prompt (DRY-88)
 

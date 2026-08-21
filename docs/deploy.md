@@ -27,8 +27,11 @@ The script maintains a separate checkout at `~/.drydock/prod` (override:
 `DRYDOCK_PROD_DIR`), runs `bun install` (postinstall compiles node-pty with
 real node-gyp), renders `deploy/drydock-daemon.service` into
 `~/.config/systemd/user/`, restarts the unit, and health-checks
-`:4318/api/sessions`. Rerun it to deploy a new ref — that's the whole update
-story. **A deploy no longer kills the agents that are running** — see
+`:4318/api/sessions` — treating **401 as a healthy answer**, since that is what
+that route correctly tells an anonymous caller once auth is on (DRY-81; before
+it, every deploy onto an auth-configured host ended by reporting a failure it
+had not caused, and exited 1). Rerun it to deploy a new ref — that's the whole
+update story. **A deploy no longer kills the agents that are running** — see
 [below](#a-deploy-does-not-kill-the-running-agents-dry-87), which is also where
 to look if prod won't start after a reboot.
 
@@ -144,6 +147,22 @@ Note the version is pinned deliberately, alias and all: node-pty is compiled
 against this Node's ABI at install time, so a host that moves its default node
 underneath prod should get a rebuild — rerun the script — rather than a segfault
 on the first PTY spawn.
+
+### If a deploy says the daemon isn't answering
+
+Ask the probe on its own, without deploying anything:
+
+```sh
+DRYDOCK_DEPLOY_PROBE=1 deploy/install-prod.sh   # probes the configured port, exits
+```
+
+It resolves the port from the prod `.env` the same way the deploy does, and
+prints what it saw. `answered HTTP 200` and `answered HTTP 401` are both a
+healthy daemon — the second is auth being on. `no HTTP response` means nothing
+is listening: that is the case for `journalctl --user -u drydock-daemon`. A
+different status code means something is on that port and it is not a Drydock
+daemon, which is a much more specific problem than a dead deploy — check what
+else binds `:4318` before restarting anything.
 
 ## Who may use it (DRY-27)
 

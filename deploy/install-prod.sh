@@ -11,6 +11,7 @@
 #   DRYDOCK_PROD_DIR          override the prod checkout dir
 #   DRYDOCK_PROD_REPO         override the clone source (default: this repo's origin)
 #   DRYDOCK_DEPLOY_PRINT_UNIT print the unit this host would get, and exit (DRY-87)
+#   DRYDOCK_DEPLOY_PROBE      probe the configured daemon, and exit (DRY-81)
 #   DRYDOCK_DEPLOY_DETACHED   set by the script on itself; see the relaunch below
 set -euo pipefail
 
@@ -101,12 +102,96 @@ render_unit() {
   printf '%s\n' "$unit"
 }
 
+# The port this host's prod daemon is configured on.
+#
+# A function for the same reason render_unit is one: the probe mode below has to
+# ask the same question the deploy does, and a second copy of the lookup would
+# be a probe that can check a different daemon than the one just restarted.
+prod_port() {
+  local port
+  # `|| true` because both halves of this can legitimately fail and the script
+  # runs under `set -eo pipefail`: a .env that has not been seeded yet, and a
+  # .env with no DRYDOCK_PORT line in it. Either way the answer is the default,
+  # not an aborted deploy — and the original inline version of this line would
+  # have taken the script down on a hand-edited prod .env.
+  port="$(grep -E '^DRYDOCK_PORT=' "$PROD_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+  printf '%s\n' "${port:-4318}"
+}
+
+# Wait for the daemon to answer on $1. Prints the last HTTP status seen.
+#
+# "Answered" and "authorized" are DIFFERENT QUESTIONS, and conflating them made
+# every deploy onto an auth-configured host report a failure it had not caused
+# (DRY-81). This used to be `curl -fsS .../api/sessions`, and `-f` exits
+# non-zero on 4xx — so once DRYDOCK_AUTH_PASSWORD was set, the route's correct
+# 401 to an anonymous caller read as "daemon not answering", the script exited
+# 1, and anything wrapping it treated a good deploy as a broken one. The daemon
+# was up and serving the whole time. The natural next move on reading that error
+# is to go poking at a prod daemon holding live agent PTYs, which is the real
+# cost.
+#
+# 200 and 401 are exhaustive over this daemon's postures, so the case list stays
+# a test of "is it OUR daemon" rather than degrading into "is anything on this
+# port". Anonymously, /api/sessions answers 200 with auth off and 401 with it on
+# — under `single` AND `multi`, because `Auth.identify` short-circuits on a
+# missing credential (reason "anonymous") before it reads the accounts store, so
+# the 503 that a store outage produces for a TOKEN-bearing caller is not
+# reachable here. Which is worth being strict about: 502/503/504 is exactly what
+# a proxy with a dead upstream answers, and accepting those would trade this
+# ticket's false failure for a deploy that reports success while prod is down.
+#
+# -m bounds an attempt: a daemon can accept a connection and then never answer
+# (a wedged event loop, a stale nginx in front of it), and the old probe had no
+# timeout at all — so that case hung the deploy forever with nothing on stdout.
+probe_daemon() {
+  local port="$1" code=""
+  for _ in 1 2 3 4 5; do
+    sleep 1
+    code="$(curl -s -m 5 -o /dev/null -w '%{http_code}' \
+              "http://127.0.0.1:$port/api/sessions" 2>/dev/null || true)"
+    case "$code" in
+      200|401) printf '%s\n' "$code"; return 0 ;;
+    esac
+  done
+  printf '%s\n' "${code:-000}"
+  return 1
+}
+
+# Say what the probe saw, for the error line. A deploy that ends in a failure it
+# cannot explain sends somebody to `journalctl` on a prod daemon that may be
+# perfectly healthy; "answered HTTP 404" and "no HTTP response" point at
+# completely different problems.
+probe_detail() {
+  case "${1:-}" in
+    000|"") printf 'no HTTP response' ;;
+    200|401) printf 'answered HTTP %s' "$1" ;;
+    *) printf 'answered HTTP %s — something is on this port, but it is not a Drydock daemon' "$1" ;;
+  esac
+}
+
 # Render and stop — no clone, no install, no systemctl. Deliberately ahead of the
 # relaunch below: printing a unit cannot restart anything, so it needs no cgroup
 # of its own.
 if [ -n "${DRYDOCK_DEPLOY_PRINT_UNIT:-}" ]; then
   render_unit
   exit 0
+fi
+
+# Probe the daemon this host is configured to run and stop — no clone, no
+# install, no systemctl, nothing restarted. Same argument as PRINT_UNIT above:
+# the health check is the one thing on this path that has been WRONG (DRY-81),
+# and it depends on a posture (auth on) that a harness reimplementing the curl
+# would only be verifying its own copy of. scripts/verify/deploy-probe.mts drives
+# this mode. Deliberately ahead of the relaunch guard: probing restarts nothing,
+# so it needs no cgroup of its own.
+if [ -n "${DRYDOCK_DEPLOY_PROBE:-}" ]; then
+  probe_port="$(prod_port)"
+  if probe_code="$(probe_daemon "$probe_port")"; then
+    echo "drydock prod daemon answering on :$probe_port ($(probe_detail "$probe_code"))"
+    exit 0
+  fi
+  echo "error: daemon not answering on :$probe_port ($(probe_detail "$probe_code"))" >&2
+  exit 1
 fi
 
 # Deploying from inside a Drydock session means deploying from inside the cgroup
@@ -184,15 +269,11 @@ systemctl --user daemon-reload
 systemctl --user enable drydock-daemon.service >/dev/null 2>&1 || true
 systemctl --user restart drydock-daemon.service
 
-PORT="$(grep -E '^DRYDOCK_PORT=' "$PROD_DIR/.env" | tail -1 | cut -d= -f2)"
-PORT="${PORT:-4318}"
-for _ in 1 2 3 4 5; do
-  sleep 1
-  if curl -fsS "http://127.0.0.1:$PORT/api/sessions" >/dev/null 2>&1; then
-    echo "drydock prod daemon healthy on :$PORT ($(git -C "$PROD_DIR" rev-parse --short HEAD), ref '$REF')"
-    echo "note: to survive logout/reboot, enable lingering once: sudo loginctl enable-linger $USER"
-    exit 0
-  fi
-done
-echo "error: daemon not answering on :$PORT — check: journalctl --user -u drydock-daemon -n 50" >&2
+PORT="$(prod_port)"
+if CODE="$(probe_daemon "$PORT")"; then
+  echo "drydock prod daemon healthy on :$PORT ($(git -C "$PROD_DIR" rev-parse --short HEAD), ref '$REF')"
+  echo "note: to survive logout/reboot, enable lingering once: sudo loginctl enable-linger $USER"
+  exit 0
+fi
+echo "error: daemon not answering on :$PORT ($(probe_detail "$CODE")) — check: journalctl --user -u drydock-daemon -n 50" >&2
 exit 1
