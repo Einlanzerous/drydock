@@ -172,9 +172,12 @@ const UNASSIGNED = " unassigned";
 type FilterKey = "project" | "status" | "assignee" | "epic";
 const FILTER_KEYS: FilterKey[] = ["project", "status", "assignee", "epic"];
 /**
- * Keys a pill may be typed with. `repo` is here because that is what the field
- * is CALLED on a Ticket and what the group headings show; "Project" was only
- * ever the select's label.
+ * Keys a pill may be typed with.
+ *
+ * `repo` is here because that is what the field is CALLED on a Ticket and what
+ * the group headings show; "Project" was only ever the select's label. Accepted
+ * but never OFFERED — the completion list is built from `FILTER_KEYS`, so the
+ * bar suggests one name per filter and takes the other if you know it.
  */
 const KEY_ALIASES: Record<string, FilterKey> = {
   project: "project",
@@ -492,7 +495,13 @@ function parsePill(text: string): Pill | null {
   const opts = choices.value[key];
   const hit =
     opts.find((c) => c.value.toLowerCase() === lower || c.label.toLowerCase() === lower) ??
-    opts.find((c) => c.label.toLowerCase().startsWith(lower));
+    // Prefix on BOTH, for the same reason the exact test checks both: a status
+    // is typed either way round (`status=Blocked`, `status=in_pro`), and
+    // matching only the label makes the value spelling produce an unknown pill
+    // for a status that is right there on screen.
+    opts.find(
+      (c) => c.label.toLowerCase().startsWith(lower) || c.value.toLowerCase().startsWith(lower),
+    );
   return hit ? { key, value: hit.value, label: hit.label } : { key, value: raw, label: raw };
 }
 
