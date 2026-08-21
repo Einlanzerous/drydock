@@ -481,11 +481,11 @@ git show main:shell/src/lib/tracker.ts > shell/src/lib/tracker.ts
 `tracker.ts` is in that list because the deadline on `searchTickets` lives there,
 and it is one of the two things section (f) is for.
 
-Expect **36 failures of 47**. Restore with `git checkout -- shell/` — the
+Expect **36 failures of 50**. Restore with `git checkout -- shell/` — the
 redirects above write the worktree without staging, unlike
 `git checkout <ref> -- path`, which stages the revert.
 
-**Eleven checks pass either way, and they are two different kinds — don't read
+**Fourteen checks pass either way, and they are two different kinds — don't read
 the second as slack.** Some are guards on things that must NOT change: the
 switcher not overlapping the controls (true of the old layout too, which drifted
 without colliding), bare text still filtering the loaded list, the scope chips
@@ -502,6 +502,14 @@ satisfied by a bar that never had one, "not merged into the repo groups" by
 nothing having been found at all, "not seven queries" by a shell that never
 searches, and the wedge probe by anything that rescues the hung request. The
 pinned-row selection check is the sharpest example — see below.
+
+Two of the fourteen are the *other* direction of that rule and were added in the
+same round it was fixed: a ticket-shaped query must still select a ticket, and a
+generic word must claim no pinned row. Neither can fail against `main` (which
+has no pinned rows to claim), but the second is a real latch — `agent` was on
+two of the three rows, so `Ctrl K`, `agent`, `↵` spawned a bare claude in a repo
+where every ticket is about agents. Re-adding any of `agent`, `drawer`, `split`
+or `terminal` fails it.
 
 **The palette's fixture cannot collide by accident, and that hid a real bug for
 two rounds.** None of the five stub titles contains `shell`, `claude`,
@@ -1484,7 +1492,7 @@ git checkout HEAD -- daemon/src/session.ts shell/src/App.vue \
 #   git log --diff-filter=A --format=%h -- scripts/verify/desk-chrome.mts
 git checkout <that commit>~1 -- shell/src/App.vue shell/src/lib/tracker.ts \
   shell/src/components/QuickLaunch.vue shell/src/components/TrackerSidebar.vue
-(cd daemon && node --import tsx ../scripts/verify/desk-chrome.mts)  # expect 36 failures of 47
+(cd daemon && node --import tsx ../scripts/verify/desk-chrome.mts)  # expect 36 failures of 50
 git checkout HEAD -- shell/src/App.vue shell/src/lib/tracker.ts \
   shell/src/components/QuickLaunch.vue shell/src/components/TrackerSidebar.vue
 ```

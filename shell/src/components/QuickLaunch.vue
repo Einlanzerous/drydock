@@ -36,6 +36,16 @@ interface Pinned {
    * working when a fourth is added. Matching the title alone wouldn't do — it
    * is a sentence, so "agent" would pull in the shell row, whose whole
    * distinction is that it has no agent in it.
+   *
+   * **A term must NAME the thing, and be a name nobody would type looking for a
+   * ticket.** `watch(query)` treats a narrowed pinned set as a query aimed at a
+   * pinned row, so a generic word here doesn't just add a row — it takes the
+   * `↵` away from the tickets. `agent` was on two of these three, in a repo
+   * whose every ticket is about agents: `Ctrl K`, `agent`, `↵` spawned a bare
+   * claude instead of opening the ticket somebody was looking for. So `zsh` and
+   * `bash` stay (they are what a shell is CALLED, and nothing else here is one)
+   * and every word that merely described a row — `agent`, `drawer`, `split`,
+   * `terminal` — is gone. The key already covers `claude` and `workspace`.
    */
   terms: string;
   /** Row glyph: one <path> and its stroke, so the markup stays a single v-for. */
@@ -47,7 +57,7 @@ const PINNED: Pinned[] = [
     kind: "shell",
     key: "shell",
     title: "Blank shell session — your login shell, no agent",
-    terms: "shell zsh bash terminal",
+    terms: "zsh bash",
     d: "M3 5l3 3-3 3M8 11h5",
     stroke: "#7a9e6b",
   },
@@ -55,7 +65,7 @@ const PINNED: Pinned[] = [
     kind: "claude",
     key: "claude",
     title: "Bare claude agent — no ticket, no worktree",
-    terms: "claude agent",
+    terms: "",
     d: "M8 2.5v11M3.2 5.2l9.6 5.6M12.8 5.2l-9.6 5.6",
     stroke: "#c08a5e",
   },
@@ -63,7 +73,7 @@ const PINNED: Pinned[] = [
     kind: "workspace",
     key: "workspace",
     title: "Workspace — ticket drawer, an agent and a zsh in one window",
-    terms: "workspace drawer agent zsh split",
+    terms: "",
     d: "M2.5 3.5h11v9h-11zM9 3.5v9",
     stroke: "#8f86c8",
   },

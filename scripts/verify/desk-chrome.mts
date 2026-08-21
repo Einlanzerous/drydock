@@ -338,6 +338,51 @@ console.log("(a) the two spawn buttons are gone, and the palette does their job"
     JSON.stringify(spawns),
   );
 
+  // The other direction, which nothing covered: a ticket-shaped query must still
+  // reach a ticket. The selection rule reads the pinned set, so a term that
+  // narrows it takes `↵` away from the list — which is what a GENERIC word in
+  // `terms` did. `poll` is in two loaded titles and in nothing pinned.
+  await ensurePalette(page);
+  await page.fill(".palette .search input", "poll");
+  await sleep(250);
+  const ticketward = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll(".palette .row")];
+    const active = rows.findIndex((r) => r.classList.contains("active"));
+    return {
+      activeIsPinned: active >= 0 && rows[active].classList.contains("pinrow"),
+      pinned: rows.filter((r) => r.classList.contains("pinrow")).length,
+      tickets: rows.filter((r) => !r.classList.contains("pinrow")).length,
+    };
+  });
+  check(
+    "a ticket-shaped query still selects a ticket",
+    !ticketward.activeIsPinned && ticketward.pinned === 0 && ticketward.tickets > 0,
+    JSON.stringify(ticketward),
+  );
+  spawns.length = 0;
+  await page.keyboard.press("Enter");
+  await sleep(700);
+  check("and ↵ opens it rather than spawning", spawns.length === 0, JSON.stringify(spawns));
+
+  // The decision that keeps the rule above honest, asserted rather than left in
+  // a comment: a pinned row's `terms` may only NAME the thing. `agent` was on
+  // two of three in a repo where every ticket is about agents, so `Ctrl K`,
+  // `agent`, `↵` spawned a bare claude instead of opening the ticket somebody
+  // was looking for. Re-adding any of these fails here.
+  const GENERIC = ["agent", "drawer", "split", "terminal"];
+  const claimed: string[] = [];
+  for (const word of GENERIC) {
+    await ensurePalette(page);
+    await page.fill(".palette .search input", word);
+    await sleep(150);
+    if (await page.locator(".palette .row.pinrow").count()) claimed.push(word);
+  }
+  check(
+    "a generic word claims no pinned row",
+    claimed.length === 0,
+    claimed.length ? `claimed by: ${claimed.join(", ")}` : "",
+  );
+
   spawns.length = 0;
   await ensurePalette(page);
   await page.fill(".palette .search input", "workspace");

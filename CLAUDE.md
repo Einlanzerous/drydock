@@ -1615,12 +1615,21 @@ is the argument for reading a deviation closely rather than for refusing it:
    the component comment all asserted it worked. A query that NARROWED the
    pinned set is aimed at one of them; anything else keeps "Ctrl+K, ↵ on a
    ticket".
-15. **"The tracker has nothing for X" is a different claim from "`elsewhere` is
+15. **A pinned row's `terms` may only NAME the thing.** The rule above treats a
+   narrowed pinned set as a query aimed at a pinned row, so a generic word there
+   doesn't merely add a row — it takes the `↵` away from the tickets. `agent`
+   was on two of the three, in a repo where every ticket is about agents, so
+   `Ctrl K`, `agent`, `↵` spawned a bare claude instead of opening the ticket
+   somebody was looking for. `zsh` and `bash` stay (they are what a shell is
+   CALLED, and nothing else here is one); `agent`, `drawer`, `split` and
+   `terminal` are gone, and the harness asserts none of them claims a row so
+   re-adding one fails rather than being noticed.
+16. **"The tracker has nothing for X" is a different claim from "`elsewhere` is
    empty".** `elsewhere` is deliberately what the pull does NOT already hold, so
    a match the pull DOES hold drops out of it — and a known pill emptying the
    list then had the sidebar deny a loaded, open ticket exists. Gate that
    sentence on the search's own `rows`.
-16. **"Is a pill being typed" is a question about the KEY, not about `=`.**
+17. **"Is a pill being typed" is a question about the KEY, not about `=`.**
    Gating `term` on the character disabled the box for any term containing one
    — a title with `=` in it, a mistyped `proj=` — and disabled it invisibly: no
    local filter, no lookup, `filtering` false so no ✕, and `parsePill` returning
@@ -1629,7 +1638,7 @@ is the argument for reading a deviation closely rather than for refusing it:
 
 Harness: `scripts/verify/desk-chrome.mts`, rig in its README — the stub
 tracker's rig, a browser, about ninety seconds. Confirm it discriminates:
-against the unpatched shell it fails **36 of 47**. Run `epic-children.mts`,
+against the unpatched shell it fails **36 of 50**. Run `epic-children.mts`,
 `sidebar.mts` and `backlog-toggle.mts` beside it — they drive
 `.sidebar .searchbox input` and the scope row this ticket rebuilt around them.
 
@@ -1642,6 +1651,14 @@ nothing, and the one check that typed a pinned row's name then CLICKED it —
 the one gesture not under discussion. `de` is the only string here inside both
 a pinned row's terms and a loaded ticket's title, which is why an odd-looking
 two-letter query is the one that check uses.
+
+**Fourteen of the 50 checks pass against `main` too, and they are two kinds —
+don't read the second as slack.** Some guard things that must not change (the
+scope chips, the backlog switch, bare text still filtering). The rest guard a
+review finding in a feature `main` does not have at all, so they structurally
+cannot discriminate against the pre-ticket tree and were each confirmed against
+their own bug by reinstating it. That is the only honest way to check a fix to a
+fix, and it is why the count of failures is not the whole story.
 
 **Section (f) exists because review found two of those bugs by reading, in a
 path 35 green checks had never once run.** A search that is only ever tested
