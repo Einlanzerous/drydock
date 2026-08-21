@@ -68,6 +68,37 @@ export function sessionsDir(): string {
   return dir;
 }
 
+/**
+ * Can the index still be read and written? (DRY-48)
+ *
+ * `expandHome(CONFIG.sessionsDir)` rather than `sessionsDir()`, deliberately:
+ * that one creates the directory on first use, and a probe that repairs the
+ * thing it is probing can only ever report success — it would answer `ok` about
+ * a daemon whose live sessions are being written into a directory nothing will
+ * ever adopt them from.
+ *
+ * Being honest about how much that buys today: the two spellings agree, because
+ * `ensured` latches on the first call and `manager.reconcile()` makes that call
+ * before the port binds — so `sessionsDir()` would not in fact recreate a
+ * directory that vanished mid-run either. This is written not to depend on a
+ * latch in another module, which is DRY-72 trap 12's rule; the harness's check
+ * on it is a latch rather than a discriminator, and says so.
+ *
+ * Write access is checked as well as read, because the failure that costs
+ * something is `writeMeta` — a session the daemon is running and cannot write
+ * down is a session the next restart abandons.
+ */
+export function indexHealth(): { ok: boolean; dir: string; error?: string } {
+  const dir = expandHome(CONFIG.sessionsDir);
+  try {
+    fs.accessSync(dir, fs.constants.R_OK | fs.constants.W_OK | fs.constants.X_OK);
+    fs.readdirSync(dir);
+    return { ok: true, dir };
+  } catch (err) {
+    return { ok: false, dir, error: (err as Error).message };
+  }
+}
+
 export function sessionPaths(id: string): SessionPaths {
   const dir = sessionsDir();
   return {

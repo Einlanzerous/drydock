@@ -1518,6 +1518,87 @@ and read `paintedAfterMs` / `waitedMs` off the daemon's `typing initial prompt`
 line against the table in `docs/decisions/dry-88-initial-prompt.md`. A stub whose numbers have drifted from the
 CLI's is a harness asserting against last year's terminal.
 
+## Is the daemon suspect? (DRY-48)
+
+`/healthz` was `{ok:true, sessions:N}` from a handler that could not fail, so a
+daemon that had taken an uncaught exception and stayed up looked exactly as
+healthy as one that hadn't. It now reports a `status` over the faults this
+process has taken, the session registry and its on-disk index, the log sink, the
+tracker and the store; `/readyz` sits beside it as the thin signal.
+
+```sh
+(cd daemon && node --import tsx ../scripts/verify/health.mts)
+```
+
+No browser, no database, no second terminal: this file starts the six daemons it
+needs, one posture at a time. It takes `:4348` (`PORT=` to move it, and it
+refuses `:4317`/`:4318` outright) and `/tmp/dry48`. About ninety seconds.
+
+**The fault it injects is a real one.** `fault-inject.mts` is preloaded into the
+daemon under test (`--import tsx --import …/fault-inject.mts`) and throws from a
+timer callback when the process gets SIGUSR2 — writing `exception` or `rejection`
+into `$DRYDOCK_FAULT_FILE` picks which. Two things that rules out, both of them
+deliberate: the product does not grow a "crash yourself" endpoint on the same
+unauthenticated surface prod serves, and the throw does not happen inside an HTTP
+handler, where `server.ts`'s catch-all would turn it into a 500 and no
+`uncaughtException` would fire at all.
+
+What it holds down:
+
+- **`degraded` must never read as `down`.** A broken store, an unreachable
+  tracker, an unwritable log file and a fault the process survived all leave
+  `ok:true` and `/readyz` at 200. That is DRY-45's trade restated: the daemon is
+  holding somebody's live agents, and restarting it for being suspect costs
+  exactly the thing staying up was protecting. `ok:false` has one cause, and the
+  file proves it by chmodding the sessions directory to 000 and then deleting it.
+- **The legacy shape survives.** `ok`, `sessions` and `store` (with DRY-56's
+  capabilities) are asserted where they always were — half a dozen files in this
+  directory read them, and this ticket had every opportunity to move them.
+- **The tracker is observed, not probed.** `unknown` before anything asks, `ok`
+  after a call succeeds, and — the one worth having — still `ok` after a 404 for
+  a key that doesn't exist. A health endpoint that called a mistyped ticket key
+  an outage would accuse a perfectly reachable Jira and, with nothing else
+  polling, go on accusing it.
+- **The three postures of `DRYDOCK_EXIT_ON_UNCAUGHT`.** The default exits, and
+  the section proves that costs a reattach and nothing else: a fresh daemon comes
+  up and adopts the session the crash didn't kill (DRY-57). `0` stays up. `idle`
+  is a PAIR — it must still be there a poll interval after the fault while a
+  session runs, and gone within three once that session is killed. Either half
+  alone passes against a policy that is simply wrong in one direction.
+- **A probe must not repair.** The index check reads the configured path rather
+  than calling `sessionsDir()`, which creates the directory. See the mutation
+  table: that one is a latch, not a discriminator.
+
+### Making sure this one still discriminates
+
+Against `main` it fails **45 of 57**, and the twelve survivors are worth reading
+rather than glossing. Four are the legacy-compatibility checks, which are
+supposed to pass. Four are premises this ticket didn't change: `=0` stays up, the
+default exits, and a store with no read permission already reported `ok:false`
+(DRY-28). One is rig setup. The last three pass **vacuously** — including "and
+exits once nothing is running", which `main` satisfies by having exited a minute
+earlier, under a posture it read as `exit`. That one is exactly why `when-idle`
+is checked as a pair.
+
+| mutation | fails |
+|---|---|
+| `ok: status !== "down"` → `status === "ok"` | **3 of 57**, the degraded checks |
+| `readiness()` refusing a degraded tracker | **1 of 57** |
+| the uncaught handler not calling `faults.record` | **7 of 57** |
+| `when-idle` ignoring whether anything is running | **4 of 57**, the first half of the pair |
+| `when-idle` never arming | **3 of 57**, the second half |
+| `TrackerWatch.failed` without its caller-fault arm | **1 of 57**, the 404 |
+| `indexHealth` calling `sessionsDir()` | **0 of 57** — vacuous, and why is in [dry-48-health](../../docs/decisions/dry-48-health.md) |
+
+**The rig's own trap, worth knowing before you edit this file.** Six postures
+share one port, so a daemon that outlives its section answers for the next one —
+and answers plausibly, being a real Drydock. The first run reported eighteen
+failures that were all one leak. `startDaemon` refuses while anything is
+listening, `stopDaemon` escalates to SIGKILL rather than giving up quietly, and
+`process.on("exit")` kills the child however the file ends: a harness that
+crashes halfway otherwise leaves a daemon holding the port and breaks the *next*
+run instead of the one that made the mess.
+
 ## Workspace store: why a proxy and not `docker stop`
 
 `docker stop` frees the port, so every connect fails instantly with
@@ -1583,6 +1664,7 @@ tiers** — the file store is what a fresh clone runs.
 | `timings.mts` | Postgres only. Timings, not status codes: one request per window pays the timeout, the rest return in ms, the window widens 10 → 20 → 30 and stops, `/healthz` answers instantly while cooling and resets after a heal. |
 | `drift.sh` | Postgres only. An edited applied migration 503s naming the file while the live PTY keeps running; reverting clears it; a null checksum is adopted and backfilled. |
 | `epic-children.mts` | DRY-83. An epic with nothing under it in the pull expands to its open children, without widening the pull, without fanning out under a filter, and without the rows blinking out when Refresh re-pulls them. |
+| `health.mts` | DRY-48. `/healthz` has an opinion: a real uncaught exception is counted and reported as `degraded` without ever reading as `down`, a broken store or tracker or log sink never un-readies the daemon, and the three postures of `DRYDOCK_EXIT_ON_UNCAUGHT` do what they say — including `idle`, which must stay up while a session runs and exit once none does. |
 | `desk-chrome.mts` | DRY-82. One spawn control on the header and a palette that carries what the two removed buttons did; a layout switcher centred on the window rather than on the slack its siblings leave; `key=value` filter pills that cost the tracker nothing and say when they name something this pull cannot contain; and a term the pull cannot contain found through `/api/tracker/search`, debounced. |
 
 Each exits non-zero on failure and prints one line per check.

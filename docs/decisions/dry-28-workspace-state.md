@@ -16,7 +16,7 @@ DRYDOCK_PORT=4399 node --import tsx src/index.ts
 ```
 
 ```sh
-curl -s localhost:4399/healthz                       # store: {kind, ok}
+curl -s localhost:4399/healthz                       # store: {kind, ok}; status: (DRY-48)
 curl -s localhost:4399/api/workspace                 # {workspace: null} when unsaved
 curl -s -X PUT localhost:4399/api/workspace -H 'Content-Type: application/json' \
      -d '{"version":2,"layout":"tile","windows":[]}'

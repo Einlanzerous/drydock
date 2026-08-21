@@ -110,6 +110,33 @@ function flag(name: string, raw: string | undefined): boolean {
   return false;
 }
 
+/**
+ * What an uncaught exception does to this process (DRY-45, tri-state by DRY-48).
+ *
+ * `exit` and `stay` are the two the boolean knob has always had — unset and
+ * `0`. `when-idle` is the conditional one, and it needs a fault to be
+ * expressible at all, which is why it arrives with /healthz rather than before
+ * it: "suspect" has to be a thing the process knows about itself before it can
+ * be half of a condition.
+ */
+export type UncaughtPolicy = "exit" | "stay" | "when-idle";
+
+function uncaughtPolicy(raw: string | undefined): UncaughtPolicy {
+  const value = (raw ?? "").trim().toLowerCase();
+  if (value === "") return "exit";
+  if (["1", "true", "yes", "on"].includes(value)) return "exit";
+  if (["0", "false", "no", "off"].includes(value)) return "stay";
+  if (["idle", "when-idle"].includes(value)) return "when-idle";
+  CONFIG_ERRORS.push(
+    `DRYDOCK_EXIT_ON_UNCAUGHT=${raw} is not a value this knob has. Use 1/true/yes/on ` +
+      `(exit — the default), 0/false/no/off (stay up, however suspect), or idle ` +
+      `(stay up while a session is running, then exit). It will NOT be guessed at: ` +
+      `a crash policy that quietly isn't the one you configured is the failure this ` +
+      `whole area exists to avoid.`,
+  );
+  return "exit";
+}
+
 /** Read once: the default log path is per-port so concurrent daemons don't share a file. */
 const PORT = Number(process.env.DRYDOCK_PORT ?? 4317);
 
@@ -269,10 +296,11 @@ export const CONFIG = {
     file: process.env.DRYDOCK_LOG_FILE ?? `~/.drydock/daemon-${PORT}.log`,
     maxBytes: num(process.env.DRYDOCK_LOG_MAX_BYTES, 8_388_608),
     /**
-     * An uncaught exception kills Node by default, and this daemon now lets it
-     * — reversing the posture that stood until DRY-57.
+     * What an uncaught exception does. An uncaught exception kills Node by
+     * default, and this daemon lets it — reversing the posture that stood until
+     * DRY-57.
      *
-     * The old comment here ended "flip it once they can", and this is that
+     * The comment here once ended "flip it once they can", and DRY-57 was that
      * moment. While a session's lifetime WAS this process's, exiting cleanly
      * destroyed every live agent unrecoverably, so staying up in a questionable
      * state strictly beat it: the other N agents stayed reachable. That trade is
@@ -283,9 +311,22 @@ export const CONFIG = {
      *
      * PROD WANTS THIS TOO: the systemd unit is Restart=always, so a crash now
      * means a fresh daemon that reattaches, rather than one that comes back to
-     * an empty desk. Set DRYDOCK_EXIT_ON_UNCAUGHT=0 to keep the old behaviour.
+     * an empty desk.
+     *
+     * The third value is DRY-48's, and it is the one this knob could not express
+     * before there was any way to say "suspect": `idle` stays up while there is
+     * something to lose and exits once the process is BOTH suspect and holding
+     * no running session — the reattach a restart costs is paid at the moment it
+     * costs nothing. It is the honest home for a host that set `0` because a
+     * reconnect mid-run is disruptive (an in-flight gate is re-raised, but the
+     * rail's action line resets), since `0` buys that by wedging forever.
+     *
+     * The vocabulary is `flag()`'s, plus `idle`, and an unrecognised value is a
+     * boot error for the same reason: `DRYDOCK_EXIT_ON_UNCAUGHT=Idle` reading as
+     * "exit immediately" is a crash policy quietly not being the one somebody
+     * configured. `0` still means what it always did.
      */
-    exitOnUncaught: process.env.DRYDOCK_EXIT_ON_UNCAUGHT !== "0",
+    onUncaught: uncaughtPolicy(process.env.DRYDOCK_EXIT_ON_UNCAUGHT),
   },
 
   /**
