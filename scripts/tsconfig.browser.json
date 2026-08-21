@@ -28,6 +28,7 @@
     "verify/epic-children.mts",
     "verify/gate-actions.mts",
     "verify/hang.mts",
+    "verify/prefill.mts",
     "verify/race.mts",
     "verify/roam.mts",
     "verify/sidebar.mts",

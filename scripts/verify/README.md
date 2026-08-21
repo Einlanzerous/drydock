@@ -65,6 +65,12 @@ Three groups:
   paths in `App.vue`, because the one thing that must never delete a worktree is
   DRY-60's automatic sweep and the only thing keeping it out is which function
   the call sits in.
+- **The agent's pre-filled prompt (DRY-88)** —
+  [its own section](#the-agents-pre-filled-prompt-dry-88). A browser, a
+  throwaway daemon and a stub CLI on its PATH; about a minute. Run it when
+  touching when a spawned CLI is judged ready to be typed at
+  (`scheduleInitialInput` / `paintsSomething`), whether the prompt is submitted
+  (`flushInitialInput`), or `spawnWorkspace` in `App.vue`.
 - **The tombstone's resume button (DRY-62)** —
   [its own section](#the-tombstones-resume-button-dry-62). A browser and a
   throwaway Postgres, about a minute. Run it when touching
@@ -1156,6 +1162,85 @@ There is no honest way to fake that from inside the harness, so run this file
 from a Drydock session (which is where somebody deploys from, and the entire
 reason the guard exists) to see it.
 
+## The agent's pre-filled prompt (DRY-88)
+
+A browser, a throwaway daemon, and a stub CLI on its PATH — about a minute.
+Run it when touching `scheduleInitialInput` / `flushInitialInput` /
+`paintsSomething` in `daemon/src/session.ts`, `spawnWorkspace` in `App.vue`, or
+anything that decides when a spawned CLI is ready to be typed at.
+
+The stub is the whole rig. `resolveSpawn` runs a bare `claude`, so a shim by
+that name earlier on the daemon's PATH is how a test CLI gets in — and it has to
+exist BEFORE the daemon starts, which is why it is a line here rather than
+something the harness writes for itself:
+
+```sh
+bunx playwright install chromium             # once per machine; see "Running these"
+
+mkdir -p /tmp/dry88-bin
+printf '#!/bin/sh\nexec node --import %s/node_modules/tsx/dist/loader.mjs %s/scripts/verify/stub-cli.mts "$@"\n' \
+  "$PWD" "$PWD" > /tmp/dry88-bin/claude && chmod +x /tmp/dry88-bin/claude
+
+mkdir -p /tmp/dry88-repos/switchyard        # a NON-git dir, so the panel offers no worktree
+
+(cd daemon && PATH="/tmp/dry88-bin:$PATH" \
+   DRYDOCK_PORT=4388 DRYDOCK_HOST=127.0.0.1 DRYDOCK_SESSIONS_DIR=/tmp/d88 \
+   DRYDOCK_STATE_FILE=/tmp/dry88-state.json DRYDOCK_TRACKER=fixture \
+   DRYDOCK_REPO_PATHS=switchyard=/tmp/dry88-repos/switchyard \
+   node --import tsx src/index.ts &)
+(cd shell && VITE_DAEMON_URL=http://127.0.0.1:4388 bunx vite --port 5388 --strictPort &)
+
+(cd daemon && node --import tsx ../scripts/verify/prefill.mts)
+```
+
+The absolute loader path in the shim is not decoration: the daemon spawns that
+CLI with the SESSION's cwd, so a bare `--import tsx` resolves from a directory
+with no `node_modules` and the "agent" dies with `ERR_MODULE_NOT_FOUND` — which
+presents as a pane that draws nothing and a prompt that went nowhere, i.e. as
+this ticket's bug.
+
+What it holds down:
+
+- **A prompt that was SENT is not a prompt that ARRIVED**, and only the CLI can
+  tell the difference. The route answered 201 and the pane's `{type:"input"}`
+  frame went out on the socket for the whole time this was broken. So every
+  assertion is on bytes `stub-cli` echoed back, and the stub reports early input
+  as `[dropped N chars typed before I was listening]` rather than leaving the
+  harness to infer a loss from an absence.
+- **`cat` would pass against the bug**, which is why the stub exists: it reads
+  from its first instant, so a prompt typed at 700ms lands in it. The stub
+  models the measured v2.1.238 startup — escape-only writes, a banner at 1200ms,
+  input accepted at 1400ms — and drops what comes before that.
+- **The stub goes raw at t=0** for the same class of reason. Left in canonical
+  mode, the tty echoes what is typed at it, so a prompt that reached a CLI which
+  was not listening still appeared in the pane's rows: `the prompt is in the
+  composer` passed against the bug until this was fixed.
+- **Once, not merely present.** The old design could type the seed again from a
+  re-mounted pane, so the count is asserted.
+- **The browser never types it.** The structural half — with the prompt on the
+  daemon there is no copy for a poll, a re-mount or `forgetWindow` to lose. Note
+  the check filters out escape-only payloads first: xterm answers the CLI's DA1
+  and focus queries through the same frame type, so a bare "no input frames"
+  test is never true and would pass against anything.
+- **Pre-fill and submit are checked as a PAIR** (round 4, no browser). Checking
+  only that a supervised spawn doesn't submit is passed by deleting the submit
+  outright — at which point every autonomous run sits at a full composer nobody
+  ever sends.
+
+Discrimination (see [the section below](#making-sure-a-harness-still-discriminates),
+which carries the recipe): against the pre-fix tree it fails **8 of 17**. Round
+2's timing checks are not among them,
+honestly: widening the gap between the two spawns — which is what provokes the
+poll race it is testing — also pushes the old pane's 700ms write past the point
+the CLI starts listening, so the old code passes them. `the browser still never
+typed it` is that round's discriminating check, and it is there for that reason.
+
+**The stub is a model, and models go stale.** When Claude Code is upgraded,
+re-measure rather than trusting a green run: spawn a real one with `input` set
+and read `paintedAfterMs` / `waitedMs` off the daemon's `typing initial prompt`
+line against the table in CLAUDE.md. A stub whose numbers have drifted from the
+CLI's is a harness asserting against last year's terminal.
+
 ## Workspace store: why a proxy and not `docker stop`
 
 `docker stop` frees the port, so every connect fails instantly with
@@ -1268,6 +1353,16 @@ git checkout HEAD -- shell/src/App.vue shell/src/components/TrackerSidebar.vue \
 git checkout 8b79ceb~1 -- shell/src/components/TrackerSidebar.vue shell/src/lib/tracker.ts
 (cd daemon && node --import tsx ../scripts/verify/epic-children.mts)   # expect 10, incl. the row's own tooltip
 git checkout HEAD -- shell/src/components/TrackerSidebar.vue shell/src/lib/tracker.ts
+
+# DRY-88 the pre-filled prompt. Its merge has no number written down here on
+# purpose — this ticket's own recipe would be the fourth to rot the way the
+# three above did. Find it instead, from the file that arrived with it:
+#   git log --diff-filter=A --format=%h -- scripts/verify/prefill.mts
+git checkout <that commit>~1 -- daemon/src/session.ts shell/src/App.vue \
+  shell/src/components/TerminalPane.vue shell/src/components/WorkspacePane.vue
+(cd daemon && node --import tsx ../scripts/verify/prefill.mts)     # expect 8 failures of 17
+git checkout HEAD -- daemon/src/session.ts shell/src/App.vue \
+  shell/src/components/TerminalPane.vue shell/src/components/WorkspacePane.vue
 ```
 
 The sidebar and epic-children counts are what DRY-80's re-run actually observed;

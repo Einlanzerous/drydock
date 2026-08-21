@@ -22,7 +22,6 @@ const props = defineProps<{
   agentSession: SessionInfo;
   shellSession?: SessionInfo;
   active?: boolean;
-  initialInput?: string;
 }>();
 
 const emit = defineEmits<{
@@ -31,7 +30,6 @@ const emit = defineEmits<{
   (e: "status", id: string, status: SessionInfo["status"]): void;
   (e: "attention", id: string, pending: boolean): void;
   (e: "idle", id: string, idle: boolean): void;
-  (e: "initial-sent", id: string): void;
   // Persist workspace UI state back onto the Win (App → wm.updateWin).
   (e: "patch", id: string, patch: Partial<Win>): void;
   // Ctrl/Cmd-clicked file token in either pane → App's doc viewer (DRY-35).
@@ -143,11 +141,9 @@ onBeforeUnmount(onSplitUp);
         <TerminalPane
           :session="agentSession"
           :active="active"
-          :initial-input="initialInput"
           @status="(id, s) => emit('status', id, s)"
           @attention="(id, p) => emit('attention', id, p)"
           @idle="(id, i) => emit('idle', id, i)"
-          @initial-sent="(id) => emit('initial-sent', id)"
           @open-file="(id, p) => emit('open-file', id, p)"
         />
       </div>

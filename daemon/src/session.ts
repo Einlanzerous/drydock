@@ -32,6 +32,75 @@ import type {
  */
 const SEED_CHUNK_BYTES = 64 * 1024;
 
+/**
+ * When the CLI is ready to be typed at (DRY-49, retuned in DRY-88).
+ *
+ * All three numbers are measured against Claude Code v2.1.238 on this host,
+ * from a client that attaches immediately and answers the CLI's DA1 query the
+ * way a real terminal does. Its startup writes, relative to the attach:
+ *
+ *   333ms  ~13 bytes   save cursor, reset scroll region, show cursor
+ *   372ms   ~6 bytes   hide cursor
+ *   393ms  ~24 bytes   enable bracketed paste / focus events
+ *  1100ms  ~18 bytes   set the window title
+ *  1268ms  ~849 bytes  THE BANNER — the first thing that is actually painted
+ *  1397ms  ~47 bytes   cursor parked in the composer
+ *
+ * Input sent at 1200ms was still discarded; at 1400ms it arrived. So "ready"
+ * lands within ~50ms of the first paint finishing, and nothing before it
+ * counts: the four escape-only writes are the CLI *configuring* a terminal,
+ * not using one. A settle armed on those fires at ~1.6s — which is what was
+ * happening — and a prompt sent then is lost in silence, since a CLI that
+ * isn't listening yet does not error.
+ *
+ * Hence: arm on the first PAINT, wait for output to go quiet, and never fire
+ * inside the floor.
+ *
+ * THE FLOOR IS LOAD-BEARING, and for two cases rather than the obvious one. It
+ * covers a host slow enough to split the paint across a gap wider than the
+ * settle — and it is also the whole margin under a MISREAD paint, which is a
+ * thing that can genuinely happen: a chunk boundary through an escape sequence
+ * leaves printable residue on the far side (`\x1b[?20` + `04h` reads as a
+ * paint), so a badly-cut stream can arm this clock at the CLI's very first
+ * write. Measured from there the floor still clears the 1400ms the CLI needs,
+ * which is why 2000ms rather than something snugger: it is sized to be right
+ * when `paintsSomething` is wrong.
+ */
+const INITIAL_INPUT_SETTLE_MS = 1_200;
+const INITIAL_INPUT_FLOOR_MS = 2_000;
+/** Ceiling, for a CLI that never falls quiet (spinners, animated banners). */
+const INITIAL_INPUT_CEILING_MS = 15_000;
+
+/**
+ * Did this chunk put anything on the screen?
+ *
+ * Escape sequences and control bytes are stripped; whatever is left is what a
+ * human would see. Deliberately includes an OSC title change in what it
+ * strips — a CLI that has only named the window has not drawn anything yet.
+ */
+function paintsSomething(chunk: string): boolean {
+  const text = chunk
+    // The string-payload escapes first — OSC, then DCS/SOS/PM/APC — since their
+    // payloads are ordinary text, and anything that stripped only the introducer
+    // would read a window title as a screenful.
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g, "")
+    // Two rules for the DCS family, not one with an optional terminator: a
+    // lazy `*?` in front of an OPTIONAL suffix matches the empty string, so
+    // that spelling strips the introducer and leaves the payload behind —
+    // which is the opposite of the job.
+    .replace(/\x1b[P^_X][\s\S]*?(?:\x07|\x1b\\)/g, "")
+    .replace(/\x1b[P^_X][\s\S]*$/g, "")
+    // Then CSI, then anything else shaped like ESC + intermediates + a final
+    // byte. That last one has to be a RANGE, not a hand-listed set: written as
+    // `\x1b[@-Z\\-_]` it misses ESC 7 / ESC 8 (save/restore cursor), which is
+    // the first thing Claude Code writes — measured, the stray "7" left behind
+    // read as a paint and armed the settle 900ms before anything was drawn.
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\x1b[ -/]*[0-~]/g, "")
+    .replace(/[\x00-\x1f\x7f]/g, "");
+  return /\S/.test(text);
+}
+
 export interface SpawnOptions {
   command: string;
   args?: string[];
@@ -83,12 +152,18 @@ export interface SpawnOptions {
   /** Who else may see it. Defaults to `private`; see SessionVisibility. */
   visibility?: SessionVisibility;
   /**
-   * First prompt, typed into the PTY by the DAEMON once the CLI has settled.
+   * First prompt, typed into the PTY by the DAEMON once the CLI has painted
+   * and settled (see scheduleInitialInput).
    *
-   * Load-bearing for autonomous runs specifically. A supervised spawn's prompt
-   * is typed by TerminalPane when its WebSocket opens — but an autonomous run
-   * has no pane, so nothing would ever type it and the agent would sit at an
-   * empty prompt looking exactly like a run in progress.
+   * Every spawn path that has a prompt uses this since DRY-88 — the supervised
+   * one included, which used to seed it into TerminalPane and have the pane
+   * type it 700ms after its socket opened. Two things were wrong with that and
+   * only one of them was the timing: the other is that a browser's copy of the
+   * prompt is deleted by anything that re-mounts the pane, so the reconcile
+   * races and the poll landing mid-spawn all had a say in whether an agent
+   * ever heard what it was spawned to do.
+   *
+   * Whether the RETURN is pressed afterwards is `autonomous`, not this field.
    */
   input?: string;
 }
@@ -725,42 +800,63 @@ export class PtySession {
     this.link?.dispose();
   }
 
-  // --- daemon-typed first prompt (DRY-49) --------------------------------
+  // --- daemon-typed first prompt (DRY-49, both spawn paths since DRY-88) ---
   private initialInput?: string;
   private initialTimer: NodeJS.Timeout | null = null;
+  private firstPaintAt = 0;
   private readonly spawnedAt = Date.now();
 
   /**
    * Type the first prompt once the CLI is ready to receive it.
    *
-   * "Ready" is not a fixed delay. TerminalPane can afford one (700ms after its
-   * socket opens, by which point the CLI has been booting for a while); the
-   * daemon is typing at t=0 of the process, and `claude` takes seconds to draw
-   * its banner and enable bracketed paste. Sending early doesn't error — it
-   * silently lands in a prompt that isn't listening yet, which for an
-   * unattended run means a card that says "starting" forever.
+   * "Ready" is not a fixed delay, and this is the only place that gets to
+   * decide when it has arrived — for the unattended run that has nobody to
+   * type for it (DRY-49) and, since DRY-88, for the supervised workspace whose
+   * prompt is a pre-fill. TerminalPane used to do its own, 700ms after its
+   * socket opened, on the stated grounds that the CLI had "been booting for a
+   * while" by then. It hasn't: the supervisor spawns the PTY before it binds
+   * its socket and the daemon dials within tens of milliseconds (DRY-79
+   * measured 5-47ms), so that pane was typing at roughly t=700ms of the
+   * process — a third of the way to the 1400ms where Claude Code starts
+   * listening. Every ticket-driven workspace lost its prompt, in silence,
+   * because a CLI that isn't listening yet does not error.
    *
-   * So: wait for the first output, then for output to go quiet, capped so a CLI
-   * that never stops redrawing still gets its prompt.
+   * So: wait for the CLI to PAINT (see paintsSomething — the escape-only
+   * writes that configure a terminal are not it), then for output to go quiet,
+   * never sooner than the floor, capped so a CLI that never stops redrawing
+   * still gets its prompt.
    */
   private scheduleInitialInput(text: string): void {
     this.initialInput = text;
-    // Output that landed before the daemon attached counts as the first output
-    // (DRY-79). `noteOutputForInitialInput` is driven from `onData`, which the
-    // seeded replay never passes through, so a CLI whose banner finished inside
-    // that window and then went quiet would wait out the 15s ceiling below
-    // instead of the 1.2s settle.
-    if (this.scrollbackBytes) this.noteOutputForInitialInput();
-    // Ceiling, in case the CLI never falls quiet (spinners, animated banners).
-    const cap = setTimeout(() => this.flushInitialInput(), 15_000);
+    // Output that landed before the daemon attached counts (DRY-79).
+    // `noteOutputForInitialInput` is driven from `onData`, which the seeded
+    // replay never passes through, so a CLI whose banner finished inside that
+    // window and then went quiet would wait out the ceiling below instead of
+    // the settle. Short-circuits on the first painting chunk rather than
+    // joining the ring, which can be a megabyte of it.
+    if (this.scrollback.some((c) => paintsSomething(c.toString("utf8"))))
+      this.noteOutputForInitialInput("");
+    const cap = setTimeout(() => this.flushInitialInput(), INITIAL_INPUT_CEILING_MS);
     cap.unref?.();
   }
 
-  /** Re-arm the settle timer on every chunk; fire once output pauses. */
-  private noteOutputForInitialInput(): void {
+  /**
+   * Re-arm the settle timer on every chunk; fire once output pauses.
+   *
+   * Nothing is armed until something has been painted, so the CLI's terminal
+   * setup can't start the clock. `chunk` is empty for the seeded case above,
+   * which has already been found to paint.
+   */
+  private noteOutputForInitialInput(chunk: string): void {
     if (!this.initialInput) return;
+    if (!this.firstPaintAt) {
+      if (chunk && !paintsSomething(chunk)) return;
+      this.firstPaintAt = Date.now();
+    }
     if (this.initialTimer) clearTimeout(this.initialTimer);
-    this.initialTimer = setTimeout(() => this.flushInitialInput(), 1_200);
+    const floorLeft = this.firstPaintAt + INITIAL_INPUT_FLOOR_MS - Date.now();
+    const wait = Math.max(INITIAL_INPUT_SETTLE_MS, floorLeft);
+    this.initialTimer = setTimeout(() => this.flushInitialInput(), wait);
     this.initialTimer.unref?.();
   }
 
@@ -776,7 +872,13 @@ export class PtySession {
     log.info("typing initial prompt", {
       id: this.id,
       bytes: Buffer.byteLength(text),
+      // Both, because they answer different questions: `waitedMs` is what the
+      // human waited, `paintedAfterMs` is where the CLI's first paint landed —
+      // the number the constants above are tuned against, and the one to read
+      // if this ever starts arriving in an empty composer again.
       waitedMs: Date.now() - this.spawnedAt,
+      paintedAfterMs: this.firstPaintAt ? this.firstPaintAt - this.spawnedAt : undefined,
+      submit: this.autonomous,
     });
     this.link?.write(data);
 
@@ -787,8 +889,13 @@ export class PtySession {
     // prompt appeared in the composer and the agent never started. Give the
     // CLI a beat to render what it received, then press enter on its own.
     //
-    // (A supervised spawn deliberately never does this: TerminalPane pre-fills
-    // and leaves the human to submit. Nobody is there to submit this one.)
+    // ONLY for a run nobody is watching. A supervised workspace pre-fills and
+    // leaves the human to submit — they may want to edit the prompt first, and
+    // the ticket panel's two buttons are exactly the choice between the two.
+    // The daemon types both prompts since DRY-88; pressing return is still the
+    // thing that separates them, so it hangs off `autonomous` rather than off
+    // which surface asked.
+    if (!this.autonomous) return;
     const submit = setTimeout(() => {
       if (this.status === "running") this.link?.write("\r");
     }, 400);
@@ -805,7 +912,7 @@ export class PtySession {
       const dropped = this.scrollback.shift()!;
       this.scrollbackBytes -= dropped.byteLength;
     }
-    this.noteOutputForInitialInput();
+    this.noteOutputForInitialInput(data);
     this.broadcast({ type: "data", data });
   }
 

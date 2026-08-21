@@ -366,10 +366,11 @@ updating. It fits a budget rather than being concatenated: Claude Code truncates
 hook context past 10000 characters, so the thread keeps a reserved slice a long
 description can't crowd out, the newest comments are the ones kept, and anything
 withheld is said out loud ("showing the 3 most recent of 11 comments") rather
-than silently dropped. The prompt is pre-filled with
-your instruction and left for you to send (no auto-submit). The hooks are
-injected by the daemon (`claude --settings`), so they work regardless of cwd —
-no per-repo `.claude/settings.json` needed.
+than silently dropped. The prompt is pre-filled with your instruction and left
+for you to send (no auto-submit) — the daemon types it once the CLI has actually
+started listening, which is a second or two after the pane appears (DRY-88).
+The hooks are injected by the daemon (`claude --settings`), so they work
+regardless of cwd — no per-repo `.claude/settings.json` needed.
 
 Repo→directory mapping is host config on the daemon: `DRYDOCK_REPOS_ROOT`
 (default `~/projects`, so repo `argosy` → `~/projects/argosy`) with per-repo
