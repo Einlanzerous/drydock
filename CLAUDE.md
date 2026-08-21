@@ -1590,11 +1590,50 @@ tickets *here*?
    "found it" assertion for the wrong reason and can never fail the
    "legitimately not here" one.
 
+The last three are review's, and all three are in the new request path — which
+is the argument for reading a deviation closely rather than for refusing it:
+
+12. **`searchTickets` was the only tracker call in the shell with no deadline,
+   and here that is worse than a latched spinner.** Searches queue behind one
+   handle, so a fetch that never settles never clears it and **no search runs
+   again for the life of the page** — the list recovers on its own budget, this
+   could not. `AbortSignal.timeout(LIST_TIMEOUT_MS)`, like its two neighbours.
+13. **Replace the whole result state per outcome; never patch fields onto it.**
+   Setting `rows` and `done` on success while leaving `error` standing renders
+   "couldn't search — retry" forever over rows that were fetched perfectly well,
+   and the retry control can then never visibly succeed. `loadChildren` gets
+   this right by replacing `childLoads[key]`; `found` is a `ref` holding an
+   object for the same reason, so patching isn't available. The retry also has
+   to raise `loading` itself — it is the one caller that doesn't come through
+   `watch(term)`, so without it the click changes nothing on screen.
+14. **"Is a pill being typed" is a question about the KEY, not about `=`.**
+   Gating `term` on the character disabled the box for any term containing one
+   — a title with `=` in it, a mistyped `proj=` — and disabled it invisibly: no
+   local filter, no lookup, `filtering` false so no ✕, and `parsePill` returning
+   null so ↵ commits nothing either. The full unfiltered list renders as though
+   the box were empty.
+
 Harness: `scripts/verify/desk-chrome.mts`, rig in its README — the stub
-tracker's rig, a browser, about a minute. Confirm it discriminates: against the
-unpatched shell it fails **28 of 35**. Run `epic-children.mts`, `sidebar.mts`
-and `backlog-toggle.mts` beside it — they drive `.sidebar .searchbox input` and
-the scope row this ticket rebuilt around them.
+tracker's rig, a browser, about ninety seconds. Confirm it discriminates:
+against the unpatched shell it fails **33 of 43**. Run `epic-children.mts`,
+`sidebar.mts` and `backlog-toggle.mts` beside it — they drive
+`.sidebar .searchbox input` and the scope row this ticket rebuilt around them.
+
+**Section (f) exists because review found both of those bugs by reading, in a
+path 35 green checks had never once run.** A search that is only ever tested
+when it succeeds is a search whose recovery has never been executed. Two things
+about that round are worth keeping, because the first cut of each passed against
+the bug it was written for:
+
+- **Do not heal the stub before probing the wedge.** Healing releases the held
+  response, which lets the hung promise settle and unlatches the handle for
+  free. Break to `502` instead: the old request stays held, a new one fails
+  fast, so "the note changed" can only mean a request went out.
+- **The rig's `DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS` has to outlast the whole
+  round.** Shorter than the shell's budget (the default is) and a silent stub
+  arrives as a prompt 502, so the shell's own deadline is never exercised.
+  Longer but still inside the round — 30s, measured — and the daemon gives up
+  partway through and unwedges the shell for you.
 
 ## Expanding an epic to its children (DRY-83)
 

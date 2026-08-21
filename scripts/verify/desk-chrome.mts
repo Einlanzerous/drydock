@@ -38,6 +38,10 @@
 //       of its own — and a term nothing has says so rather than showing an
 //       empty list. Plus the debounce, without which this is a tracker query
 //       per keystroke (DRY-72).
+//   (f) the same path FAILING. Added after review, which observed that (a)-(e)
+//       had never once run it — and that both of the bugs found by reading it
+//       lived there: a retry that could never visibly succeed, and a hung
+//       request wedging every later search for the life of the page.
 //
 // The rig is the stub tracker's, so nothing here touches a real tracker. Setup:
 // see README.md.
@@ -61,6 +65,32 @@ const stubState = (): Promise<StubState> =>
   fetch(`${STUB}/__state`).then((r) => r.json() as Promise<StubState>);
 const stubReset = (): Promise<StubCounts> =>
   fetch(`${STUB}/__reset`, { method: "POST" }).then((r) => r.json() as Promise<StubCounts>);
+const stubBreak = (mode: "502" | "hang"): Promise<unknown> =>
+  fetch(`${STUB}/__break?mode=${mode}`, { method: "POST" }).then((r) => r.json());
+const stubHeal = (): Promise<unknown> =>
+  fetch(`${STUB}/__heal`, { method: "POST" }).then((r) => r.json());
+
+/**
+ * The shell's own budget on a tracker call (`LIST_TIMEOUT_MS`), plus room for it
+ * to land and render.
+ *
+ * **The rig's `DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS` has to be far longer than
+ * this whole round, and that is load-bearing in both directions.** Shorter than
+ * the shell's budget (the daemon's default is) and a silent stub reaches the
+ * browser as a prompt 502, so the shell's own deadline is never exercised at
+ * all. Longer, but still inside the round, and the daemon gives up on its own
+ * partway through — which UNWEDGES the shell for free and makes the wedge check
+ * below pass against the bug it exists for. Measured both ways: at 30s it did.
+ */
+const SHELL_BUDGET_MS = 16_000;
+/**
+ * How long the wedge probe waits for the next search to report.
+ *
+ * Deliberately short. Under the fix the new search lands in about a second; the
+ * only thing a longer window can buy is time for something else to rescue the
+ * hung request, which is precisely the false pass being avoided.
+ */
+const WEDGE_PROBE_MS = 8_000;
 
 /** Poll until `fn` holds — no fixed sleeps, which is what makes these flaky. */
 async function waitFor(fn: () => Promise<boolean>, ms = 15_000): Promise<boolean> {
@@ -511,6 +541,81 @@ console.log("\n(e) a key outside the pull reaches /api/tracker/search");
     "typing seven characters is not seven queries",
     typed.search >= 1 && typed.search <= 2,
     `search=${typed.search} for 7 keystrokes`,
+  );
+  await close();
+}
+
+// ---- (f) the failure side of the new request path -------------------------
+//
+// Added after review, which noted that a 35-check run had exercised none of it
+// — and that both Important findings lived here. A search that can only be
+// tested when it succeeds is a search whose recovery has never been run.
+console.log("\n(f) a search that fails, and a search that hangs");
+{
+  const { page, close } = await open(browser);
+
+  // (f1) A retry that succeeds has to LOOK like it succeeded. The state is
+  // replaced wholesale per outcome rather than patched, because patching `rows`
+  // and `done` on success while leaving `error` standing renders "couldn't
+  // search — retry" forever over rows that were fetched perfectly well.
+  await stubBreak("502");
+  await type(page, "DRY-3");
+  const failed = await waitFor(async () => {
+    const t = await snap(page);
+    return !!t.foundNote && t.foundNote.includes("couldn't search");
+  });
+  check("a failing search says so", failed, (await snap(page)).foundNote ?? "no note at all");
+
+  await stubHeal();
+  await tryClick(page, ".sidebar .found-note.bad");
+  const recovered = await waitFor(async () => (await snap(page)).found.includes("DRY-3"));
+  const s1 = await snap(page);
+  check("clicking retry shows the rows it fetched", recovered, `found: ${s1.found.join(",") || "nothing"}`);
+  check(
+    "and the error note is gone with it",
+    s1.foundNote === null,
+    s1.foundNote ?? "",
+  );
+
+  // (f2) A hung request must not wedge the path. Searches queue behind one
+  // handle, so a promise that never settles leaves it latched and NO search ever
+  // runs again for the life of the page — the list recovers on its own budget,
+  // this had none.
+  await stubBreak("hang");
+  await type(page, "Coalesce");
+  const gaveUp = await waitFor(async () => {
+    const t = await snap(page);
+    return !!t.foundNote && t.foundNote.includes("couldn't search");
+  }, SHELL_BUDGET_MS);
+  check("a hung search gives up rather than spinning forever", gaveUp, (await snap(page)).foundNote ?? "still searching");
+
+  // The held request is deliberately NOT released before the next search. Healing
+  // first lets the hung promise settle and unlatches the handle on its own — so
+  // the wedge check passes against the very bug it exists for, which is what a
+  // first cut of this round measured. Switching to 502 leaves the old request
+  // held and makes a NEW one fail fast, so "the note changed" can only mean a
+  // request went out.
+  await stubBreak("502");
+  await type(page, "Coalesce concurrent");
+  const alive = await waitFor(async () => {
+    const t = await snap(page);
+    return !!t.foundNote && t.foundNote.includes("couldn't search");
+  }, WEDGE_PROBE_MS);
+  const s2 = await snap(page);
+  check(
+    "and the next search still runs — the path is not wedged",
+    alive,
+    `note: ${s2.foundNote ?? "none"}`,
+  );
+
+  await stubHeal();
+  await type(page, "Deadline");
+  const back = await waitFor(async () => (await snap(page)).found.includes("DRY-3"));
+  const s3 = await snap(page);
+  check(
+    "and it finds things again once the tracker is back",
+    back,
+    `found: ${s3.found.join(",") || "nothing"}, note: ${s3.foundNote ?? "none"}`,
   );
   await close();
 }

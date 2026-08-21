@@ -271,10 +271,27 @@ export async function listEpicChildren(
   };
 }
 
+/**
+ * Free-text search across every status inside the project scope — what the
+ * sidebar reaches for when a term finds nothing in the pull (DRY-82).
+ *
+ * Shares `LIST_TIMEOUT_MS` with the two calls above, and it needs one MORE than
+ * they do rather than less. This was the only tracker call in the shell with no
+ * budget at all, and the sidebar serialises its searches behind one handle: a
+ * request that never settles leaves that handle latched on a promise that will
+ * never resolve, so no search runs again for the life of the page — the spinner
+ * on the LIST is recoverable, this is not. The "shorter than the poll interval"
+ * pairing that constant documents doesn't apply to a one-shot gesture, exactly
+ * as `listEpicChildren` notes; the size is right for the same reason it is
+ * there.
+ */
 export async function searchTickets(q: string, projects?: string[]): Promise<Ticket[]> {
   const params = new URLSearchParams({ q });
   if (projects?.length) params.set("projects", projects.join(","));
-  const body = await getJson<{ tickets?: Ticket[] }>(`${DAEMON_HTTP}/api/tracker/search?${params}`);
+  const body = await getJson<{ tickets?: Ticket[] }>(
+    `${DAEMON_HTTP}/api/tracker/search?${params}`,
+    { signal: AbortSignal.timeout(LIST_TIMEOUT_MS) },
+  );
   return expectList(body.tickets, "tickets");
 }
 

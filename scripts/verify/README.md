@@ -431,6 +431,14 @@ harness and deliberate: the claim is that a view filter costs the tracker
 nothing, so the 20s poll must be answered from the daemon's memory or every
 count is noise.
 
+`DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS=120000` is load-bearing in **both**
+directions, and section (f) is wrong without it. Shorter than the shell's own
+12s budget (the daemon's default is) and a silent stub reaches the browser as a
+prompt 502, so the shell's deadline is never exercised at all. Longer, but still
+inside the round, and the daemon gives up partway through — which unwedges the
+shell for free and makes the wedge check pass against the bug it exists for.
+Measured at 30s: it did.
+
 ```sh
 bunx playwright install chromium             # once per machine; see "Running these"
 
@@ -439,7 +447,7 @@ bunx playwright install chromium             # once per machine; see "Running th
    DRYDOCK_TRACKER=switchyard DRYDOCK_SWITCHYARD_URL=http://127.0.0.1:4383 \
    DRYDOCK_TRACKER_PROJECTS=DRY \
    DRYDOCK_TRACKER_CACHE_MS=60000 DRYDOCK_TRACKER_CHILD_STATS_CACHE_MS=60000 \
-   DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS=3000 \
+   DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS=120000 \
    DRYDOCK_DATABASE_URL= DRYDOCK_AUTH_PASSWORD= DRYDOCK_MULTI_USER= \
    DRYDOCK_STATE_FILE=/tmp/dry82-state.json \
    DRYDOCK_SESSIONS_DIR=/tmp/dry82-sessions node --import tsx src/index.ts &)
@@ -453,7 +461,7 @@ the note under DRY-83's rig for what happens if you don't.
 
 | harness | what it holds down |
 |---|---|
-| `desk-chrome.mts` | The header carries one spawn control, and the palette does what the two removed buttons did — asserted on the request BODIES, since a workspace is two POSTs and a pinned row issuing only the first looks identical on screen. The old `⇧↵` spawns nothing rather than being repurposed onto the selected ticket. The layout switcher is centred on the HEADER and stays there when the right-hand cluster changes width, at 1440 and at a laptop 1280, without overlapping. The four filter selects are `key=value` pills that cost the tracker no request, complete from the loaded set, and — typed free-hand — say when they name something this pull cannot contain. A closed ticket is found through `/api/tracker/search`, in a block of its own, debounced. |
+| `desk-chrome.mts` | The header carries one spawn control, and the palette does what the two removed buttons did — asserted on the request BODIES, since a workspace is two POSTs and a pinned row issuing only the first looks identical on screen. The old `⇧↵` spawns nothing rather than being repurposed onto the selected ticket. The layout switcher is centred on the HEADER and stays there when the right-hand cluster changes width, at 1440 and at a laptop 1280, without overlapping. The four filter selects are `key=value` pills that cost the tracker no request, complete from the loaded set, and — typed free-hand — say when they name something this pull cannot contain. A closed ticket is found through `/api/tracker/search`, in a block of its own, debounced. And **(f)** the same path failing: a retry that succeeds shows the rows it fetched rather than the error it replaced, and a hung request gives up instead of wedging every later search for the life of the page. |
 
 Spawns are **intercepted** (`page.route` on `POST /api/sessions`, answered with
 a session-shaped 201). Letting them through would start a real `claude` per
@@ -467,9 +475,13 @@ ticket except for being asked a question it could already answer:
 git show main:shell/src/App.vue > shell/src/App.vue
 git show main:shell/src/components/QuickLaunch.vue > shell/src/components/QuickLaunch.vue
 git show main:shell/src/components/TrackerSidebar.vue > shell/src/components/TrackerSidebar.vue
+git show main:shell/src/lib/tracker.ts > shell/src/lib/tracker.ts
 ```
 
-Expect **28 failures of 35**. Restore with `git checkout -- shell/` — the
+`tracker.ts` is in that list because the deadline on `searchTickets` lives there,
+and it is one of the two things section (f) is for.
+
+Expect **33 failures of 43**. Restore with `git checkout -- shell/` — the
 redirects above write the worktree without staging, unlike
 `git checkout <ref> -- path`, which stages the revert.
 
@@ -482,6 +494,20 @@ this whole directory is about: "no pills afterwards" is satisfied by a bar that
 never had one, "not merged into the repo groups" by nothing having been found at
 all, and "not seven queries" by a shell that never searches. Each now asserts
 the state BEFORE as well.
+
+**Section (f) was added after review**, which found two bugs by reading a path
+that 35 green checks had never once executed — a retry that could never visibly
+succeed, and a hung request wedging the search path permanently. Both first cuts
+of the new round passed against the bug they were for, and both fixes are worth
+knowing:
+
+- **Do not `__heal` before probing the wedge.** Healing releases the held
+  response, so the hung promise settles and unlatches the handle on its own.
+  `__break?mode=502` instead — the old request stays held, a new one fails fast,
+  so "the note changed" can only mean a request went out.
+- **Keep the wedge probe's own window short** (`WEDGE_PROBE_MS`). Under the fix
+  the next search lands in about a second; the only thing a longer window buys
+  is time for something else to rescue the hung request.
 
 Run `epic-children.mts`, `sidebar.mts` and `backlog-toggle.mts` beside this one.
 All three drive `.sidebar .searchbox input` or the scope row, which is what this
@@ -1437,10 +1463,10 @@ git checkout HEAD -- daemon/src/session.ts shell/src/App.vue \
 # DRY-82 the desk chrome. Its merge is deliberately not written down either —
 # find it from the file that arrived with it:
 #   git log --diff-filter=A --format=%h -- scripts/verify/desk-chrome.mts
-git checkout <that commit>~1 -- shell/src/App.vue \
+git checkout <that commit>~1 -- shell/src/App.vue shell/src/lib/tracker.ts \
   shell/src/components/QuickLaunch.vue shell/src/components/TrackerSidebar.vue
-(cd daemon && node --import tsx ../scripts/verify/desk-chrome.mts)  # expect 28 failures of 35
-git checkout HEAD -- shell/src/App.vue \
+(cd daemon && node --import tsx ../scripts/verify/desk-chrome.mts)  # expect 33 failures of 43
+git checkout HEAD -- shell/src/App.vue shell/src/lib/tracker.ts \
   shell/src/components/QuickLaunch.vue shell/src/components/TrackerSidebar.vue
 ```
 

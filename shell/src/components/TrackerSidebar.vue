@@ -210,7 +210,23 @@ const pills = ref<Pill[]>([]);
  * empty the sidebar on the way.
  */
 const draft = ref("");
-const term = computed(() => (draft.value.includes("=") ? "" : draft.value.trim()));
+/**
+ * Is the box holding a pill being TYPED, as opposed to a search term?
+ *
+ * Gated on a recognised key, not on the presence of an `=`. The looser test
+ * disabled the search box for any term containing one — a title with `=` in it,
+ * or a mistyped key like `proj=drydock` — and disabled it invisibly: `term`
+ * blank means no local filter, no lookup, and `filtering` false so no ✕ to
+ * clear, while `parsePill` returns null on ↵ so nothing commits either. The
+ * full unfiltered list renders as though the box were empty.
+ *
+ * `at > 0` rather than `at >= 0`, so a leading `=` is text like anything else.
+ */
+const drafting = computed(() => {
+  const at = draft.value.indexOf("=");
+  return at > 0 && !!KEY_ALIASES[draft.value.slice(0, at).trim().toLowerCase()];
+});
+const term = computed(() => (drafting.value ? "" : draft.value.trim()));
 // Per-group expand state; absent = collapsed (the default). When a search/filter
 // is active we force-open all groups so matches aren't hidden behind a chevron.
 // Epics get their own map on the same rule, keyed `${repo} ${epicKey}` — the
@@ -958,8 +974,29 @@ interface FoundState {
   error?: string;
   /** A search has SETTLED for `q` — what tells "found nothing" from "not asked yet". */
   done: boolean;
+  /**
+   * The project scope the request ACTUALLY went out with.
+   *
+   * Recorded rather than re-derived from the props at render time, because the
+   * scope can change while a result is on screen: adding a project chip would
+   * otherwise make the "nothing for X in DRY, FOO either" line name a project
+   * that was never asked about. Same reasoning as `isKnown` being derived
+   * rather than stored, pointing the other way — there the truth is current,
+   * here it is what the evidence was gathered under.
+   */
+  scope: string[];
 }
-const found = reactive<FoundState>({ q: "", loading: false, rows: [], done: false });
+/**
+ * A `ref` holding a whole object, NOT a `reactive` whose fields get patched.
+ *
+ * Every outcome replaces the state entirely, which is what `loadChildren` does
+ * with `childLoads[key]` and for the same reason: patching `rows` and `done` on
+ * success while leaving `error` standing renders "couldn't search — retry"
+ * forever over rows that were successfully fetched, and the retry control can
+ * then never visibly succeed. Making the state un-patchable is the version of
+ * that fix which can't come undone.
+ */
+const found = ref<FoundState>({ q: "", loading: false, rows: [], done: false, scope: [] });
 
 let searchTimer: ReturnType<typeof setTimeout> | null = null;
 /**
@@ -980,25 +1017,28 @@ let searchInFlight: Promise<void> | null = null;
 
 function runSearch(text: string): Promise<void> {
   const epoch = ++searchEpoch;
+  // Scoped to what the sidebar is pulling, host defaults plus the chips somebody
+  // added. Wider than the pull in status (this spans closed work), never wider
+  // in project — which is why a miss here is reported as "in the projects it
+  // searches" rather than as "nowhere". Read ONCE, here, and carried on the
+  // state: it is the scope this answer was obtained under.
+  const scope = [...new Set([...props.scopeProjects, ...props.userProjects])];
+  // Said from the moment the gesture lands rather than from when the request
+  // goes out. The retry control is the one caller that doesn't come through
+  // `watch(term)`, so without this a click on it changes nothing on screen —
+  // including in the case where it goes on to fail again.
+  found.value = { q: text, loading: true, rows: [], done: false, scope };
   const prior = searchInFlight ?? Promise.resolve();
   const mine = prior.then(async () => {
     // Superseded while queued behind the previous one — don't even ask.
     if (epoch !== searchEpoch) return;
     try {
-      // Scoped to what the sidebar is pulling, host defaults plus the chips
-      // somebody added. Wider than the pull in status (this spans closed work),
-      // never wider in project — which is why a miss here is still reported as
-      // "in the projects it searches" rather than as "nowhere".
-      const rows = await searchTickets(text, [...props.scopeProjects, ...props.userProjects]);
+      const rows = await searchTickets(text, scope);
       if (epoch !== searchEpoch) return;
-      found.rows = rows;
-      found.loading = false;
-      found.done = true;
+      found.value = { q: text, loading: false, rows, done: true, scope };
     } catch (e: unknown) {
       if (epoch !== searchEpoch) return;
-      found.error = String(e);
-      found.loading = false;
-      found.done = true;
+      found.value = { q: text, loading: false, rows: [], done: true, error: String(e), scope };
     }
   });
   searchInFlight = mine;
@@ -1014,16 +1054,20 @@ watch(term, (text) => {
   // Bumped on every change, not only when a search starts: it is what retires a
   // reply for the term that was in the box two keystrokes ago.
   searchEpoch++;
-  found.q = text;
-  // Rows are dropped rather than kept, unlike everything else on this surface.
-  // Keeping the last list is right when a re-pull may fail (see `loadChildren`);
-  // here the previous rows are the answer to a DIFFERENT question, and leaving
-  // them under a term they don't match is a wrong answer rather than a stale one.
-  found.rows = [];
-  found.error = undefined;
-  found.done = false;
-  found.loading = text.length >= MIN_SEARCH;
-  if (!found.loading) return;
+  // Replaced whole, so nothing from the last term survives into this one. Rows
+  // are dropped rather than kept, unlike everything else on this surface:
+  // keeping the last list is right when a re-pull may fail (see `loadChildren`),
+  // but here the previous rows are the answer to a DIFFERENT question, and
+  // leaving them under a term they don't match is a wrong answer rather than a
+  // stale one.
+  found.value = {
+    q: text,
+    loading: text.length >= MIN_SEARCH,
+    rows: [],
+    done: false,
+    scope: [],
+  };
+  if (!found.value.loading) return;
   searchTimer = setTimeout(() => {
     searchTimer = null;
     void runSearch(text);
@@ -1052,13 +1096,15 @@ onBeforeUnmount(() => {
  */
 const elsewhere = computed(() => {
   const here = new Set(augmented.value.map((t) => t.key));
-  return found.rows.filter((t) => !here.has(t.key));
+  return found.value.rows.filter((t) => !here.has(t.key));
 });
 
-/** The projects the search covered, for the copy when it finds nothing. */
-const searchScope = computed(() =>
-  [...new Set([...props.scopeProjects, ...props.userProjects])].join(", "),
-);
+/**
+ * The projects the search actually covered, for the copy when it finds nothing.
+ *
+ * Off the RESULT's own record of them, never off the props — see `FoundState`.
+ */
+const searchScope = computed(() => found.value.scope.join(", "));
 </script>
 
 <template>
