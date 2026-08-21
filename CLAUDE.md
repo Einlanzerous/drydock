@@ -830,23 +830,33 @@ with the second deploy, on the host where a deploy is least casual.
    before it reads the accounts store, so the 503 a store outage produces for a
    TOKEN-bearing caller is not reachable here. Check that if the route's
    anonymous answer ever moves; the harness asserts it directly rather than
-   assuming it.
-3. **`-f` is no longer what would reproduce it.** With `-w '%{http_code}'` the
+   assuming it, for `single` — the `multi` half is reasoned from that
+   short-circuit, since it needs Postgres.
+3. **The status code alone is not enough, and saying otherwise was this
+   change's own bug** (review, against the first version). Rejecting 5xx does
+   nothing about a plain 200 page, which is what a stray web server on the port
+   serves and which `curl -fsS` accepted too — so the comment claiming the pair
+   made this "a test of is it OUR daemon" was measurably stronger than the code.
+   It is now true instead: a 200 must carry `"sessions"` and a 401
+   `"authRequired"`. And this is a deploy-path case rather than a lab one — if
+   anything is already holding `:4318` the daemon loses the bind and exits, so
+   the squatter is precisely what answers the probe.
+4. **`-f` is no longer what would reproduce it.** With `-w '%{http_code}'` the
    flag still prints 401 and merely exits 22 (measured, curl 8.5.0), which the
    `|| true` swallows. What would bring the bug back is the old IDIOM — `if curl
    -fsS …; then` — so the guard against it is a style check, and the
    behavioural guard is a live 401 from a real daemon.
-4. **The probe had no timeout, and that is a second bug in the same two lines.**
+5. **The probe had no timeout, and that is a second bug in the same two lines.**
    A listener that accepts and never answers (a wedged event loop, a stale nginx
    in front of prod) hung the deploy forever with nothing on stdout. `-m 5`
    bounds an attempt.
-5. **`prod_port` needs its `|| true`.** The script runs under `set -eo
+6. **`prod_port` needs its `|| true`.** The script runs under `set -eo
    pipefail`, and both a missing `.env` and a `.env` with no `DRYDOCK_PORT` line
    make that pipeline non-zero — which took the whole script down at the last
    step rather than falling back to the default. Inherited from the inline
    version; only reachable on a hand-edited prod `.env`, which is the file
    people hand-edit.
-6. **One probe, called twice** — same reasoning as DRY-87's one renderer.
+7. **One probe, called twice** — same reasoning as DRY-87's one renderer.
    `DRYDOCK_DEPLOY_PROBE=1 deploy/install-prod.sh` runs it against this host's
    configured daemon and exits, touching nothing, which is both what the harness
    drives and a question worth being able to ask ("would this host's deploy call
@@ -857,8 +867,9 @@ Harness: `scripts/verify/deploy-probe.mts`, rig in its README — two daemons it
 starts itself, no browser, no systemd, about a minute. Its control runs the
 literal old command against the auth-on daemon and requires it to fail, so a
 posture that stopped being auth-on can't pass this file. Confirm it
-discriminates with any of three mutations: accept only 200 (**3 of 22**), accept
-any HTTP response (**4 of 22**), drop `-m 5` (**2 of 22**).
+discriminates with any of four mutations, each failing a different section:
+accept only 200 (**3 of 23**), accept any HTTP response (**6 of 23**), accept on
+the status code alone (**2 of 23**), drop `-m 5` (**2 of 23**).
 
 ## A session's first output (DRY-79)
 

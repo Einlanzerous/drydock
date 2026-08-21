@@ -157,12 +157,14 @@ DRYDOCK_DEPLOY_PROBE=1 deploy/install-prod.sh   # probes the configured port, ex
 ```
 
 It resolves the port from the prod `.env` the same way the deploy does, and
-prints what it saw. `answered HTTP 200` and `answered HTTP 401` are both a
-healthy daemon — the second is auth being on. `no HTTP response` means nothing
-is listening: that is the case for `journalctl --user -u drydock-daemon`. A
-different status code means something is on that port and it is not a Drydock
-daemon, which is a much more specific problem than a dead deploy — check what
-else binds `:4318` before restarting anything.
+prints what it saw. `HTTP 200` and `HTTP 401` are both a healthy daemon — the
+second is auth being on. `no HTTP response` means nothing is listening: that is
+the case for `journalctl --user -u drydock-daemon`. `answered HTTP <code>, but
+not as a Drydock daemon` means something else is on that port — including when
+that something answers 200, since the probe checks the body and not just the
+code. That is a much more specific problem than a dead deploy, and a likely one:
+if anything is already holding `:4318` the daemon loses the bind and exits. Find
+out what else binds it before restarting anything.
 
 ## Who may use it (DRY-27)
 

@@ -1200,11 +1200,19 @@ Four claims, and the middle two are the ones a naive fix gets wrong:
   password, and its anonymous status code is asserted **before** the probe runs
   against it. The control beside it runs the literal old command (`curl -fsS`)
   against the same daemon and requires it to FAIL — without that, the check
-  below it could pass because auth wasn't actually on.
+  below it could pass because auth wasn't actually on. That posture is `single`;
+  the claim that `multi` answers an anonymous caller identically is reasoned in
+  a comment there rather than measured, because `multi` needs Postgres and this
+  file deliberately takes none. Don't read it as covering all three postures.
 - **Anything else on the port does not.** "Any HTTP response means it's up"
   cures the ticket and then reports a healthy deploy while prod is down behind a
   proxy — 502/503/504 is exactly what a reverse proxy with a dead upstream
-  answers. Squatters answering 404 and 503 must both fail, naming what they saw.
+  answers. And rejecting 5xx is not enough either: a stray web server's plain
+  200 page cannot be told from the daemon by status code, so the probe requires
+  `"sessions"` in a 200 body and `"authRequired"` in a 401 one. Squatters
+  answering 404, 503 **and 200** must all fail, naming what they saw. This is a
+  deploy-path case, not a lab one — if something is already holding `:4318` the
+  daemon loses the bind and exits, and the squatter is what answers.
 - **The probe cannot hang the deploy.** It had no timeout at all, so a listener
   that accepts and never answers waited forever with nothing on stdout. A
   black-hole listener must give up, and the assertion is on wall-clock.
@@ -1215,14 +1223,15 @@ Four claims, and the middle two are the ones a naive fix gets wrong:
 
 ### Making sure this one still discriminates
 
-Three mutations of `probe_daemon`, all measured, and they fail in three
-different sections — which is why there are three:
+Four mutations of `probe_daemon`, all measured, each failing a different
+section — which is why there are four:
 
 | mutation | fails |
 |---|---|
-| accept only `200` (the ticket's bug) | **3 of 22**, all in "auth on" |
-| accept any HTTP response (the overcorrection) | **4 of 22**, every squatter check |
-| drop `-m 5` from the curl (unbounded) | **2 of 22**, the black-hole pair |
+| accept only `200` (the ticket's bug) | **3 of 23**, all in "auth on" |
+| accept any HTTP response (the overcorrection) | **6 of 23**, every squatter check |
+| accept on the status code alone, body unread | **2 of 23**, the 200 squatter |
+| drop `-m 5` from the curl (unbounded) | **2 of 23**, the black-hole pair |
 
 Two notes for anyone reworking it. Its servers live in this process, so the
 probe runs with `spawn` and not `spawnSync` — `spawnSync` blocks the event loop,

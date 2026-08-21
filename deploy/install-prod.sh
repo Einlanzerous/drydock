@@ -130,42 +130,54 @@ prod_port() {
 # is to go poking at a prod daemon holding live agent PTYs, which is the real
 # cost.
 #
-# 200 and 401 are exhaustive over this daemon's postures, so the case list stays
-# a test of "is it OUR daemon" rather than degrading into "is anything on this
-# port". Anonymously, /api/sessions answers 200 with auth off and 401 with it on
-# — under `single` AND `multi`, because `Auth.identify` short-circuits on a
-# missing credential (reason "anonymous") before it reads the accounts store, so
-# the 503 that a store outage produces for a TOKEN-bearing caller is not
-# reachable here. Which is worth being strict about: 502/503/504 is exactly what
-# a proxy with a dead upstream answers, and accepting those would trade this
-# ticket's false failure for a deploy that reports success while prod is down.
+# 200 and 401 are exhaustive over this daemon's postures. Anonymously,
+# /api/sessions answers 200 with auth off and 401 with it on — under `single`
+# AND `multi`, because `Auth.identify` short-circuits on a missing credential
+# (reason "anonymous") before it reads the accounts store, so the 503 that a
+# store outage produces for a TOKEN-bearing caller is not reachable here.
+#
+# THE STATUS CODE IS NOT ENOUGH ON ITS OWN, which is review's find on the first
+# version of this and the reason the body is read. The hazard this probe has to
+# survive is that something ELSE is on the port: if anything is already holding
+# :4318 the daemon loses the bind and exits, and the squatter answers instead.
+# Rejecting 5xx catches a proxy with a dead upstream; it does nothing about a
+# plain 200 page, which is what a stray web server on that port serves and which
+# the old `curl -fsS` accepted too. So a 200 must carry `"sessions"` and a 401
+# must carry `"authRequired"` — one field each, both from this daemon's own
+# routes, and cheap enough to check with a glob. Without this the probe tells a
+# live port from a dead one, which is a weaker claim than "prod is up".
 #
 # -m bounds an attempt: a daemon can accept a connection and then never answer
 # (a wedged event loop, a stale nginx in front of it), and the old probe had no
 # timeout at all — so that case hung the deploy forever with nothing on stdout.
 probe_daemon() {
-  local port="$1" code=""
+  local port="$1" out="" code="" body=""
   for _ in 1 2 3 4 5; do
     sleep 1
-    code="$(curl -s -m 5 -o /dev/null -w '%{http_code}' \
-              "http://127.0.0.1:$port/api/sessions" 2>/dev/null || true)"
+    # `-w` appends the status as the last three characters of stdout — always
+    # three, `000` when nothing answered — so one curl yields both halves
+    # without a temp file.
+    out="$(curl -s -m 5 -w '%{http_code}' \
+             "http://127.0.0.1:$port/api/sessions" 2>/dev/null || true)"
+    if [ "${#out}" -ge 3 ]; then code="${out: -3}"; body="${out%???}"; else code="000"; body=""; fi
     case "$code" in
-      200|401) printf '%s\n' "$code"; return 0 ;;
+      200) case "$body" in *'"sessions"'*) printf '%s\n' "$code"; return 0 ;; esac ;;
+      401) case "$body" in *'"authRequired"'*) printf '%s\n' "$code"; return 0 ;; esac ;;
     esac
   done
   printf '%s\n' "${code:-000}"
   return 1
 }
 
-# Say what the probe saw, for the error line. A deploy that ends in a failure it
-# cannot explain sends somebody to `journalctl` on a prod daemon that may be
-# perfectly healthy; "answered HTTP 404" and "no HTTP response" point at
-# completely different problems.
-probe_detail() {
+# What a FAILING probe saw, for the error line. A deploy that ends in a failure
+# it cannot explain sends somebody to `journalctl` on a prod daemon that may be
+# perfectly healthy; "no HTTP response" and "answered HTTP 200, but not as a
+# Drydock daemon" point at completely different problems, and only the first is
+# worth a journal.
+probe_failure() {
   case "${1:-}" in
     000|"") printf 'no HTTP response' ;;
-    200|401) printf 'answered HTTP %s' "$1" ;;
-    *) printf 'answered HTTP %s — something is on this port, but it is not a Drydock daemon' "$1" ;;
+    *) printf 'answered HTTP %s, but not as a Drydock daemon' "$1" ;;
   esac
 }
 
@@ -187,10 +199,10 @@ fi
 if [ -n "${DRYDOCK_DEPLOY_PROBE:-}" ]; then
   probe_port="$(prod_port)"
   if probe_code="$(probe_daemon "$probe_port")"; then
-    echo "drydock prod daemon answering on :$probe_port ($(probe_detail "$probe_code"))"
+    echo "drydock prod daemon answering on :$probe_port (HTTP $probe_code)"
     exit 0
   fi
-  echo "error: daemon not answering on :$probe_port ($(probe_detail "$probe_code"))" >&2
+  echo "error: daemon not answering on :$probe_port ($(probe_failure "$probe_code"))" >&2
   exit 1
 fi
 
@@ -275,5 +287,5 @@ if CODE="$(probe_daemon "$PORT")"; then
   echo "note: to survive logout/reboot, enable lingering once: sudo loginctl enable-linger $USER"
   exit 0
 fi
-echo "error: daemon not answering on :$PORT ($(probe_detail "$CODE")) — check: journalctl --user -u drydock-daemon -n 50" >&2
+echo "error: daemon not answering on :$PORT ($(probe_failure "$CODE")) — check: journalctl --user -u drydock-daemon -n 50" >&2
 exit 1

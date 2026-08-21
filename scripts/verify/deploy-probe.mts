@@ -26,8 +26,11 @@
 //   2. The fix's failure mode is the mirror of the bug. "Any HTTP response means
 //      it's up" also cures the false failure — and then reports a successful
 //      deploy when an nginx with a dead upstream is sitting on the port and prod
-//      is down. So the squatter cases below are not decoration; they are the
-//      half of the fix that a naive one gets wrong.
+//      is down. Nor is rejecting 5xx enough on its own: a stray web server's
+//      plain 200 page is indistinguishable from the daemon by status code, so
+//      the probe reads a field out of the body and the squatters below include
+//      one answering 200. That third case is review's; the first version of
+//      this file tested 404 and 503, neither of which can catch it.
 //   3. The probe had no timeout at all, so a listener that accepts and never
 //      answers hung the deploy forever with nothing on stdout. That is a claim
 //      about wall-clock, which curl can't express and reading can't confirm.
@@ -40,13 +43,14 @@
 // they are what catches a second, differently-spelled curl being added to the
 // tail.
 //
-// CONFIRM IT DISCRIMINATES. Three mutations of `probe_daemon`, each measured
-// rather than counted by hand, and they fail in three different sections —
-// which is the point of having all three:
+// CONFIRM IT DISCRIMINATES. Four mutations of `probe_daemon`, each measured
+// rather than counted by hand, and each failing a different section — which is
+// the point of having four:
 //
-//   accept only 200 (the ticket's bug)          3 of 22, all in "auth on"
-//   accept any HTTP response (the overcorrect)  4 of 22, all four squatter checks
-//   drop `-m 5` from the curl (unbounded)       2 of 22, the black-hole pair
+//   accept only 200 (the ticket's bug)          3 of 23, all in "auth on"
+//   accept any HTTP response (the overcorrect)  6 of 23, every squatter check
+//   accept on the status code alone             2 of 23, the 200 squatter
+//   drop `-m 5` from the curl (unbounded)       2 of 23, the black-hole pair
 //
 // RIG: no browser, no database, no systemd, no second terminal — this file owns
 // its daemons.
@@ -231,11 +235,11 @@ async function status(url: string): Promise<number> {
 }
 
 /** Something on PORT that is not a Drydock daemon, answering one status code. */
-function squatter(code: number): Promise<http.Server> {
+function squatter(code: number, body: string): Promise<http.Server> {
   return listening(
     http.createServer((_req, res) => {
-      res.writeHead(code, { "Content-Type": "text/plain" });
-      res.end("nope\n");
+      res.writeHead(code, { "Content-Type": "text/html" });
+      res.end(body);
     }),
   );
 }
@@ -395,7 +399,16 @@ async function main(): Promise<void> {
   // The premise. If this stops being 401 — a route moved behind a different
   // code, a posture renamed — everything below is testing nothing, so it has to
   // fail here rather than further down.
-  check("rig: /api/sessions answers 401 anonymously", anonOn === 401, String(anonOn));
+  //
+  // This is the `single` tier. The claim the probe rests on is that `multi`
+  // answers an anonymous caller identically, and that half is REASONED rather
+  // than measured here: `multi` needs Postgres, which this file deliberately
+  // does not take. The reasoning is that `Auth.identify` returns `anonymous`
+  // before `stillValid` can reach `store.users` (daemon/src/auth/index.ts), so
+  // no store outage and no `needsSetup` state can move the code off 401 — but
+  // CLAUDE.md's DRY-27 section is emphatic that the three postures are
+  // different code paths, so do not read this line as covering all of them.
+  check("rig: /api/sessions answers 401 anonymously (single)", anonOn === 401, String(anonOn));
 
   // THE CONTROL, and it runs on every invocation. This is the exact command the
   // script used to end with; against this daemon it must FAIL, or the posture
@@ -425,21 +438,37 @@ async function main(): Promise<void> {
     dead.err.trim(),
   );
 
-  // The other half of the fix. "Any HTTP response means it's up" cures the
-  // ticket and reports a healthy deploy while prod is down behind a proxy —
-  // 502/503/504 is precisely what a reverse proxy with a dead upstream answers.
-  for (const code of [404, 503]) {
-    const server = await squatter(code);
+  // The other half of the fix, and it is the half a naive one gets wrong twice
+  // over. "Any HTTP response means it's up" cures the ticket and then reports a
+  // healthy deploy while prod is down behind a proxy — 502/503/504 is precisely
+  // what a reverse proxy with a dead upstream answers. And rejecting 5xx is not
+  // enough on its own (review's find on the first version of this file, which
+  // tested only 404 and 503): a plain 200 page is what a stray web server
+  // serves, and no status code can tell it from the daemon. This is a real
+  // deploy-path case rather than a lab one — if anything is already holding
+  // :4318 the daemon loses the bind and exits, so the squatter is what answers
+  // the probe.
+  const squatters = [
+    { code: 404, body: "nope\n", what: "a proxy with no route" },
+    { code: 503, body: "nope\n", what: "a proxy with a dead upstream" },
+    {
+      code: 200,
+      body: "<html><body><h1>Welcome to nginx!</h1></body></html>",
+      what: "a stray web server",
+    },
+  ];
+  for (const sq of squatters) {
+    const server = await squatter(sq.code, sq.body);
     const squat = await probe(prodDirOn(PORT));
     await closeServer(server);
     check(
-      `something else answering ${code} -> the probe fails`,
+      `${sq.what} answering ${sq.code} -> the probe fails`,
       squat.code === 1,
       `exit ${squat.code}`,
     );
     check(
-      `and names the ${code} rather than blaming the daemon`,
-      new RegExp(`${code}`).test(squat.err) && /not a Drydock daemon/.test(squat.err),
+      `and names the ${sq.code} rather than blaming the daemon`,
+      new RegExp(`${sq.code}`).test(squat.err) && /not as a Drydock daemon/.test(squat.err),
       squat.err.trim(),
     );
   }
@@ -449,8 +478,9 @@ async function main(): Promise<void> {
   const hole = await blackHole();
   const hung = await probe(prodDirOn(PORT));
   await closeServer(hole);
-  // Without `-m` on the curl this never returns: spawnSync's own timeout fires
-  // at 90s and reports a signal instead of a status.
+  // Without `-m` on the curl this never returns, and the harness's own 90s
+  // timer is what ends it — which shows up as a SIGKILL and no status, hence
+  // asserting on both.
   check(
     "a black-hole listener -> the probe gives up",
     hung.code === 1 && hung.signal === null,
@@ -496,12 +526,11 @@ async function main(): Promise<void> {
   // on into a clone, an install and a `systemctl --user restart
   // drydock-daemon.service` — this host's real prod unit.
   const invoked = fs.existsSync(STUB_MARKER) ? fs.readFileSync(STUB_MARKER, "utf8").trim() : "";
+  // The marker is the whole check. A sibling asserting `$PROD_DIR/.git` is
+  // absent was here and is gone: the stub `git` exits 0 without cloning, so
+  // that directory could not appear under any mutation of the installer, and a
+  // check that cannot fail is worse than none (review).
   check("no probe run reached git, bun or systemctl", invoked === "", invoked.slice(0, 200));
-  check(
-    "and none of them made a checkout",
-    !fs.existsSync(path.join(PROD_DIR, ".git")),
-    fs.readdirSync(PROD_DIR).join(","),
-  );
 
   await teardown();
   console.log(failures === 0 ? "\nAll checks passed." : `\n${failures} check(s) failed.`);
