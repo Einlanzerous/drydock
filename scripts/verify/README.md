@@ -1239,18 +1239,34 @@ answerer.
 
 ### Making sure this one still discriminates
 
-Eight mutations, all measured, each failing a different section:
+Ten mutations, all measured, each failing a different section:
 
 | mutation | fails |
 |---|---|
-| accept only `200` (the ticket's bug) | **3 of 28**, all in "auth on" |
-| accept any HTTP response (the overcorrection) | **8 of 28**, every squatter check |
-| accept on the status code alone, body unread | **2 of 28**, the 200 squatter |
-| drop `-m 5` from the curl (unbounded) | **2 of 28**, the black-hole pair |
-| put `-f` back on the curl | **4 of 28**, "auth on" plus the static check |
-| `prod_port` without its quote/space trim | **1 of 28**, the quoted `.env` |
-| `prod_port` back to `tail -1` | **1 of 28**, the duplicate-key `.env` |
-| one journal hint for every failure | **2 of 28**, the two 5xx squatters |
+| accept only `200` (the ticket's bug) | **3 of 30**, all in "auth on" |
+| accept any HTTP response (the overcorrection) | **8 of 30**, every squatter check |
+| accept on the status code alone, body unread | **2 of 30**, the 200 squatter |
+| drop `-m 5` from the curl (unbounded) | **2 of 30**, the black-hole pair |
+| put `-f` back on the curl (either line) | **4 of 30**, "auth on" plus the static check |
+| `prod_port` without its quote/space trim | **2 of 30**, the quoted and spaced `.env` |
+| `prod_port` back to `tail -1` | **1 of 30**, the duplicate-key `.env` |
+| `prod_port` back to a bare `^KEY=` anchor | **2 of 30**, the indented and spaced `.env` |
+| drop `probe_failure`'s 5xx arm | **2 of 30**, the 503 and 500 squatters |
+| a journal hint on every arm | **2 of 30**, the 404 and 200 squatters |
+
+The last two are a **pair with disjoint failures** — the 5xx squatters assert the
+journal hint is present, the 404 and 200 ones assert it is absent — so each
+mutation leaves the other's checks green. Review caught this table naming the
+wrong pair, which is worse than a missing row: the table is what the next person
+runs to decide whether this file still works, and two unexpected failures read
+as the mutation having hit something else.
+
+The `^KEY=` row is the one to read if you are reworking the `.env` checks. It
+failed **0 of 30** when those checks only asserted `exit 0`: `prod_port` falls
+back to 4318, which on a developer's machine is the REAL prod daemon answering
+401, so the probe exited 0 with a healthy verdict about somebody else's daemon —
+against the exact bug the check was written for. They assert the reported port
+now.
 
 The `-f` row is worth its own note, because it changed hands during review.
 While the probe read only the status code, `-f` was harmless — `-w

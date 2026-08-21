@@ -43,19 +43,28 @@
 // they are what catches a second, differently-spelled curl being added to the
 // tail.
 //
-// CONFIRM IT DISCRIMINATES. Eight mutations, each measured rather than counted
-// by hand, and each failing a different section:
+// CONFIRM IT DISCRIMINATES. Ten mutations, each measured rather than counted by
+// hand, and each failing a different section:
 //
-//   accept only 200 (the ticket's bug)          3 of 28, all in "auth on"
-//   accept any HTTP response (the overcorrect)  8 of 28, every squatter check
-//   accept on the status code alone             2 of 28, the 200 squatter
-//   drop `-m 5` from the curl (unbounded)       2 of 28, the black-hole pair
-//   put `-f` back on the curl                   4 of 28, "auth on" + the static
+//   accept only 200 (the ticket's bug)          3 of 30, all in "auth on"
+//   accept any HTTP response (the overcorrect)  8 of 30, every squatter check
+//   accept on the status code alone             2 of 30, the 200 squatter
+//   drop `-m 5` from the curl (unbounded)       2 of 30, the black-hole pair
+//   put `-f` back on the curl                   4 of 30, "auth on" + the static
 //     …and the same with the flag on the curl's SECOND line, which is the
 //     mutation the static check was blind to before the fold (review)
-//   `prod_port` without its quote/space trim    1 of 28, the quoted .env
-//   `prod_port` back to `tail -1`               1 of 28, the duplicate-key .env
-//   one journal hint for every failure          2 of 28, the two 5xx squatters
+//   `prod_port` without its quote/space trim    2 of 30, the quoted + spaced .env
+//   `prod_port` back to `tail -1`               1 of 30, the duplicate-key .env
+//   `prod_port` back to a bare `^KEY=` anchor   2 of 30, the indented + spaced .env
+//   drop `probe_failure`'s 5xx arm              2 of 30, the 503 and 500 squatters
+//   a journal hint on EVERY arm                 2 of 30, the 404 and 200 squatters
+//
+// The last two are a PAIR and their failures are disjoint: the 5xx squatters
+// assert the journal hint is there, the 404 and 200 ones assert it is not, so a
+// mutation that adds the hint everywhere leaves the 5xx checks green and vice
+// versa. Review caught this table naming the wrong pair — the count was right
+// and the attribution was not, which is worse than an absent row, because the
+// table is what the next person runs to see whether this file still works.
 //
 // RIG: no browser, no database, no systemd, no second terminal — this file owns
 // its daemons.
@@ -380,36 +389,42 @@ async function main(): Promise<void> {
     off.out.trim(),
   );
 
-  // The .env is hand-edited on a prod host — the unit keeps every DRYDOCK_* in
-  // it — so the probe has to read a value the way `env.ts` does. `cut` alone
-  // hands back `"4381"` including the quotes and probes `:"4381"`, which is
-  // this ticket's failure in a different spelling (review).
-  fs.mkdirSync(path.join(SCRATCH, "prod-quoted"), { recursive: true });
-  fs.writeFileSync(path.join(SCRATCH, "prod-quoted", ".env"), `DRYDOCK_PORT="${PORT}"\n`);
-  const quoted = await probe(path.join(SCRATCH, "prod-quoted"));
-  check(
-    "a quoted DRYDOCK_PORT still finds the daemon",
-    quoted.code === 0,
-    `exit ${quoted.code} ${(quoted.out + quoted.err).trim()}`,
-  );
-
-  // And the FIRST DRYDOCK_PORT line wins, because that is the one `env.ts`
-  // uses — it skips a key already in the environment, so a later line is dead
-  // text. Appending is how a .env gets edited, so last-wins put the probe on a
-  // port the daemon was not on: the ticket again, and nastier than the quoted
-  // case because the file makes neither port look wrong (review).
+  // The .env is hand-edited on a prod host — the unit deliberately keeps every
+  // DRYDOCK_* in it — so the probe has to read it the way `env.ts` does or it
+  // aims at the wrong daemon. Each of these was a real false failure found in
+  // review, in this one line, three rounds running: `cut` alone probes
+  // `:"4381"`; `tail -1` takes a line `env.ts` never reads, since it skips a
+  // key already set; and `^DRYDOCK_PORT=` misses an entry `env.ts` trims into
+  // shape. The last is the worst on a dev box — the probe falls back to 4318
+  // and reports a healthy verdict about the REAL prod daemon.
   const spare = await freePort();
-  fs.mkdirSync(path.join(SCRATCH, "prod-dup"), { recursive: true });
-  fs.writeFileSync(
-    path.join(SCRATCH, "prod-dup", ".env"),
-    `DRYDOCK_PORT=${PORT}\n# somebody moved the port and appended it\nDRYDOCK_PORT=${spare}\n`,
-  );
-  const dup = await probe(path.join(SCRATCH, "prod-dup"));
-  check(
-    "a second DRYDOCK_PORT line does not win",
-    dup.code === 0,
-    `exit ${dup.code} ${(dup.out + dup.err).trim()}`,
-  );
+  const envShapes = [
+    { name: "a quoted DRYDOCK_PORT", body: `DRYDOCK_PORT="${PORT}"\n` },
+    {
+      name: "a second DRYDOCK_PORT line",
+      body: `DRYDOCK_PORT=${PORT}\n# somebody moved the port and appended it\nDRYDOCK_PORT=${spare}\n`,
+    },
+    { name: "an indented DRYDOCK_PORT", body: `  DRYDOCK_PORT=${PORT}\n` },
+    { name: "spaces around the =", body: `DRYDOCK_PORT = ${PORT}\n` },
+  ];
+  for (const [i, shape] of envShapes.entries()) {
+    const dir = path.join(SCRATCH, `prod-env-${i}`);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, ".env"), shape.body);
+    const run = await probe(dir);
+    // The PORT is asserted, not just the exit status, and that is the whole
+    // check on a developer's machine. `prod_port` falls back to 4318 when it
+    // cannot find the key — which is the REAL prod daemon on this host, and it
+    // answers 401 — so an exit-0 test passes against the very bug it is aimed
+    // at, reporting a healthy verdict about somebody else's daemon. Measured:
+    // reverting the anchor to `^DRYDOCK_PORT=` failed 0 of 30 before this line
+    // existed, and 2 of 30 after.
+    check(
+      `${shape.name} still finds the daemon`,
+      run.code === 0 && run.out.includes(`:${PORT}`),
+      `exit ${run.code} ${(run.out + run.err).trim()}`,
+    );
+  }
 
   // The port comes from the .env the deploy just seeded, not from a guess. Same
   // daemon, still running: only the .env moves.
@@ -609,5 +624,15 @@ process.on("unhandledRejection", async (err) => {
   await teardown();
   process.exit(1);
 });
+
+// An interrupted run must not leave its daemon holding the port — found by
+// piping this file's output through `head`, which SIGPIPEs it mid-run and left
+// a daemon on :4381 that the NEXT run then refused to start against. The
+// refusal is the port guard working; the orphan is this handler's absence.
+for (const signal of ["SIGINT", "SIGTERM", "SIGPIPE"] as const) {
+  process.on(signal, () => {
+    void teardown().then(() => process.exit(1));
+  });
+}
 
 await main();

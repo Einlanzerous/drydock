@@ -119,7 +119,15 @@ prod_port() {
   # daemon uses. Last-wins put the probe on a port the daemon was not on — the
   # ticket's own failure again, reached by editing this .env the way people
   # actually edit it, which is to append (review).
-  port="$(grep -E '^DRYDOCK_PORT=' "$PROD_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)"
+  # The anchor allows what `env.ts` allows on the KEY side: it trims the whole
+  # line and then the key, so an indented entry or spaces around the `=` are
+  # ordinary config to the daemon and were invisible to a bare `^DRYDOCK_PORT=`.
+  # The daemon bound the configured port and the probe went to :4318 — and on a
+  # dev box that is not a miss, it is a healthy verdict about the REAL prod
+  # daemon (review). Third spelling of the same gap; hence the anchor rather
+  # than another special case.
+  port="$(grep -E '^[[:space:]]*DRYDOCK_PORT[[:space:]]*=' "$PROD_DIR/.env" 2>/dev/null \
+            | head -1 | cut -d= -f2- || true)"
   # Then read it the way the DAEMON reads it. `env.ts` trims the value and
   # strips a matching quote pair; `cut` does neither. So a prod .env holding
   # DRYDOCK_PORT="4318" — and that file is hand-edited, since the unit keeps all

@@ -887,13 +887,23 @@ Harness: `scripts/verify/deploy-probe.mts`, rig in its README — two daemons it
 starts itself, no browser, no systemd, about a minute. Its control runs the
 literal old command against the auth-on daemon and requires it to fail, so a
 posture that stopped being auth-on can't pass this file. Confirm it
-discriminates with any of eight mutations, each failing a different section:
-accept only 200 (**3 of 28**), accept any HTTP response (**8 of 28**), accept on
-the status code alone (**2 of 28**), drop `-m 5` (**2 of 28**), put `-f` back
-(**4 of 28**, and try it on the curl's second line — the static check folds
+discriminates with any of ten mutations, each failing a different section:
+accept only 200 (**3 of 30**), accept any HTTP response (**8 of 30**), accept on
+the status code alone (**2 of 30**), drop `-m 5` (**2 of 30**), put `-f` back
+(**4 of 30**, and try it on the curl's second line — the static check folds
 continuations, and did not before review), `prod_port` without its trim
-(**1 of 28**) or back to `tail -1` (**1 of 28**), one journal hint for every
-failure (**2 of 28**).
+(**2 of 30**), back to `tail -1` (**1 of 30**) or to a bare `^KEY=` anchor
+(**2 of 30**), drop the 5xx arm (**2 of 30**) and a journal hint on every arm
+(**2 of 30**).
+
+Two things about that table, both review's and both about the table rather than
+the code. The last two mutations are a PAIR whose failures are disjoint, so
+naming the wrong one sends the next person looking for a bug that isn't there.
+And the `.env`-shape checks failed **0 of 30** while they asserted only `exit 0`:
+`prod_port` falls back to 4318, which on a dev box is the real prod daemon
+answering 401, so the harness passed against the bug by finding somebody else's
+daemon. They assert the reported PORT now — the same "assert on what arrived"
+rule the DRY-27 section states, in a place nobody thought to apply it.
 
 ## A session's first output (DRY-79)
 
