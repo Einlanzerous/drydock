@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.4.0](https://github.com/Einlanzerous/drydock/compare/v1.3.0...v1.4.0) (2026-08-20)
+
+
+### Features
+
+* **daemon:** forward body.env to a spawn, with a guard (DRY-66) ([a5db98e](https://github.com/Einlanzerous/drydock/commit/a5db98ec41545e2b08a6f292812d2d9bcc4611dd))
+* **daemon:** forward body.env to a spawn, with a guard (DRY-66) ([3d5b8b3](https://github.com/Einlanzerous/drydock/commit/3d5b8b35af8ebaf18b132af7e32849bf7af8738e))
+
+
+### Bug Fixes
+
+* **daemon:** address review on the spawn replay (DRY-79) ([10502e9](https://github.com/Einlanzerous/drydock/commit/10502e94a3289206901f71b45b6f81d8febe1d7e))
+* **daemon:** close four deny-set gaps review found in the spawn env (DRY-66) ([7071a5b](https://github.com/Einlanzerous/drydock/commit/7071a5bbfc8c36c97ccac504e75b79eb44f5967e))
+* **daemon:** take the supervisor's replay on the spawn path too (DRY-79) ([105db22](https://github.com/Einlanzerous/drydock/commit/105db22d0d861d217ddaa24ee3584b9305055e7b))
+* **daemon:** take the supervisor's replay on the spawn path too (DRY-79) ([3bfcc5f](https://github.com/Einlanzerous/drydock/commit/3bfcc5f1fa84efe9a80adbe705d17ce592416b12))
+
 ## [1.3.0](https://github.com/Einlanzerous/drydock/compare/v1.2.0...v1.3.0) (2026-08-13)
 
 
