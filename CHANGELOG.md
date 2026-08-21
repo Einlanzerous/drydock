@@ -1,5 +1,38 @@
 # Changelog
 
+## [1.6.0](https://github.com/Einlanzerous/drydock/compare/v1.5.0...v1.6.0) (2026-08-21)
+
+
+### Features
+
+* **ci:** publish OCI revision and source labels on the shell image (DRY-91) ([106a222](https://github.com/Einlanzerous/drydock/commit/106a22265ce18a6b3d448aff8e437fb6a725cbf8))
+* **ci:** publish OCI revision and source labels on the shell image (DRY-91) ([54f4523](https://github.com/Einlanzerous/drydock/commit/54f452305f9a72ed890b81a8ca9b59e3c977cbec))
+* **shell:** rework the desk chrome (DRY-82) ([5ce0905](https://github.com/Einlanzerous/drydock/commit/5ce0905f9f93a6454ad724f1f1035764f9feb169))
+* **shell:** rework the desk chrome (DRY-82) ([275f184](https://github.com/Einlanzerous/drydock/commit/275f18440ef6e3f2b15d61b7933afb35c9f3abf6))
+
+
+### Bug Fixes
+
+* **deploy:** check the probe's body, not just its status (DRY-81) ([11c0f5e](https://github.com/Einlanzerous/drydock/commit/11c0f5eee7d57d1307c4877b4d627474e927f9a3))
+* **deploy:** find the .env the way env.ts finds it (DRY-81) ([67446bd](https://github.com/Einlanzerous/drydock/commit/67446bd3717cd4be6baadf8886a7ae5a253453f2))
+* **deploy:** give the restarted daemon 60s, and print the code it gave (DRY-81) ([268440a](https://github.com/Einlanzerous/drydock/commit/268440a7a676637ad6c76c3fae42632ed5591522))
+* **deploy:** let a 401 count as a healthy daemon (DRY-81) ([580db3c](https://github.com/Einlanzerous/drydock/commit/580db3c8e09642f99beaeee0df751373b73028f0))
+* **deploy:** let a 401 count as a healthy daemon (DRY-81) ([708c367](https://github.com/Einlanzerous/drydock/commit/708c36728e2696492f4e0fa746dd3ea32a1b68b7))
+* **deploy:** match the .env key the way env.ts does (DRY-81) ([c481f26](https://github.com/Einlanzerous/drydock/commit/c481f26f3f7baffd2f74110bf1285787f881f349))
+* **deploy:** read the .env like env.ts, and split the failure line (DRY-81) ([9d956e8](https://github.com/Einlanzerous/drydock/commit/9d956e8b492e8b01a5d165a20e86aca84d6d5090))
+* **deploy:** take the first DRYDOCK_PORT, and send 5xx to the journal (DRY-81) ([76ef2b7](https://github.com/Einlanzerous/drydock/commit/76ef2b7ac4c31f00da46aec0a81fa597eef5d7c1))
+* **shell:** close five review findings on the sidebar search (DRY-82) ([506342e](https://github.com/Einlanzerous/drydock/commit/506342e8b16dd7e5795645f6619cfb22b5d138f5))
+* **shell:** close three more review findings on the palette and sidebar (DRY-82) ([ab6006b](https://github.com/Einlanzerous/drydock/commit/ab6006b08b845490bce3ceaafe3ba6ebf3d10490))
+* **shell:** give the centred header real slack, and latch it (DRY-82) ([1c438b4](https://github.com/Einlanzerous/drydock/commit/1c438b48578f8f6c306f2325ed3b1cde2dbbd54d))
+* **shell:** keep generic words out of the palette's terms (DRY-82) ([f494b1c](https://github.com/Einlanzerous/drydock/commit/f494b1c430780a9aa9519e64e0cb164e852528e0))
+* **shell:** match a filter value by its stored spelling too (DRY-82) ([e1674b9](https://github.com/Einlanzerous/drydock/commit/e1674b916d28bf9886333975ef21f9d42ae7b49c))
+* **shell:** stop the header painting its controls over the switcher (DRY-82) ([6a12a15](https://github.com/Einlanzerous/drydock/commit/6a12a15a919286fa5dcb2ce12142107df84fdd28))
+
+
+### Documentation
+
+* **ci:** correct the revision rationale's worked example (DRY-91) ([41be8c7](https://github.com/Einlanzerous/drydock/commit/41be8c7e91a1c5916d687594cfb5fed52c77aaa6))
+
 ## [1.5.0](https://github.com/Einlanzerous/drydock/compare/v1.4.0...v1.5.0) (2026-08-21)
 
 
