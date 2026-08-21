@@ -1506,6 +1506,23 @@ restart it to test things.
   a red PR is merged on purpose, not by inattention. The workflow has no path
   filters on purpose: a required check that never reports on a docs-only PR
   would leave it unmergeable.
+- **A second check reads the change** (DRY-92, `.github/workflows/pr-review.yml`):
+  a ~30-line caller of construct-server's shared PR reviewer (SERV-92), the same
+  one switchyard, argosy and signet run. Judgement lives in `REVIEW.md`,
+  generated artifacts in `.github/review-ignore`, and the procedure is fetched
+  from construct-server at run time — don't copy it here, and don't add a
+  `concurrency:` key, which the shared workflow owns. `sensitive_paths` in the
+  caller is the one input that needed thought; it names the daemon's auth,
+  spawn-env, supervisor, sessions-dir, worktree, state and deploy paths, and it
+  was replayed against the last 16 merged PRs (6 escalate, 10 don't) rather than
+  guessed. It runs on a self-hosted runner because the reviewer reads the ticket
+  off Switchyard on loopback. Three things about the colours, because they are
+  not the usual ones: **grey means triage declined** and is the common case on a
+  `synchronize` — push a fix and the check goes grey unless the PR carries the
+  `review:always` label, or you comment `@claude review`; green means a reviewer
+  actually ran; red means it didn't finish, or it found something blocking. It
+  is deliberately **not** a required check — an advisory reviewer that can block
+  a merge is a reviewer nobody can route around at 2am.
 - **Everything under `scripts/` is TypeScript** (DRY-80), with two recorded
   exceptions: `build-native.mjs` is the postinstall, which runs while the
   dependency tree is still being assembled and so cannot rely on a loader being
