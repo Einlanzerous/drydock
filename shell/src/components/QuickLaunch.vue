@@ -45,7 +45,15 @@ interface Pinned {
    * claude instead of opening the ticket somebody was looking for. So `zsh` and
    * `bash` stay (they are what a shell is CALLED, and nothing else here is one)
    * and every word that merely described a row — `agent`, `drawer`, `split`,
-   * `terminal` — is gone. The key already covers `claude` and `workspace`.
+   * `terminal` — is gone.
+   *
+   * The KEYS break the same rule and are kept anyway: `workspace` is in 7 open
+   * DRY titles, `shell` and `claude` in 6 each. That is not an oversight and
+   * there is nothing to remove — the key IS the row's name, and reaching the
+   * row by typing it is the feature. What makes it survivable and a `terms`
+   * collision not is that the row is HIGHLIGHTED, wearing its `↵ spawn` badge,
+   * with the matching tickets visible beneath: the state is legible before the
+   * keypress rather than after it.
    */
   terms: string;
   /** Row glyph: one <path> and its stroke, so the markup stays a single v-for. */

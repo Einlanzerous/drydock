@@ -1513,8 +1513,31 @@ arrives with auth. Now `grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr
    because a squeezed "New session" is a worse answer to a narrow window than a
    truncated directory name.
 3. **Grid rather than `left:50%; transform:translateX(-50%)`** — the switcher
-   stays in flow, so it cannot end up painted over the controls. The harness
-   asserts that separately from the centring, at 1440 and at 1280.
+   stays in flow, so it cannot end up painted over the controls. **That is the
+   ticket's own reason for preferring grid, and the first cut shipped without
+   it holding.** `justify-self: end` pins `.controls` to the end of a `1fr`
+   track while `flex: 0 0 auto` stops its children shrinking, so a cluster too
+   wide for its track grows LEFTWARDS across the middle one: 25px of overlap at
+   1100 and 95px at 960, and `Sign out` spilling past the header's own padding.
+4. **The cause is DISTRIBUTION, not content, and that decides the fix.** At 960
+   the three clusters and their gaps want ~810px of a 960px header — it all
+   fits. What doesn't fit is the controls into a track sized as though the brand
+   needed the same room, which it never does. So below 1300px the header packs
+   (`auto auto minmax(0,1fr)`) instead of centring. Note what packing KEEPS: the
+   switcher then sits after the brand, whose width never changes, so its
+   position still cannot be moved by anything on the right — it simply isn't
+   centred, which is the honest trade at a width where centring would mean
+   painting one control over another. Dropping controls to preserve the centre
+   would have been paying for the wrong thing.
+5. **Measure the FULLEST `.controls`, or the check cannot fail.** Signed out
+   with nothing to clear is the narrowest that cluster ever gets, and it is what
+   a throwaway daemon with no password and intercepted spawns renders — so the
+   harness measured the one posture in which an overlap is impossible, at the
+   two widths where it doesn't happen anyway. The rig now SETS
+   `DRYDOCK_AUTH_PASSWORD` (the only tracker-adjacent rig here that does) and
+   injects a finished session into the poll, and the sweep runs 1360/1300/1240/
+   1100/960. Assert the cluster is actually there first, or the whole sweep
+   quietly measures the easy case again.
 
 **The sidebar's filters are `key=value` pills.** Four selects (Project, Status,
 Assignee, and Epic on a row of its own, because epic titles are sentences) were
@@ -1585,6 +1608,18 @@ tickets *here*?
    project-scoped, so a key from a project the host doesn't pull legitimately
    isn't there — it says which projects it searched rather than showing an empty
    list.
+10a. **`/api/tracker/search` is the one tracker route with no DRY-72 cache, and
+   this is its first caller.** It goes straight at the provider: no
+   `ticketCache`, no single-flight, no `stale`. Deliberate rather than
+   overlooked, and it is worth checking against that ticket's rules before
+   assuming it's a hole. What DRY-72 removed was an unbounded fan-out on a
+   fixed 20s timer per browser tab; this is one page (`limit: 50` in both
+   providers), no child-stats pass (both gate that on `q.open`), fired only by a
+   settled keystroke, debounced at 400ms, one at a time per tab. And leaving it
+   uncached keeps the 502-on-outage path honest — a cached one would need
+   `stale` plumbed through it to avoid DRY-72's trap 2. What it is NOT is
+   deduped across tabs or across the same term typed twice, so if this ever
+   becomes a poll rather than a gesture, it needs the cache first.
 11. **The stub tracker ignored `text`.** It now honours it and counts search
    queries in their own bucket. A stub that hands back every ticket passes the
    "found it" assertion for the wrong reason and can never fail the
@@ -1615,7 +1650,8 @@ is the argument for reading a deviation closely rather than for refusing it:
    the component comment all asserted it worked. A query that NARROWED the
    pinned set is aimed at one of them; anything else keeps "Ctrl+K, ↵ on a
    ticket".
-15. **A pinned row's `terms` may only NAME the thing.** The rule above treats a
+15. **A pinned row's `terms` may only NAME the thing — and its KEY is a known
+exception, kept on purpose.** The rule above treats a
    narrowed pinned set as a query aimed at a pinned row, so a generic word there
    doesn't merely add a row — it takes the `↵` away from the tickets. `agent`
    was on two of the three, in a repo where every ticket is about agents, so
@@ -1624,6 +1660,16 @@ is the argument for reading a deviation closely rather than for refusing it:
    CALLED, and nothing else here is one); `agent`, `drawer`, `split` and
    `terminal` are gone, and the harness asserts none of them claims a row so
    re-adding one fails rather than being noticed.
+   - **The KEYS break that rule and are kept anyway, which is a decision rather
+     than an oversight.** Measured against the live DRY project, `workspace` is
+     in 7 open titles, `shell` in 6, `claude` in 6 — so `Ctrl K`, `workspace`,
+     `↵` does spawn a workspace while seven tickets sit under it. The key IS the
+     row's name and "type `wo`, `↵` reaches the workspace row" is the advertised
+     feature, so there is nothing to remove; what makes it survivable is that the
+     pinned row is the HIGHLIGHTED one, wearing its `↵ spawn` badge, with the
+     matching tickets visible beneath — the state is legible before the keypress
+     rather than after it. That is not true of a `terms` collision, which is why
+     one is a latch in the harness and the other is this paragraph.
 16. **"The tracker has nothing for X" is a different claim from "`elsewhere` is
    empty".** `elsewhere` is deliberately what the pull does NOT already hold, so
    a match the pull DOES hold drops out of it — and a known pill emptying the
@@ -1638,7 +1684,7 @@ is the argument for reading a deviation closely rather than for refusing it:
 
 Harness: `scripts/verify/desk-chrome.mts`, rig in its README — the stub
 tracker's rig, a browser, about ninety seconds. Confirm it discriminates:
-against the unpatched shell it fails **36 of 50**. Run `epic-children.mts`,
+against the unpatched shell it fails **41 of 63**. Run `epic-children.mts`,
 `sidebar.mts` and `backlog-toggle.mts` beside it — they drive
 `.sidebar .searchbox input` and the scope row this ticket rebuilt around them.
 
@@ -1652,7 +1698,7 @@ the one gesture not under discussion. `de` is the only string here inside both
 a pinned row's terms and a loaded ticket's title, which is why an odd-looking
 two-letter query is the one that check uses.
 
-**Fourteen of the 50 checks pass against `main` too, and they are two kinds —
+**Twenty-two of the 63 checks pass against `main` too, and they are two kinds —
 don't read the second as slack.** Some guard things that must not change (the
 scope chips, the backlog switch, bare text still filtering). The rest guard a
 review finding in a feature `main` does not have at all, so they structurally

@@ -54,6 +54,14 @@ import type { Detail } from "./api.mjs";
 
 const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5382";
 const STUB = process.env.STUB_URL ?? "http://127.0.0.1:4383";
+/**
+ * The throwaway daemon's password. Its only job is to make the desk have an
+ * ACCOUNT, so the header renders the name / `Sign out` pair — one of the five
+ * things the ticket lists as resizing `.controls`, and the one that turns the
+ * overlap on. Overridable, defaulted, and deliberately not secret: this daemon
+ * holds a state file in /tmp and a stub tracker.
+ */
+const PASSWORD = process.env.DESK_PASSWORD ?? "dry82-throwaway";
 
 let failures = 0;
 function check(name: string, ok: boolean, extra: Detail = ""): void {
@@ -117,12 +125,45 @@ interface Spawn {
  * own code path (which reads `.id` and `.cwd` to place a window and co-locate a
  * shell) runs to completion, and records the body.
  */
-async function open(browser: Browser): Promise<{ page: Page; spawns: Spawn[]; close: () => Promise<void> }> {
+async function open(
+  browser: Browser,
+  /**
+   * Put a FINISHED session in the list the desk polls, so `Clear finished`
+   * renders (`isFinished` is `status === "exited" && !failure`).
+   *
+   * Only section (b) asks for it, and only because the header's geometry is a
+   * function of how wide `.controls` is: signed out with nothing to clear is the
+   * NARROWEST that cluster ever gets, and measuring the overlap there is
+   * measuring the one posture in which it cannot fail. That is how the first cut
+   * of this section passed against an overlap of 25px at 1100 and 95px at 960.
+   */
+  withSweepable = false,
+): Promise<{ page: Page; spawns: Spawn[]; close: () => Promise<void> }> {
   const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
   const page = await ctx.newPage();
   const spawns: Spawn[] = [];
   await page.route("**/api/sessions", async (route) => {
-    if (route.request().method() !== "POST") return route.continue();
+    if (route.request().method() !== "POST") {
+      if (!withSweepable) return route.continue();
+      const res = await route.fetch();
+      const body = (await res.json()) as { sessions?: unknown[] };
+      body.sessions = [
+        ...(body.sessions ?? []),
+        {
+          id: "finished-fixture",
+          command: "claude",
+          title: "a finished run",
+          cwd: "/tmp",
+          repo: "drydock",
+          status: "exited",
+          exitCode: 0,
+          origin: "you",
+          startedAt: 1,
+          endedAt: 2,
+        },
+      ];
+      return route.fulfill({ response: res, json: body });
+    }
     const body = route.request().postDataJSON() as Spawn;
     spawns.push(body);
     const id = `stub-${spawns.length}`;
@@ -142,6 +183,13 @@ async function open(browser: Browser): Promise<{ page: Page; spawns: Spawn[]; cl
     });
   });
   await page.goto(SHELL, { waitUntil: "domcontentloaded" });
+  // The rig runs the daemon WITH a password, so the desk is behind the door —
+  // which is the point: `.whoami` only renders when there is an account to name,
+  // and that pair is the widest thing `.controls` ever carries.
+  if (await page.locator(".gate input[type=password]").count()) {
+    await page.fill(".gate input[type=password]", PASSWORD);
+    await page.click(".gate .go");
+  }
   await page.waitForSelector(".sidebar .grp", { timeout: 20_000 });
   return { page, spawns, close: () => ctx.close() };
 }
@@ -193,10 +241,12 @@ function snap(page: Page): Promise<Snapshot> {
 /** Where the switcher sits, against where the header's middle is. */
 interface Bars {
   headerMid: number;
+  headerRight: number;
   switcherMid: number;
   switcherLeft: number;
   switcherRight: number;
   controlsLeft: number;
+  controlsRight: number;
   brandRight: number;
 }
 function bars(page: Page): Promise<Bars> {
@@ -204,16 +254,21 @@ function bars(page: Page): Promise<Bars> {
   // to esbuild's `__name(…)` wrapper, which does not exist in the page — DRY-80's
   // rule, and it fails as a ReferenceError on a line that reads perfectly well.
   return page.evaluate(() => {
-    const h = (document.querySelector(".topbar") as HTMLElement).getBoundingClientRect();
+    const hEl = document.querySelector(".topbar") as HTMLElement;
+    const h = hEl.getBoundingClientRect();
     const sw = (document.querySelector(".switcher") as HTMLElement).getBoundingClientRect();
     const c = (document.querySelector(".controls") as HTMLElement).getBoundingClientRect();
     const b = (document.querySelector(".brand") as HTMLElement).getBoundingClientRect();
     return {
       headerMid: h.left + h.width / 2,
+      // The header's PAINTABLE right edge — its own padding, which `Sign out`
+      // spilled past.
+      headerRight: h.right - parseFloat(getComputedStyle(hEl).paddingRight || "0"),
       switcherMid: sw.left + sw.width / 2,
       switcherLeft: sw.left,
       switcherRight: sw.right,
       controlsLeft: c.left,
+      controlsRight: c.right,
       brandRight: b.right,
     };
   });
@@ -430,7 +485,20 @@ console.log("(a) the two spawn buttons are gone, and the palette does their job"
 // ---- (b) the switcher is centred on the window, not on the slack ------------
 console.log("\n(b) the layout switcher does not drift");
 {
-  const { page, close } = await open(browser);
+  // The FULLEST `.controls` this desk ever has: the account pair, `Clear
+  // finished` with its badge, the folder chip and `New session`. Measuring the
+  // signed-out desk with nothing to clear measures the narrowest, which is the
+  // one posture where an overlap is impossible.
+  const { page, close } = await open(browser, true);
+  const loaded = await waitFor(async () =>
+    (await page.locator(".topbar .whoami").count()) > 0 &&
+    (await page.locator(".topbar .sweep").count()) > 0,
+  );
+  check(
+    "the header is carrying its widest cluster for these measurements",
+    loaded,
+    loaded ? "" : "no .whoami and/or no .sweep — every width below proves the easy case",
+  );
   const at = await bars(page);
   check(
     "the switcher is centred on the header",
@@ -444,7 +512,7 @@ console.log("\n(b) the layout switcher does not drift");
   // the right-hand cluster got wider. Driven here by padding rather than by
   // arranging one of the five, because what is under test is whether the
   // switcher's position READS that width at all.
-  await page.addStyleTag({ content: ".controls { padding-left: 220px; }" });
+  const widened = await page.addStyleTag({ content: ".controls { padding-left: 220px; }" });
   await sleep(150);
   const after = await bars(page);
   check(
@@ -452,28 +520,59 @@ console.log("\n(b) the layout switcher does not drift");
     Math.abs(after.switcherMid - at.switcherMid) <= 1,
     `moved ${Math.round(after.switcherMid - at.switcherMid)}px`,
   );
-  check(
-    "with nothing painted over anything",
-    after.switcherRight <= after.controlsLeft && after.switcherLeft >= after.brandRight,
-    `switcher ${Math.round(after.switcherLeft)}-${Math.round(after.switcherRight)}, ` +
-      `brand ends ${Math.round(after.brandRight)}, controls start ${Math.round(after.controlsLeft)}`,
-  );
+  // REMOVED before anything else is measured. Left in place it is 220px of
+  // padding no real desk has, and every width below would then be measuring a
+  // cluster this header never carries — which is the opposite of the mistake
+  // this section was just fixed for, and just as wrong.
+  await widened.evaluate((el) => (el as HTMLElement).remove());
+  await sleep(150);
 
-  // A laptop, where the sides genuinely need the room — the width the ticket
-  // asked for this to be checked at.
-  await page.setViewportSize({ width: 1280, height: 800 });
-  await sleep(200);
-  const narrow = await bars(page);
-  check(
-    "still centred at a laptop width",
-    Math.abs(narrow.switcherMid - narrow.headerMid) <= 1,
-    `switcher ${Math.round(narrow.switcherMid)} vs header ${Math.round(narrow.headerMid)}`,
-  );
-  check(
-    "and still not overlapping the controls there",
-    narrow.switcherRight <= narrow.controlsLeft,
-    `switcher ends ${Math.round(narrow.switcherRight)}, controls start ${Math.round(narrow.controlsLeft)}`,
-  );
+  // Every width the ticket asked about, and two below it. `grid` was chosen over
+  // `left:50%` precisely BECAUSE it keeps the switcher in flow and so cannot be
+  // painted over — a claim that was false at 1100 and 1240 until the folder chip
+  // learned to step aside, and that only two widths and a signed-out desk let
+  // through.
+  // `PACK_W` in App.vue: at and below it the header packs rather than centring,
+  // because equal tracks would hand the brand room it never needs while the
+  // controls overflow across the switcher. Centring is asserted only where it is
+  // CLAIMED; not overlapping is asserted everywhere, which is the property the
+  // ticket gave as the reason to prefer grid in the first place.
+  const PACK_W = 1300;
+  for (const width of [1360, 1300, 1240, 1100, 960]) {
+    await page.setViewportSize({ width, height: 800 });
+    await sleep(250);
+    const m = await bars(page);
+    if (width > PACK_W) {
+      check(
+        `still centred at ${width}`,
+        Math.abs(m.switcherMid - m.headerMid) <= 1,
+        `switcher ${Math.round(m.switcherMid)} vs header ${Math.round(m.headerMid)}`,
+      );
+    } else {
+      check(
+        // The packed layout keeps the fix rather than trading it away: the
+        // switcher sits after the brand, whose width never changes, so its
+        // position still can't be moved by anything on the right.
+        `packed at ${width}, and still not a function of the controls`,
+        Math.abs(m.switcherLeft - m.brandRight - 16) <= 2,
+        `switcher starts ${Math.round(m.switcherLeft)}, brand ends ${Math.round(m.brandRight)}`,
+      );
+    }
+    check(
+      `and nothing overlaps the switcher at ${width}`,
+      m.switcherRight <= m.controlsLeft,
+      `switcher ends ${Math.round(m.switcherRight)}, controls start ${Math.round(m.controlsLeft)} ` +
+        `(overlap ${Math.round(m.switcherRight - m.controlsLeft)}px)`,
+    );
+    check(
+      // `Sign out` spilled ~24px past the header's own padding at the narrow
+      // widths, which no left-edge test can see.
+      `and the controls stay inside the header at ${width}`,
+      m.controlsRight <= m.headerRight + 1,
+      `controls end ${Math.round(m.controlsRight)}, header ends ${Math.round(m.headerRight)}`,
+    );
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
   await close();
 }
 

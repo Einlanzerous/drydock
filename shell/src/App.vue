@@ -1251,8 +1251,10 @@ async function spawnWorkspace(
       permissionMode: opts.auto ? "auto" : undefined,
       // Pre-fill, never submitted: the daemon presses RETURN only for a run
       // nobody is watching (DRY-49), and this one has a human and a composer
-      // they may want to edit first. The bare "+ workspace" passes no prompt
-      // and so gets no `input` — it is a pair of terminals, not a briefing.
+      // they may want to edit first. A ticketless workspace — the palette's
+      // `workspace` row since DRY-82, the header's "+ workspace" before it —
+      // passes no prompt and so gets no `input`: it is a pair of terminals, not
+      // a briefing.
       input: opts.prompt,
     });
     // Co-locate the human's shell in the agent's *resolved* cwd — which is the
@@ -1269,8 +1271,9 @@ async function spawnWorkspace(
       repo: basename(agent.cwd),
       shellId: shell.id,
       // DRY-36: a ticket spawn opens in its most-agent state — drawer closed
-      // and shell collapsed, each one click away. The bare "+ workspace"
-      // (no ticket) keeps the shell visible; it exists to pair agent + zsh.
+      // and shell collapsed, each one click away. A ticketless one (the
+      // palette's `workspace` row) keeps the shell visible; it exists to pair
+      // agent + zsh.
       drawerOpen: false,
       shellCollapsed: !!opts.ticket,
       shellRatio: 0.2,
@@ -2101,11 +2104,25 @@ onBeforeUnmount(stopDesk);
   gap: 6px;
   margin-left: 4px;
   padding-left: 10px;
+  min-width: 0;
   border-left: 1px solid #ffffff12;
+}
+/* An account name is the one width in this header nobody chose, so it is the
+   one thing that ellipsises rather than pushing (DRY-82). `Sign out` beside it
+   is a control and keeps its size. */
+.whoami .who,
+.whoami > .ghost:first-child {
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+  line-height: 34px;
 }
 .whoami .who {
   color: #9aa6b2;
   font-size: 12px;
+  line-height: normal;
 }
 /* Three tracks, not two flexible spacers (DRY-82).
  *
@@ -2120,10 +2137,34 @@ onBeforeUnmount(stopDesk);
  * The outer tracks are equal regardless of content, so the middle one is
  * centred on the window. `minmax(0, …)` rather than a bare `1fr` because a bare
  * one refuses to shrink below its content and the whole header would overflow
- * instead; the give is taken by the repo chip, which ellipsises (see `.repo`) —
- * everything else in `.controls` holds its size. Grid rather than absolute
- * positioning because this keeps the switcher in flow, where it cannot end up
- * painted over the controls on a narrow window. */
+ * instead.
+ *
+ * Grid rather than absolute positioning because this keeps the switcher in
+ * flow — but **that buys nothing on its own, and the first cut of this shipped
+ * the overlap it claimed to prevent.** `justify-self: end` pins `.controls` to
+ * the end of a track exactly `1fr` wide while `flex: 0 0 auto` stops its
+ * children shrinking, so a cluster too wide for its track grows LEFTWARDS,
+ * straight across the middle one. Measured: fine at 1440 and 1280, 25px of
+ * overlap at 1100 and 95px at 960 — but only once `.controls` carries the auth
+ * cluster and `Clear finished`, which is why a harness that measured the
+ * signed-out, nothing-to-clear desk could not see it.
+ *
+ * **And the cause is DISTRIBUTION, not content.** At 960 the three clusters and
+ * their gaps want ~810px of a 960px header — it all fits comfortably. What
+ * doesn't fit is the controls into a track sized as though the brand needed the
+ * same room, which it never does: equal tracks hand the brand ~250px of spare
+ * while the cluster that has something to say overflows. Dropping controls to
+ * make that work would be paying for the wrong thing.
+ *
+ * So below `PACK_W` the header stops centring and packs instead — brand and
+ * switcher at min-content, the controls taking what's left. Note what that
+ * KEEPS: the switcher's position then depends only on the brand, which never
+ * changes, so it still cannot drift. It simply isn't centred, which is the
+ * honest trade at a width where centring would mean painting one control over
+ * another. Above it, equal tracks and a true centre.
+ *
+ * The account name ellipsises rather than pushing, because its width is the one
+ * thing in this header nobody chose. */
 .topbar {
   height: 54px;
   flex: 0 0 auto;
@@ -2158,9 +2199,19 @@ onBeforeUnmount(stopDesk);
   color: #5a636f;
   white-space: nowrap;
 }
-/* The one piece of the header that says nothing — it is a tagline — so it is
-   the first thing to go when the outer tracks get tight (DRY-82). Checked at a
-   laptop width, where the controls genuinely need the room. */
+/* Below this the outer tracks can't both be as wide as the controls need, so
+   equal ones would put the cluster over the switcher. Pack instead — see the
+   note on `.topbar` for why this keeps the drift fix rather than trading it
+   away. Measured with the fullest `.controls` this desk ever has (the account
+   pair, `Clear finished` and its badge, the folder chip, `New session`): the
+   centred layout still has ~74px of margin at 1300 and runs out below it. */
+@media (max-width: 1300px) {
+  .topbar {
+    grid-template-columns: auto auto minmax(0, 1fr);
+  }
+}
+/* The one piece of the header that says nothing — it is a tagline — so it goes
+   before anything anybody reads does. */
 @media (max-width: 1180px) {
   .tagline {
     display: none;

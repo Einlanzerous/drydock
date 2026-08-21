@@ -448,7 +448,8 @@ bunx playwright install chromium             # once per machine; see "Running th
    DRYDOCK_TRACKER_PROJECTS=DRY \
    DRYDOCK_TRACKER_CACHE_MS=60000 DRYDOCK_TRACKER_CHILD_STATS_CACHE_MS=60000 \
    DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS=120000 \
-   DRYDOCK_DATABASE_URL= DRYDOCK_AUTH_PASSWORD= DRYDOCK_MULTI_USER= \
+   DRYDOCK_DATABASE_URL= DRYDOCK_MULTI_USER= \
+   DRYDOCK_AUTH_PASSWORD=dry82-throwaway \
    DRYDOCK_STATE_FILE=/tmp/dry82-state.json \
    DRYDOCK_SESSIONS_DIR=/tmp/dry82-sessions node --import tsx src/index.ts &)
 (cd shell && VITE_DAEMON_URL=http://127.0.0.1:4382 bunx vite --port 5382 --strictPort &)
@@ -456,12 +457,20 @@ bunx playwright install chromium             # once per machine; see "Running th
 (cd daemon && node --import tsx ../scripts/verify/desk-chrome.mts)
 ```
 
-**Clear `DRYDOCK_DATABASE_URL` and `DRYDOCK_AUTH_PASSWORD` explicitly**, and see
-the note under DRY-83's rig for what happens if you don't.
+**Clear `DRYDOCK_DATABASE_URL` explicitly**, and see the note under DRY-83's rig
+for what happens if you don't. `DRYDOCK_AUTH_PASSWORD` is the exception here: it
+is SET rather than cleared, and it is load-bearing. The header's account name /
+`Sign out` pair only renders when there is an account to name, and that pair is
+one of the five things the ticket lists as resizing `.controls` — measure the
+signed-out desk and section (b) measures the narrowest that cluster ever gets,
+which is the one posture where the overlap it checks for cannot happen. That is
+exactly how the first cut passed against 25px of overlap at 1100 and 95px at
+960. The harness signs in if it finds the door, so nothing else about the rig
+changes; override the password with `DESK_PASSWORD` if you change it here.
 
 | harness | what it holds down |
 |---|---|
-| `desk-chrome.mts` | The header carries one spawn control, and the palette does what the two removed buttons did — asserted on the request BODIES, since a workspace is two POSTs and a pinned row issuing only the first looks identical on screen. The old `⇧↵` spawns nothing rather than being repurposed onto the selected ticket. The layout switcher is centred on the HEADER and stays there when the right-hand cluster changes width, at 1440 and at a laptop 1280, without overlapping. The four filter selects are `key=value` pills that cost the tracker no request, complete from the loaded set, and — typed free-hand — say when they name something this pull cannot contain. A closed ticket is found through `/api/tracker/search`, in a block of its own, debounced. And **(f)** the same path failing: a retry that succeeds shows the rows it fetched rather than the error it replaced, and a hung request gives up instead of wedging every later search for the life of the page. |
+| `desk-chrome.mts` | Runs against a daemon **with a password**, and injects a finished session into the session poll — both deliberate: the account name / `Sign out` pair and `Clear finished` are two of the five things that resize `.controls`, and without them section (b) measures the narrowest that cluster ever gets, which is the one posture where the overlap it checks for cannot happen. The header carries one spawn control, and the palette does what the two removed buttons did — asserted on the request BODIES, since a workspace is two POSTs and a pinned row issuing only the first looks identical on screen. The old `⇧↵` spawns nothing rather than being repurposed onto the selected ticket. The layout switcher is centred on the HEADER and stays there when the right-hand cluster changes width, at 1440 and at a laptop 1280, without overlapping. The four filter selects are `key=value` pills that cost the tracker no request, complete from the loaded set, and — typed free-hand — say when they name something this pull cannot contain. A closed ticket is found through `/api/tracker/search`, in a block of its own, debounced. And **(f)** the same path failing: a retry that succeeds shows the rows it fetched rather than the error it replaced, and a hung request gives up instead of wedging every later search for the life of the page. |
 
 Spawns are **intercepted** (`page.route` on `POST /api/sessions`, answered with
 a session-shaped 201). Letting them through would start a real `claude` per
@@ -481,11 +490,11 @@ git show main:shell/src/lib/tracker.ts > shell/src/lib/tracker.ts
 `tracker.ts` is in that list because the deadline on `searchTickets` lives there,
 and it is one of the two things section (f) is for.
 
-Expect **36 failures of 50**. Restore with `git checkout -- shell/` — the
+Expect **41 failures of 63**. Restore with `git checkout -- shell/` — the
 redirects above write the worktree without staging, unlike
 `git checkout <ref> -- path`, which stages the revert.
 
-**Fourteen checks pass either way, and they are two different kinds — don't read
+**Twenty-two checks pass either way, and they are two different kinds — don't read
 the second as slack.** Some are guards on things that must NOT change: the
 switcher not overlapping the controls (true of the old layout too, which drifted
 without colliding), bare text still filtering the loaded list, the scope chips
@@ -503,7 +512,7 @@ nothing having been found at all, "not seven queries" by a shell that never
 searches, and the wedge probe by anything that rescues the hung request. The
 pinned-row selection check is the sharpest example — see below.
 
-Two of the fourteen are the *other* direction of that rule and were added in the
+Two of the twenty-two are the *other* direction of that rule and were added in the
 same round it was fixed: a ticket-shaped query must still select a ticket, and a
 generic word must claim no pinned row. Neither can fail against `main` (which
 has no pinned rows to claim), but the second is a real latch — `agent` was on
@@ -1492,7 +1501,7 @@ git checkout HEAD -- daemon/src/session.ts shell/src/App.vue \
 #   git log --diff-filter=A --format=%h -- scripts/verify/desk-chrome.mts
 git checkout <that commit>~1 -- shell/src/App.vue shell/src/lib/tracker.ts \
   shell/src/components/QuickLaunch.vue shell/src/components/TrackerSidebar.vue
-(cd daemon && node --import tsx ../scripts/verify/desk-chrome.mts)  # expect 36 failures of 50
+(cd daemon && node --import tsx ../scripts/verify/desk-chrome.mts)  # expect 41 failures of 63
 git checkout HEAD -- shell/src/App.vue shell/src/lib/tracker.ts \
   shell/src/components/QuickLaunch.vue shell/src/components/TrackerSidebar.vue
 ```
