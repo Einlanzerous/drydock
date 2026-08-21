@@ -1910,12 +1910,14 @@ onBeforeUnmount(stopDesk);
           <button
             v-if="isMultiUser"
             class="ghost"
-            title="Add or remove accounts on this Drydock"
+            :title="`${authUser.name} — add or remove accounts on this Drydock`"
             @click="blurSpawn($event), (usersOpen = true)"
           >
             {{ authUser.name }}
           </button>
-          <span v-else class="who">{{ authUser.name }}</span>
+          <!-- The name is capped and ellipsised (see `.whoami`), so both forms
+               carry it in full where a pointer can reach it. -->
+          <span v-else class="who" :title="authUser.name">{{ authUser.name }}</span>
           <button class="ghost" title="Sign out of this Drydock" @click="signOut()">
             Sign out
           </button>
@@ -2112,7 +2114,10 @@ onBeforeUnmount(stopDesk);
    is a control and keeps its size. */
 .whoami .who,
 .whoami > .ghost:first-child {
-  max-width: 110px;
+  /* Border-box (global), so this bounds the BUTTON the multi-user tier renders,
+     padding and border included, not just its text — the two tiers therefore
+     cost the header the same, and a single-user rig can measure both. */
+  max-width: 90px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2156,12 +2161,30 @@ onBeforeUnmount(stopDesk);
  * while the cluster that has something to say overflows. Dropping controls to
  * make that work would be paying for the wrong thing.
  *
- * So below `PACK_W` the header stops centring and packs instead — brand and
- * switcher at min-content, the controls taking what's left. Note what that
- * KEEPS: the switcher's position then depends only on the brand, which never
- * changes, so it still cannot drift. It simply isn't centred, which is the
- * honest trade at a width where centring would mean painting one control over
- * another. Above it, equal tracks and a true centre.
+ * So below the packing breakpoint (1440px, see the media query) the header
+ * stops centring and packs instead — brand and switcher at min-content, the
+ * controls taking what's left. Note what that KEEPS: the switcher's position
+ * then depends only on the brand, which never changes, so it still cannot
+ * drift. It simply isn't centred, which is the honest trade at a width where
+ * centring would mean painting one control over another. Above it, equal tracks
+ * and a true centre.
+ *
+ * **That breakpoint is a constant derived from today's `.controls`, which is
+ * the exact thing this ticket set out to stop doing, and it is kept only
+ * because the alternatives are worse.** Sizing track 3 `minmax(min-content,
+ * 1fr)` removes the constant and degrades at precisely the right width — but in
+ * the degraded regime track 1 absorbs the difference, so the switcher moves when
+ * `Clear finished` appears, which is the original bug confined to narrow
+ * windows rather than fixed. No CSS available here expresses "centre only while
+ * the other side fits" without that trade.
+ *
+ * What is done instead is to stop the constant rotting silently: the harness
+ * measures the FULLEST `.controls` this desk can carry (a cap-length account
+ * name, `Clear finished`, the chip) and asserts, at the first centred width,
+ * that the folder chip has not been squeezed to its floor — its floor being its
+ * own icon and padding, i.e. a chip with no name left in it. That is the slack
+ * this breakpoint is spending, so the sixth control to join `.controls` fails a
+ * check rather than moving a threshold nothing is watching.
  *
  * The account name ellipsises rather than pushing, because its width is the one
  * thing in this header nobody chose. */
@@ -2202,10 +2225,17 @@ onBeforeUnmount(stopDesk);
 /* Below this the outer tracks can't both be as wide as the controls need, so
    equal ones would put the cluster over the switcher. Pack instead — see the
    note on `.topbar` for why this keeps the drift fix rather than trading it
-   away. Measured with the fullest `.controls` this desk ever has (the account
-   pair, `Clear finished` and its badge, the folder chip, `New session`): the
-   centred layout still has ~74px of margin at 1300 and runs out below it. */
-@media (max-width: 1300px) {
+   away, and for why the number is a constant at all.
+
+   Measured with the fullest `.controls` this desk can carry — an account name
+   at its cap, `Clear finished` with its badge, the folder chip, `New session`.
+   `.controls` bottoms out at ~558px with that content, so an equal track needs
+   1360px of viewport just to CONTAIN it and 1440 to contain it with ~40px to
+   spare and the folder chip still showing a name. Two earlier cuts sat at 1300
+   and then 1360 — 2px and 1px above the cliff respectively, margins that read
+   like decisions and were coincidences. Anything at or below 1440 packs, where
+   the clearance is 128-248px and the chip is at its natural width. */
+@media (max-width: 1440px) {
   .topbar {
     grid-template-columns: auto auto minmax(0, 1fr);
   }

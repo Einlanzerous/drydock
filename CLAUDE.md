@@ -1529,7 +1529,18 @@ arrives with auth. Now `grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr
    centred, which is the honest trade at a width where centring would mean
    painting one control over another. Dropping controls to preserve the centre
    would have been paying for the wrong thing.
-5. **Measure the FULLEST `.controls`, or the check cannot fail.** Signed out
+5. **The breakpoint is a constant derived from today's `.controls`, which is
+   this ticket's own anti-pattern — kept because the alternatives are worse, and
+   made to fail loudly instead.** Sizing track 3 `minmax(min-content, 1fr)`
+   removes the constant and degrades at exactly the right width, but then track 1
+   absorbs the difference and the switcher moves when `Clear finished` appears —
+   the original bug confined to narrow windows rather than fixed. So the number
+   stays and the HARNESS watches the slack it spends: the folder chip is the only
+   child of `.controls` that can give, so a chip squeezed to its own floor means
+   the centred layout has none left. Two cuts of this sat 2px and 1px above their
+   cliff and looked perfect by every overlap test, because the chip absorbs until
+   it can't and the clearance reads a healthy 16px right up to the edge.
+6. **Measure the FULLEST `.controls`, or the check cannot fail.** Signed out
    with nothing to clear is the narrowest that cluster ever gets, and it is what
    a throwaway daemon with no password and intercepted spawns renders — so the
    harness measured the one posture in which an overlap is impossible, at the
@@ -1537,7 +1548,9 @@ arrives with auth. Now `grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr
    `DRYDOCK_AUTH_PASSWORD` (the only tracker-adjacent rig here that does) and
    injects a finished session into the poll, and the sweep runs 1360/1300/1240/
    1100/960. Assert the cluster is actually there first, or the whole sweep
-   quietly measures the easy case again.
+   quietly measures the easy case again. `DRYDOCK_AUTH_USER` is the second half
+   of that: the default `owner` is five characters against a 90px cap, so the
+   rig sets a cap-length name and the harness asserts it reached it.
 
 **The sidebar's filters are `key=value` pills.** Four selects (Project, Status,
 Assignee, and Epic on a row of its own, because epic titles are sentences) were
@@ -1684,7 +1697,7 @@ exception, kept on purpose.** The rule above treats a
 
 Harness: `scripts/verify/desk-chrome.mts`, rig in its README — the stub
 tracker's rig, a browser, about ninety seconds. Confirm it discriminates:
-against the unpatched shell it fails **41 of 63**. Run `epic-children.mts`,
+against the unpatched shell it fails **44 of 72**. Run `epic-children.mts`,
 `sidebar.mts` and `backlog-toggle.mts` beside it — they drive
 `.sidebar .searchbox input` and the scope row this ticket rebuilt around them.
 
@@ -1698,7 +1711,7 @@ the one gesture not under discussion. `de` is the only string here inside both
 a pinned row's terms and a loaded ticket's title, which is why an odd-looking
 two-letter query is the one that check uses.
 
-**Twenty-two of the 63 checks pass against `main` too, and they are two kinds —
+**Twenty-eight of the 72 checks pass against `main` too, and they are two kinds —
 don't read the second as slack.** Some guard things that must not change (the
 scope chips, the backlog switch, bare text still filtering). The rest guard a
 review finding in a feature `main` does not have at all, so they structurally

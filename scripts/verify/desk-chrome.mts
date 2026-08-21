@@ -62,6 +62,17 @@ const STUB = process.env.STUB_URL ?? "http://127.0.0.1:4383";
  * holds a state file in /tmp and a stub tracker.
  */
 const PASSWORD = process.env.DESK_PASSWORD ?? "dry82-throwaway";
+/**
+ * The rig's account NAME, and it is as load-bearing as the password.
+ *
+ * It has to be long enough to reach the cap `.whoami` puts on it, because that
+ * cap is what bounds the account element's contribution to `.controls` — and
+ * the widest `.controls` is the only one section (b)'s overlap checks can fail
+ * against. The daemon's default is `owner`: five characters, about a third of
+ * the cap, and a header measured with it says nothing about the header anybody
+ * with a real account name is looking at.
+ */
+const ACCOUNT = process.env.DESK_ACCOUNT ?? "alexandra.dodson-admin";
 
 let failures = 0;
 function check(name: string, ok: boolean, extra: Detail = ""): void {
@@ -248,6 +259,11 @@ interface Bars {
   controlsLeft: number;
   controlsRight: number;
   brandRight: number;
+  /**
+   * The folder chip's width. It is the only child of `.controls` that can give,
+   * so it IS the slack the packing breakpoint is spending — see `REPO_FLOOR`.
+   */
+  repoWidth: number;
 }
 function bars(page: Page): Promise<Bars> {
   // Every rect is read inline. A `const box = (sel) => …` helper here compiles
@@ -270,6 +286,9 @@ function bars(page: Page): Promise<Bars> {
       controlsLeft: c.left,
       controlsRight: c.right,
       brandRight: b.right,
+      repoWidth:
+        (document.querySelector(".topbar .repo") as HTMLElement | null)?.getBoundingClientRect()
+          .width ?? 0,
     };
   });
 }
@@ -494,11 +513,24 @@ console.log("\n(b) the layout switcher does not drift");
     (await page.locator(".topbar .whoami").count()) > 0 &&
     (await page.locator(".topbar .sweep").count()) > 0,
   );
+  const account = await page.evaluate(() => {
+    const el = document.querySelector(".topbar .whoami .who, .topbar .whoami > .ghost");
+    return el ? Math.round(el.getBoundingClientRect().width) : 0;
+  });
   check(
+    // Three separate ways this sweep can quietly measure the easy case, so all
+    // three are asserted rather than assumed: no account pair, nothing to clear,
+    // or an account name short enough not to reach its cap.
     "the header is carrying its widest cluster for these measurements",
-    loaded,
-    loaded ? "" : "no .whoami and/or no .sweep — every width below proves the easy case",
+    loaded && account >= 88,
+    loaded
+      ? `account element ${account}px against a 90px cap`
+      : "no .whoami and/or no .sweep — every width below would prove the easy case",
   );
+  // Above the packing breakpoint, since the two claims below are about the
+  // CENTRED layout. The context opens at 1440, which is now packed.
+  await page.setViewportSize({ width: 1600, height: 900 });
+  await sleep(250);
   const at = await bars(page);
   check(
     "the switcher is centred on the header",
@@ -537,8 +569,19 @@ console.log("\n(b) the layout switcher does not drift");
   // controls overflow across the switcher. Centring is asserted only where it is
   // CLAIMED; not overlapping is asserted everywhere, which is the property the
   // ticket gave as the reason to prefer grid in the first place.
-  const PACK_W = 1300;
-  for (const width of [1360, 1300, 1240, 1100, 960]) {
+  // Matches the media query in App.vue — the two are a pair and neither is
+  // findable from the other without being named.
+  const PACK_W = 1440;
+  /**
+   * The folder chip with nothing left in it: its icon, its gap and its padding.
+   * Above `PACK_W` the chip is the ONLY child of `.controls` that can shrink, so
+   * a chip at this width means the centred layout has no give at all and the
+   * next control added to that cluster overlaps the switcher. Two earlier
+   * breakpoints (1300, then 1360) sat 2px and 1px above their cliff and looked
+   * fine by every other measure here.
+   */
+  const REPO_FLOOR = 40;
+  for (const width of [1600, 1500, PACK_W + 1, PACK_W, 1240, 1100, 960]) {
     await page.setViewportSize({ width, height: 800 });
     await sleep(250);
     const m = await bars(page);
@@ -547,6 +590,16 @@ console.log("\n(b) the layout switcher does not drift");
         `still centred at ${width}`,
         Math.abs(m.switcherMid - m.headerMid) <= 1,
         `switcher ${Math.round(m.switcherMid)} vs header ${Math.round(m.headerMid)}`,
+      );
+      check(
+        // The latch the breakpoint's staleness is caught by. `switcherRight <=
+        // controlsLeft` cannot see this: the chip absorbs until it can't, so the
+        // clearance reads a healthy 16px right up to the cliff and then goes
+        // negative in one step. A chip AT its floor means the centred layout has
+        // no give left and the next control added to `.controls` overlaps.
+        `and the folder chip still has give at ${width}`,
+        m.repoWidth > REPO_FLOOR,
+        `chip ${Math.round(m.repoWidth)}px against a ${REPO_FLOOR}px floor`,
       );
     } else {
       check(
@@ -572,7 +625,6 @@ console.log("\n(b) the layout switcher does not drift");
       `controls end ${Math.round(m.controlsRight)}, header ends ${Math.round(m.headerRight)}`,
     );
   }
-  await page.setViewportSize({ width: 1440, height: 900 });
   await close();
 }
 
