@@ -170,10 +170,18 @@ no per-repo setup.
   It opens in its most-agent state: drawer closed and shell collapsed, each one
   click away. Split ratio and collapse state persist.
 - **Live tracker sidebar (DRY-11/17).** Open tickets from the active tracker,
-  grouped by repo, with search, project/status/assignee filters, and collapsible
-  groups. Picking one opens the ticket detail as a floating, raiseable window
-  (DRY-20) — read the (markdown-rendered) description, adjust
+  grouped by repo, with collapsible groups and one box that does both filtering
+  and search. Bare text filters what is loaded; `project=`, `status=`,
+  `assignee=` and `epic=` become filter pills, completed from the tickets on
+  screen (DRY-82). A term the pull can't contain — a closed ticket, or one
+  outside the fetched projects — is looked up through the tracker and shown
+  under **elsewhere in …**, separately from the groups, because it is not part
+  of this pull. Picking any of them opens the ticket detail as a floating,
+  raiseable window (DRY-20) — read the (markdown-rendered) description, adjust
   cwd/worktree/prompt, then **Spawn Agent**.
+  - The project chips and the `backlog` switch below the pills are a different
+    thing and stay looking like one: they change what the daemon **fetches**,
+    which is a tracker round trip, where a pill is instant and local.
 - **Epics roll up their children (DRY-13).** Inside a repo group, tickets nest
   under their epic behind a second chevron, and the epic row carries a badge and
   a real progress rollup — `13/18 done`, with a bar split by status — so a
@@ -181,8 +189,8 @@ no per-repo setup.
   cover *every* child, not the ones this pull happened to fetch: one extra
   request on Jira (`parent in (…)` answers all epics at once), one per epic on
   Switchyard. A provider that can't answer degrades to counting loaded children
-  and drops the completion ratio rather than reporting a false one. An epic
-  filter sits beside the others, and searching an epic's key finds its children.
+  and drops the completion ratio rather than reporting a false one. `epic=`
+  is one of the filter pills, and searching an epic's key finds its children.
   **Epics ignore the backlog toggle** — that
   exclusion exists because a real backlog is enormous and the epics inside it
   are not, and an epic left out is exactly the header its in-flight children
@@ -190,9 +198,13 @@ no per-repo setup.
   that row heads its group anyway, marked *not pulled*, and expands rather than
   opening a ticket.
 - **`Ctrl K` quick-launch.** Fuzzy-search tickets by key/title/repo; `↵` opens
-  the selection's ticket panel (or a blank `claude` session when nothing
-  matches), `⇧↵` spawns a plain shell — the palette is the one entry point for
-  blank sessions (DRY-39). It works with focus inside a terminal, which is the
+  the selection's ticket panel. Three pinned rows above the list — **shell**,
+  **claude**, **workspace** — start a session with no ticket behind it, and the
+  palette is the one entry point for all three (DRY-82: the header's `+ claude`
+  and `+ workspace` buttons folded in here). They are matched by the query like
+  the tickets are, so "type `wo`, `↵`" reaches the workspace row; there is no
+  chord for any of them, which is why the old `⇧↵` shell shortcut is gone rather
+  than pointing at one of three. It works with focus inside a terminal, which is the
   normal state once a spawned pane grabs the keyboard: the shell claims the
   chord in the capture phase (DRY-43). **The trade: `Ctrl K` no longer reaches
   any shell**, so readline's kill-to-end-of-line is gone in every pane — use

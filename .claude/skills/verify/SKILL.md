@@ -40,7 +40,13 @@ await page.waitForSelector(".topbar");
 
 Useful handles:
 
-- Header spawn buttons: `button:has-text("+ claude")`, `button:has-text("+ workspace")`.
+- Spawning, all of it, goes through the palette since DRY-82 — the header's
+  `+ claude` and `+ workspace` buttons are gone and `button.new` is the only
+  spawn control left. Open it, filter to the row you want, click it:
+  `button.new` → `page.fill(".palette .search input", "workspace")` →
+  `.palette .row.pinrow`. The three pinned rows are `shell`, `claude` and
+  `workspace`; `scripts/verify/prefill.mts` does exactly this if you want it
+  written out.
 - A live terminal exists once `.xterm-helper-textarea` appears; keyboard focus
   is in a terminal iff `document.activeElement` is that textarea. In a
   workspace, agent vs shell pane = `ae.closest(".agent")` / `ae.closest(".shell")`.
@@ -48,9 +54,12 @@ Useful handles:
   `GET :4399/api/sessions`; kill with `POST /api/sessions/<id>/kill`.
 - The 3s reconcile poll removes windows for dead sessions — wait ~3.5s after a
   kill before asserting on the DOM.
-- `+ claude` spawns a REAL `claude` CLI (takes a couple seconds to draw; may
-  show its trust prompt depending on cwd). Fine for focus/window assertions;
-  kill all sessions between scenarios.
+- The palette's `claude` row spawns a REAL `claude` CLI (takes a couple seconds
+  to draw; may show its trust prompt depending on cwd). Fine for focus/window
+  assertions; kill all sessions between scenarios. To assert on what a spawn
+  ASKED for rather than on what it started, intercept it instead —
+  `page.route("**/api/sessions", …)` answering POSTs with a session-shaped 201,
+  as `desk-chrome.mts` does.
 
 ## Before/after comparison
 

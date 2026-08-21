@@ -2,25 +2,107 @@
 import { computed, nextTick, ref, watch } from "vue";
 import { CATEGORY_COLOR, type Ticket } from "../lib/tracker.js";
 
-// Ctrl+K quick-launch palette. A pinned "blank shell" row sits above the
-// ticket list (DRY-39: the palette is the ONLY entry point for plain shells —
-// a header button for them duplicated this pill). Fuzzy-search tickets by
-// key / title / repo; ↵ activates the selected row (shell row → shell, ticket
-// row → ticket panel), ⇧↵ is the shell shortcut from anywhere. Blank claude
-// agents live on the header's "+ claude", not here.
+// Ctrl+K quick-launch palette, and since DRY-82 the only place a session with
+// no ticket behind it is started from. Three pinned rows sit above the ticket
+// list — blank shell, bare claude agent, workspace — and the header's
+// "+ claude" and "+ workspace" buttons are gone with them. That is the same
+// cleanup DRY-36 (workspace off the ticket panel) and DRY-39 (the plain-shell
+// button) each made once; the capability had to MOVE here first, because the
+// palette could not do either of those two things.
+//
+// Fuzzy-search tickets by key / title / repo; ↵ activates the selected row
+// (pinned row → spawn, ticket row → ticket panel).
 const props = defineProps<{ open: boolean; tickets: Ticket[]; providerName: string }>();
 const emit = defineEmits<{
   (e: "close"): void;
   (e: "launch", t: Ticket): void;
-  (e: "spawnShell"): void;
+  // Kept as one event with a payload rather than three: the pinned rows render
+  // from one v-for, and a per-row event name would be a lookup table whose only
+  // job is to be kept in step with it. The union is repeated on the handler in
+  // App.vue, where vue-tsc checks the two against each other at the binding.
+  (e: "spawn", kind: "shell" | "claude" | "workspace"): void;
 }>();
 
+/** A row that spawns something with no ticket behind it. */
+interface Pinned {
+  kind: "shell" | "claude" | "workspace";
+  key: string;
+  title: string;
+  /**
+   * Extra words the query matches on, so a pinned row can be TYPED for.
+   *
+   * This is what replaces the `⇧↵` shell chord (see `onKey`): three pinned rows
+   * want one rule, and "type two letters and press ↵" is a rule that keeps
+   * working when a fourth is added. Matching the title alone wouldn't do — it
+   * is a sentence, so "agent" would pull in the shell row, whose whole
+   * distinction is that it has no agent in it.
+   *
+   * **A term must NAME the thing, and be a name nobody would type looking for a
+   * ticket.** `watch(query)` treats a narrowed pinned set as a query aimed at a
+   * pinned row, so a generic word here doesn't just add a row — it takes the
+   * `↵` away from the tickets. `agent` was on two of these three, in a repo
+   * whose every ticket is about agents: `Ctrl K`, `agent`, `↵` spawned a bare
+   * claude instead of opening the ticket somebody was looking for. So `zsh` and
+   * `bash` stay (they are what a shell is CALLED, and nothing else here is one)
+   * and every word that merely described a row — `agent`, `drawer`, `split`,
+   * `terminal` — is gone.
+   *
+   * The KEYS break the same rule and are kept anyway: `workspace` is in 7 open
+   * DRY titles, `shell` and `claude` in 6 each. That is not an oversight and
+   * there is nothing to remove — the key IS the row's name, and reaching the
+   * row by typing it is the feature. What makes it survivable and a `terms`
+   * collision not is that the row is HIGHLIGHTED, wearing its `↵ spawn` badge,
+   * with the matching tickets visible beneath: the state is legible before the
+   * keypress rather than after it.
+   */
+  terms: string;
+  /** Row glyph: one <path> and its stroke, so the markup stays a single v-for. */
+  d: string;
+  stroke: string;
+}
+const PINNED: Pinned[] = [
+  {
+    kind: "shell",
+    key: "shell",
+    title: "Blank shell session — your login shell, no agent",
+    terms: "zsh bash",
+    d: "M3 5l3 3-3 3M8 11h5",
+    stroke: "#7a9e6b",
+  },
+  {
+    kind: "claude",
+    key: "claude",
+    title: "Bare claude agent — no ticket, no worktree",
+    terms: "",
+    d: "M8 2.5v11M3.2 5.2l9.6 5.6M12.8 5.2l-9.6 5.6",
+    stroke: "#c08a5e",
+  },
+  {
+    kind: "workspace",
+    key: "workspace",
+    title: "Workspace — ticket drawer, an agent and a zsh in one window",
+    terms: "",
+    d: "M2.5 3.5h11v9h-11zM9 3.5v9",
+    stroke: "#8f86c8",
+  },
+];
+
 const query = ref("");
-// Row index across the whole list: 0 = the pinned shell row, tickets follow at
-// idx-1. Opens at 1 (first ticket) so the muscle-memory "Ctrl+K, ↵ on a
-// ticket" flow is unchanged; ↑ from there reaches the shell row.
-const idx = ref(1);
+/**
+ * Row index across everything rendered: the pinned rows first, tickets after.
+ *
+ * Not "one pinned row" hard-coded any more — the pinned rows are filtered by the
+ * query like the tickets are, so how many of them are on screen is not a
+ * constant and `pinned.value.length` is the only honest offset (DRY-82).
+ */
+const idx = ref(PINNED.length);
 const inputEl = ref<HTMLInputElement | null>(null);
+
+const pinned = computed(() => {
+  const q = query.value.trim().toLowerCase();
+  if (!q) return PINNED;
+  return PINNED.filter((p) => `${p.key} ${p.terms}`.includes(q));
+});
 
 const matches = computed(() => {
   const q = query.value.trim().toLowerCase();
@@ -33,33 +115,68 @@ const matches = computed(() => {
   );
 });
 
-/** Selected row, clamped to what's actually rendered (shell row + matches). */
-const sel = computed(() => Math.min(idx.value, matches.value.length));
+/** How many rows are rendered right now — pinned rows plus ticket matches. */
+const total = computed(() => pinned.value.length + matches.value.length);
+/** Selected row, clamped to what's actually rendered. */
+const sel = computed(() => Math.min(idx.value, Math.max(0, total.value - 1)));
 
 watch(
   () => props.open,
   (o) => {
     if (o) {
       query.value = "";
-      idx.value = props.tickets.length ? 1 : 0;
+      idx.value = props.tickets.length ? PINNED.length : 0;
       nextTick(() => inputEl.value?.focus());
     }
   },
 );
-watch(query, () => (idx.value = matches.value.length ? 1 : 0));
+/**
+ * Where the highlight lands after a keystroke.
+ *
+ * The first cut asked only whether any TICKET matched, so the moment a query
+ * matched both — which is most queries against a real tracker, where "wo" is in
+ * 18 of this project's 91 titles — the highlight went to the first ticket and
+ * the pinned row sat above it, greyed. `↵` then opened a ticket panel. That is
+ * the exact gesture this ticket removed the `⇧↵` chord in favour of, and three
+ * documents asserted it worked.
+ *
+ * A query that NARROWED the pinned rows is a query aimed at one of them, so it
+ * gets the top row. A query that left all three (or none) is aimed at the
+ * tickets, and the "Ctrl+K, ↵ on a ticket" flow is unchanged.
+ */
+watch(query, () => {
+  if (pinned.value.length < PINNED.length) idx.value = 0;
+  else idx.value = matches.value.length ? PINNED.length : 0;
+});
+
+/** Spawn or open whatever is at row `i`. */
+function activate(i: number): void {
+  const p = pinned.value[i];
+  if (p) {
+    emit("spawn", p.kind);
+    return;
+  }
+  const t = matches.value[i - pinned.value.length];
+  if (t) emit("launch", t);
+}
 
 function onKey(e: KeyboardEvent) {
   if (e.key === "ArrowDown") {
     e.preventDefault();
-    idx.value = Math.min(sel.value + 1, matches.value.length);
+    idx.value = Math.min(sel.value + 1, Math.max(0, total.value - 1));
   } else if (e.key === "ArrowUp") {
     e.preventDefault();
     idx.value = Math.max(sel.value - 1, 0);
   } else if (e.key === "Enter" && e.shiftKey) {
-    emit("spawnShell");
+    // ⇧↵ used to spawn a shell from anywhere in the palette. With three pinned
+    // rows a chord for one of them is the worst of both — so there is no chord
+    // now, and this SWALLOWS the old one rather than letting it fall through to
+    // the branch below. Falling through would silently turn a shell chord into
+    // "spawn an agent on whatever ticket happens to be selected", which is the
+    // one outcome a stale reflex must not produce (DRY-82).
+    e.preventDefault();
   } else if (e.key === "Enter") {
-    if (sel.value === 0) emit("spawnShell");
-    else emit("launch", matches.value[sel.value - 1]);
+    activate(sel.value);
   } else if (e.key === "Escape") {
     emit("close");
   }
@@ -79,32 +196,36 @@ function onKey(e: KeyboardEvent) {
         <input
           ref="inputEl"
           v-model="query"
-          placeholder="Spawn an agent on a ticket…  try “auto-advance” or “ARGY”"
+          placeholder="Spawn on a ticket — or type shell, claude, workspace"
           @keydown="onKey"
         />
         <span class="esc">esc</span>
       </div>
       <div class="results">
-        <!-- Pinned blank-shell row (DRY-39): always present, above the tickets. -->
+        <!-- Pinned spawn rows (DRY-82): the three sessions that have no ticket
+             behind them, above the tickets. Filtered by the query like the rows
+             below, which is what lets "type shell, ↵" replace the chord. -->
         <div
-          class="row shellrow"
-          :class="{ active: sel === 0 }"
-          @mouseenter="idx = 0"
-          @click="emit('spawnShell')"
+          v-for="(p, i) in pinned"
+          :key="p.kind"
+          class="row pinrow"
+          :class="{ active: i === sel }"
+          @mouseenter="idx = i"
+          @click="emit('spawn', p.kind)"
         >
-          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#7a9e6b" stroke-width="1.5" stroke-linecap="round">
-            <path d="M3 5l3 3-3 3M8 11h5" />
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" :stroke="p.stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path :d="p.d" />
           </svg>
-          <span class="key">shell</span>
-          <span class="title">Blank shell session — your login shell, no agent</span>
-          <span v-if="sel === 0" class="spawn">↵ spawn</span>
+          <span class="key">{{ p.key }}</span>
+          <span class="title">{{ p.title }}</span>
+          <span v-if="i === sel" class="spawn">↵ spawn</span>
         </div>
         <div
           v-for="(t, i) in matches"
           :key="t.key"
           class="row"
-          :class="{ active: i + 1 === sel }"
-          @mouseenter="idx = i + 1"
+          :class="{ active: i + pinned.length === sel }"
+          @mouseenter="idx = i + pinned.length"
           @click="emit('launch', t)"
         >
           <span
@@ -117,14 +238,17 @@ function onKey(e: KeyboardEvent) {
           <span class="key">{{ t.key }}</span>
           <span class="title">{{ t.title }}</span>
           <span class="repo">~/{{ t.repo }}</span>
-          <span v-if="i + 1 === sel" class="spawn">↵ spawn</span>
+          <span v-if="i + pinned.length === sel" class="spawn">↵ spawn</span>
         </div>
-        <div v-if="!matches.length" class="empty">No matching tickets.</div>
+        <!-- Off `total`, not `matches`: a query naming a pinned row ("workspace")
+             legitimately matches no ticket, and "No matching tickets." over a
+             row that is right there reads as the palette being broken. -->
+        <div v-if="!total" class="empty">Nothing matches.</div>
       </div>
       <div class="footer">
         <span><b>↑↓</b> navigate</span>
         <span><b>↵</b> spawn</span>
-        <span><b>⇧↵</b> shell</span>
+        <span><b>type</b> shell · claude · workspace</span>
         <span class="src">pulled live from {{ providerName }}</span>
       </div>
     </div>
@@ -205,7 +329,11 @@ function onKey(e: KeyboardEvent) {
   font-size: 12.5px;
   font-weight: 600;
   color: #5b9bd5;
-  width: 64px;
+  /* Wide enough for "workspace", which is the longest thing this column now
+     holds (DRY-82) — at 64px it overflowed into the gap and sat against the
+     title with no space between them. A fixed width rather than a min, so the
+     pinned rows and the ticket rows keep one left edge for their titles. */
+  width: 76px;
   flex: 0 0 auto;
 }
 .title {

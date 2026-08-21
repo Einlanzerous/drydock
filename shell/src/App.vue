@@ -1188,6 +1188,24 @@ function blurSpawn(e: Event) {
   (e.currentTarget as HTMLElement | null)?.blur();
 }
 
+/**
+ * A pinned palette row was activated (DRY-82).
+ *
+ * The union is written out rather than imported: QuickLaunch declares the same
+ * one on its emit, and vue-tsc checks the two against each other where the
+ * handler is bound in the template — so a kind added there without being handled
+ * here fails the build rather than the click.
+ *
+ * `closePalette()` with no argument, deliberately: restoring focus fights the
+ * new pane, which claims the keyboard on mount (DRY-40). The header buttons
+ * this replaced called `blurSpawn` for the same reason.
+ */
+function spawnFromPalette(kind: "shell" | "claude" | "workspace"): void {
+  closePalette();
+  if (kind === "workspace") void spawnWorkspace();
+  else void spawnFresh(kind);
+}
+
 async function spawnFresh(kind: "claude" | "shell") {
   wm.setLayout("float");
   try {
@@ -1233,8 +1251,10 @@ async function spawnWorkspace(
       permissionMode: opts.auto ? "auto" : undefined,
       // Pre-fill, never submitted: the daemon presses RETURN only for a run
       // nobody is watching (DRY-49), and this one has a human and a composer
-      // they may want to edit first. The bare "+ workspace" passes no prompt
-      // and so gets no `input` — it is a pair of terminals, not a briefing.
+      // they may want to edit first. A ticketless workspace — the palette's
+      // `workspace` row since DRY-82, the header's "+ workspace" before it —
+      // passes no prompt and so gets no `input`: it is a pair of terminals, not
+      // a briefing.
       input: opts.prompt,
     });
     // Co-locate the human's shell in the agent's *resolved* cwd — which is the
@@ -1251,8 +1271,9 @@ async function spawnWorkspace(
       repo: basename(agent.cwd),
       shellId: shell.id,
       // DRY-36: a ticket spawn opens in its most-agent state — drawer closed
-      // and shell collapsed, each one click away. The bare "+ workspace"
-      // (no ticket) keeps the shell visible; it exists to pair agent + zsh.
+      // and shell collapsed, each one click away. A ticketless one (the
+      // palette's `workspace` row) keeps the shell visible; it exists to pair
+      // agent + zsh.
       drawerOpen: false,
       shellCollapsed: !!opts.ticket,
       shellRatio: 0.2,
@@ -1836,8 +1857,9 @@ onBeforeUnmount(stopDesk);
         </div>
       </div>
 
-      <div class="grow"></div>
-
+      <!-- No spacer div: the header is a grid whose outer tracks are equal by
+           construction, so the switcher is centred on the WINDOW rather than on
+           whatever the two clusters happen to weigh (DRY-82). -->
       <div class="switcher">
         <button
           v-for="m in layouts"
@@ -1848,8 +1870,6 @@ onBeforeUnmount(stopDesk);
           {{ m[0].toUpperCase() + m.slice(1) }}
         </button>
       </div>
-
-      <div class="grow"></div>
 
       <div class="controls">
         <!-- Only when there is something to clear, so the desk isn't carrying a
@@ -1871,24 +1891,17 @@ onBeforeUnmount(stopDesk);
           </svg>
           <span>{{ focusedRepo }}</span>
         </div>
+        <!-- The only spawn control on the desk (DRY-82). "+ claude" and
+             "+ workspace" stood beside it until the palette could do both —
+             three buttons for one gesture, the third pass at a cleanup DRY-36
+             and DRY-39 each made once. Everything they did is a pinned row in
+             here now. -->
         <button class="new" @click="openPalette()">
           <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#9cc6ec" stroke-width="1.6">
             <path d="M8 3v10M3 8h10" />
           </svg>
           New session
           <span class="kbd">Ctrl K</span>
-        </button>
-        <!-- Plain shells spawn from the palette (⇧↵) — a header button here
-             duplicated the "New session (Ctrl K)" pill (DRY-39). -->
-        <button class="ghost" title="Bare claude agent" @click="blurSpawn($event), spawnFresh('claude')">
-          + claude
-        </button>
-        <button
-          class="ghost"
-          title="Ticket drawer + agent + zsh in one window"
-          @click="blurSpawn($event), spawnWorkspace()"
-        >
-          + workspace
         </button>
         <!-- Identity, and only when there is one to show (DRY-27). A daemon
              with auth off has nobody to name, and a "signed in as local" chip
@@ -1897,12 +1910,14 @@ onBeforeUnmount(stopDesk);
           <button
             v-if="isMultiUser"
             class="ghost"
-            title="Add or remove accounts on this Drydock"
+            :title="`${authUser.name} — add or remove accounts on this Drydock`"
             @click="blurSpawn($event), (usersOpen = true)"
           >
             {{ authUser.name }}
           </button>
-          <span v-else class="who">{{ authUser.name }}</span>
+          <!-- The name is capped and ellipsised (see `.whoami`), so both forms
+               carry it in full where a pointer can reach it. -->
+          <span v-else class="who" :title="authUser.name">{{ authUser.name }}</span>
           <button class="ghost" title="Sign out of this Drydock" @click="signOut()">
             Sign out
           </button>
@@ -2047,7 +2062,7 @@ onBeforeUnmount(stopDesk);
       :provider-name="providerName"
       @close="closePalette(true)"
       @launch="openTicket"
-      @spawn-shell="closePalette(), spawnFresh('shell')"
+      @spawn="spawnFromPalette"
     />
 
     <TicketDetail
@@ -2091,16 +2106,93 @@ onBeforeUnmount(stopDesk);
   gap: 6px;
   margin-left: 4px;
   padding-left: 10px;
+  min-width: 0;
   border-left: 1px solid #ffffff12;
+}
+/* An account name is the one width in this header nobody chose, so it is the
+   one thing that ellipsises rather than pushing (DRY-82). `Sign out` beside it
+   is a control and keeps its size. */
+.whoami .who,
+.whoami > .ghost:first-child {
+  /* Border-box (global), so this bounds the BUTTON the multi-user tier renders,
+     padding and border included, not just its text — the two tiers therefore
+     cost the header the same, and a single-user rig can measure both. */
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+  line-height: 34px;
 }
 .whoami .who {
   color: #9aa6b2;
   font-size: 12px;
+  line-height: normal;
 }
+/* Three tracks, not two flexible spacers (DRY-82).
+ *
+ * The switcher used to sit between a pair of `flex:1` divs, which hands each
+ * side equal SLACK rather than equal WIDTH — so its position was a function of
+ * how wide `.controls` happened to be, and a control on the left of the screen
+ * moved whenever something on the right resized. Five things do: the folder
+ * chip follows focus, `Clear finished` appears and vanishes, its count badge is
+ * one or two digits, and the account name / Sign out pair arrives with auth.
+ * Pinning any one of them would have fixed a fifth of it.
+ *
+ * The outer tracks are equal regardless of content, so the middle one is
+ * centred on the window. `minmax(0, …)` rather than a bare `1fr` because a bare
+ * one refuses to shrink below its content and the whole header would overflow
+ * instead.
+ *
+ * Grid rather than absolute positioning because this keeps the switcher in
+ * flow — but **that buys nothing on its own, and the first cut of this shipped
+ * the overlap it claimed to prevent.** `justify-self: end` pins `.controls` to
+ * the end of a track exactly `1fr` wide while `flex: 0 0 auto` stops its
+ * children shrinking, so a cluster too wide for its track grows LEFTWARDS,
+ * straight across the middle one. Measured: fine at 1440 and 1280, 25px of
+ * overlap at 1100 and 95px at 960 — but only once `.controls` carries the auth
+ * cluster and `Clear finished`, which is why a harness that measured the
+ * signed-out, nothing-to-clear desk could not see it.
+ *
+ * **And the cause is DISTRIBUTION, not content.** At 960 the three clusters and
+ * their gaps want ~810px of a 960px header — it all fits comfortably. What
+ * doesn't fit is the controls into a track sized as though the brand needed the
+ * same room, which it never does: equal tracks hand the brand ~250px of spare
+ * while the cluster that has something to say overflows. Dropping controls to
+ * make that work would be paying for the wrong thing.
+ *
+ * So below the packing breakpoint (1440px, see the media query) the header
+ * stops centring and packs instead — brand and switcher at min-content, the
+ * controls taking what's left. Note what that KEEPS: the switcher's position
+ * then depends only on the brand, which never changes, so it still cannot
+ * drift. It simply isn't centred, which is the honest trade at a width where
+ * centring would mean painting one control over another. Above it, equal tracks
+ * and a true centre.
+ *
+ * **That breakpoint is a constant derived from today's `.controls`, which is
+ * the exact thing this ticket set out to stop doing, and it is kept only
+ * because the alternatives are worse.** Sizing track 3 `minmax(min-content,
+ * 1fr)` removes the constant and degrades at precisely the right width — but in
+ * the degraded regime track 1 absorbs the difference, so the switcher moves when
+ * `Clear finished` appears, which is the original bug confined to narrow
+ * windows rather than fixed. No CSS available here expresses "centre only while
+ * the other side fits" without that trade.
+ *
+ * What is done instead is to stop the constant rotting silently: the harness
+ * measures the FULLEST `.controls` this desk can carry (a cap-length account
+ * name, `Clear finished`, the chip) and asserts, at the first centred width,
+ * that the folder chip has not been squeezed to its floor — its floor being its
+ * own icon and padding, i.e. a chip with no name left in it. That is the slack
+ * this breakpoint is spending, so the sixth control to join `.controls` fails a
+ * check rather than moving a threshold nothing is watching.
+ *
+ * The account name ellipsises rather than pushing, because its width is the one
+ * thing in this header nobody chose. */
 .topbar {
   height: 54px;
   flex: 0 0 auto;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   gap: 16px;
   padding: 0 14px;
@@ -2112,6 +2204,7 @@ onBeforeUnmount(stopDesk);
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
 }
 .word {
   display: flex;
@@ -2127,9 +2220,32 @@ onBeforeUnmount(stopDesk);
 .tagline {
   font-size: 12px;
   color: #5a636f;
+  white-space: nowrap;
 }
-.grow {
-  flex: 1;
+/* Below this the outer tracks can't both be as wide as the controls need, so
+   equal ones would put the cluster over the switcher. Pack instead — see the
+   note on `.topbar` for why this keeps the drift fix rather than trading it
+   away, and for why the number is a constant at all.
+
+   Measured with the fullest `.controls` this desk can carry — an account name
+   at its cap, `Clear finished` with its badge, the folder chip, `New session`.
+   `.controls` bottoms out at ~558px with that content, so an equal track needs
+   1360px of viewport just to CONTAIN it and 1440 to contain it with ~40px to
+   spare and the folder chip still showing a name. Two earlier cuts sat at 1300
+   and then 1360 — 2px and 1px above the cliff respectively, margins that read
+   like decisions and were coincidences. Anything at or below 1440 packs, where
+   the clearance is 128-248px and the chip is at its natural width. */
+@media (max-width: 1440px) {
+  .topbar {
+    grid-template-columns: auto auto minmax(0, 1fr);
+  }
+}
+/* The one piece of the header that says nothing — it is a tagline — so it goes
+   before anything anybody reads does. */
+@media (max-width: 1180px) {
+  .tagline {
+    display: none;
+  }
 }
 .switcher {
   display: flex;
@@ -2156,7 +2272,15 @@ onBeforeUnmount(stopDesk);
 .controls {
   display: flex;
   align-items: center;
+  justify-self: end;
   gap: 8px;
+  min-width: 0;
+}
+/* Nothing here shrinks except the repo chip: a squeezed "New session" or a
+   clipped count badge is a worse answer to a narrow window than a truncated
+   directory name, and the chip is the only item whose content is arbitrary. */
+.controls > :not(.repo) {
+  flex: 0 0 auto;
 }
 .repo {
   display: flex;
@@ -2167,9 +2291,18 @@ onBeforeUnmount(stopDesk);
   border-radius: 8px;
   padding: 0 10px;
   height: 34px;
+  min-width: 0;
   font-family: "JetBrains Mono", monospace;
   font-size: 12px;
   color: #9aa6b2;
+}
+.repo svg {
+  flex: 0 0 auto;
+}
+.repo span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .new {
   display: inline-flex;
@@ -2208,7 +2341,7 @@ onBeforeUnmount(stopDesk);
   line-height: 1;
   cursor: pointer;
 }
-/* Quieter than the two spawn buttons beside it and not proportional-font: this
+/* Quieter than the "New session" pill beside it and not proportional-font: this
    is housekeeping, and it appears unannounced when sessions end. It must not
    read as the primary action on a desk somebody just came back to. */
 .sweep {

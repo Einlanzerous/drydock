@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
+import { computed, onBeforeUnmount, reactive, ref, watch } from "vue";
 import {
   CATEGORY_COLOR,
   epicNodeId,
   epicRollup,
   groupTickets,
   listEpicChildren,
+  searchTickets,
   tagColor,
   TICKET_POLL_MS,
   type EpicNode,
@@ -17,9 +18,14 @@ import {
 // Left sidebar: live tickets from the active tracker, grouped by repo. At PoC
 // fixture scale a flat list was fine; against a live tracker it pulls 100+
 // tickets across every project, so this adds the usability layer (DRY-11):
-// a search box, project/status/assignee filters, and collapsible groups
-// (collapsed by default, with counts). All filtering is client-side over the
-// already-loaded set. Each row still spawns an agent scoped to that ticket.
+// one search/filter box, and collapsible groups (collapsed by default, with
+// counts). Filtering is client-side over the already-loaded set — the box takes
+// bare text or `key=value` pills (DRY-82), which replaced four permanent
+// selects. Each row still spawns an agent scoped to that ticket.
+//
+// One thing in here is NOT a filter over the loaded set: a term the pull cannot
+// contain is also looked up through `/api/tracker/search`, and what that finds
+// renders in a block of its own below the groups (DRY-82).
 //
 // The scope row (DRY-30) is different in kind from the filters: it controls
 // what the daemon PULLS from the tracker, not what's shown of the loaded set.
@@ -144,11 +150,83 @@ function addProject(): void {
 // file as binary — no diffs, no grep.)
 const UNASSIGNED = " unassigned";
 
-const search = ref("");
-const fProject = ref("");
-const fStatus = ref("");
-const fAssignee = ref("");
-const fEpic = ref("");
+/**
+ * The four view filters, as `key=value` pills rather than four permanent selects
+ * (DRY-82).
+ *
+ * The argument for the change is what it costs to ADD one. A select is a
+ * permanent control in a 266px column, so the row was already full at four —
+ * Epic had to be given a line of its own because its options are sentences —
+ * and the ask on this surface is for more filters, not fewer. Under a pill bar
+ * a filter costs a key name and nothing on screen until somebody uses it.
+ *
+ * What did NOT become a pill is the seam this block has always had, and the
+ * comment at the scope row has said so since DRY-30: these four are VIEW
+ * filters, instant and local over the tickets already loaded, while the project
+ * chips and the backlog switch are PULL SCOPE — a tracker round trip measured at
+ * 5.7-6s against a corporate Jira, a new cache key, and a fresh child-stats
+ * fan-out (DRY-72). Two controls that look identical and cost 6000x differently
+ * is how an app comes to read as randomly slow, so scope stays as chips exactly
+ * where it was and only the filters moved.
+ */
+type FilterKey = "project" | "status" | "assignee" | "epic";
+const FILTER_KEYS: FilterKey[] = ["project", "status", "assignee", "epic"];
+/**
+ * Keys a pill may be typed with.
+ *
+ * `repo` is here because that is what the field is CALLED on a Ticket and what
+ * the group headings show; "Project" was only ever the select's label. Accepted
+ * but never OFFERED — the completion list is built from `FILTER_KEYS`, so the
+ * bar suggests one name per filter and takes the other if you know it.
+ */
+const KEY_ALIASES: Record<string, FilterKey> = {
+  project: "project",
+  repo: "project",
+  status: "status",
+  assignee: "assignee",
+  epic: "epic",
+};
+
+interface Pill {
+  key: FilterKey;
+  /**
+   * What the predicate compares. Not always what was typed: a status pill holds
+   * the CATEGORY (`in_progress`), because that is the stable value — labels are
+   * whatever the tracker's workflow calls that column this week.
+   */
+  value: string;
+  /** What the pill shows, which for a status is the label the tracker uses. */
+  label: string;
+}
+const pills = ref<Pill[]>([]);
+
+/**
+ * What is in the input right now — a free-text term, or a pill being typed.
+ *
+ * One control for both, which is the gesture the ticket asked for: bare text
+ * searches, `assignee=…` offers to become a pill. `term` is therefore empty
+ * while a `key=` draft is in progress, or every keystroke of "assignee=Ash"
+ * would also be applied as a literal search for the string "assignee=Ash" and
+ * empty the sidebar on the way.
+ */
+const draft = ref("");
+/**
+ * Is the box holding a pill being TYPED, as opposed to a search term?
+ *
+ * Gated on a recognised key, not on the presence of an `=`. The looser test
+ * disabled the search box for any term containing one — a title with `=` in it,
+ * or a mistyped key like `proj=drydock` — and disabled it invisibly: `term`
+ * blank means no local filter, no lookup, and `filtering` false so no ✕ to
+ * clear, while `parsePill` returns null on ↵ so nothing commits either. The
+ * full unfiltered list renders as though the box were empty.
+ *
+ * `at > 0` rather than `at >= 0`, so a leading `=` is text like anything else.
+ */
+const drafting = computed(() => {
+  const at = draft.value.indexOf("=");
+  return at > 0 && !!KEY_ALIASES[draft.value.slice(0, at).trim().toLowerCase()];
+});
+const term = computed(() => (drafting.value ? "" : draft.value.trim()));
 // Per-group expand state; absent = collapsed (the default). When a search/filter
 // is active we force-open all groups so matches aren't hidden behind a chevron.
 // Epics get their own map on the same rule, keyed `${repo} ${epicKey}` — the
@@ -289,14 +367,15 @@ function onRefresh(): void {
   emit("refresh");
 }
 
-const filtering = computed(
-  () =>
-    !!search.value.trim() ||
-    !!fProject.value ||
-    !!fStatus.value ||
-    !!fAssignee.value ||
-    !!fEpic.value,
-);
+/**
+ * Is anything narrowing the list? Drives the force-open of every group and epic,
+ * and the ✕ on the input.
+ *
+ * Off `term` rather than off `draft`, so a half-typed `assignee=` doesn't count:
+ * it filters nothing yet, and force-opening every epic on the desk is the state
+ * a render-path fetch would storm in (DRY-83).
+ */
+const filtering = computed(() => !!term.value || pills.value.length > 0);
 
 /**
  * The pull, plus the children fetched for epics that are open (DRY-83).
@@ -368,6 +447,216 @@ const epicOptions = computed(() => {
   return [...seen].map(([key, title]) => ({ key, title })).sort((a, b) => a.key.localeCompare(b.key));
 });
 
+/** One offerable value for a filter key, and how to show it. */
+interface Choice {
+  value: string;
+  label: string;
+  /** Second line in the completion list — an epic's title, which is a sentence. */
+  hint?: string;
+}
+
+/**
+ * What each key can be, derived from the LOADED set exactly as the four selects
+ * were.
+ *
+ * This is the trap the pill bar has to answer for and the selects never could
+ * have (DRY-82): a filter can only ever match what was pulled. Typed free-hand,
+ * `assignee=Ashley Dodson` produces a perfectly valid pill that matches nothing
+ * — because her tickets are in a project the daemon isn't pulling, or in the
+ * backlog bucket the toggle leaves out — and the result is an empty sidebar
+ * that looks exactly like a healthy tracker with nothing in scope. That is the
+ * precise silence DRY-55 exists to break. So completions come from here, and a
+ * value that ISN'T here still becomes a pill (refusing it would be its own lie
+ * about what the tracker holds) but wears a state saying so — see `unknown`.
+ */
+const choices = computed<Record<FilterKey, Choice[]>>(() => ({
+  project: projects.value.map((v) => ({ value: v, label: v })),
+  status: statuses.value.map((st) => ({ value: st.category, label: st.label })),
+  assignee: [
+    ...assignees.value.map((a) => ({ value: a, label: a })),
+    ...(hasUnassigned.value ? [{ value: UNASSIGNED, label: "Unassigned" }] : []),
+  ],
+  epic: epicOptions.value.map((e) => ({ value: e.key, label: e.key, hint: e.title })),
+}));
+
+/**
+ * Is this pill's value one the loaded set actually contains?
+ *
+ * Derived, never stored on the pill. Widening the pull — adding a project chip,
+ * turning the backlog on, expanding an epic — is exactly what turns an unknown
+ * pill into a known one, and a flag written when the pill was made would still
+ * be accusing it an hour later.
+ */
+function isKnown(p: Pill): boolean {
+  return choices.value[p.key].some((c) => c.value === p.value);
+}
+const unknownPills = computed(() => pills.value.filter((pill) => !isKnown(pill)));
+
+/**
+ * Turn `key=value` into a pill, or null when the text isn't one.
+ *
+ * The value is resolved against the loaded set — by label as well as by value,
+ * since a status pill is typed `status=In progress` and stored as `in_progress`
+ * — and falls back to the raw text when nothing matches. A prefix match is
+ * accepted so `assignee=Ash` completes without the completion list being used,
+ * which is what makes ↵ work the same whether or not you looked at it.
+ */
+function parsePill(text: string): Pill | null {
+  const at = text.indexOf("=");
+  if (at < 0) return null;
+  const key = KEY_ALIASES[text.slice(0, at).trim().toLowerCase()];
+  const raw = text.slice(at + 1).trim();
+  if (!key || !raw) return null;
+  const lower = raw.toLowerCase();
+  const opts = choices.value[key];
+  const hit =
+    opts.find((c) => c.value.toLowerCase() === lower || c.label.toLowerCase() === lower) ??
+    // Prefix on BOTH, for the same reason the exact test checks both: a status
+    // is typed either way round (`status=Blocked`, `status=in_pro`), and
+    // matching only the label makes the value spelling produce an unknown pill
+    // for a status that is right there on screen.
+    opts.find(
+      (c) => c.label.toLowerCase().startsWith(lower) || c.value.toLowerCase().startsWith(lower),
+    );
+  return hit ? { key, value: hit.value, label: hit.label } : { key, value: raw, label: raw };
+}
+
+/** A row in the completion list under the input. */
+interface Suggestion {
+  /** `key` completes to `assignee=`; `value` commits a whole pill. */
+  kind: "key" | "value";
+  key: FilterKey;
+  label: string;
+  hint?: string;
+  pill?: Pill;
+}
+const MAX_SUGGESTIONS = 7;
+
+const suggestions = computed<Suggestion[]>(() => {
+  const text = draft.value;
+  const at = text.indexOf("=");
+  if (at < 0) {
+    // No `=` yet: this is a search term, and the only thing worth offering is
+    // the key it might be turning into. Nothing at all for an empty box — a
+    // list that is always open is a list nobody reads.
+    const q = text.trim().toLowerCase();
+    if (!q) return [];
+    return FILTER_KEYS.filter((k) => k.startsWith(q)).map((k) => ({
+      kind: "key" as const,
+      key: k,
+      label: `${k}=`,
+      hint: `filter by ${k}`,
+    }));
+  }
+  const key = KEY_ALIASES[text.slice(0, at).trim().toLowerCase()];
+  if (!key) return [];
+  const q = text.slice(at + 1).trim().toLowerCase();
+  return choices.value[key]
+    .filter((c) => !q || c.label.toLowerCase().includes(q) || c.value.toLowerCase().includes(q))
+    .slice(0, MAX_SUGGESTIONS)
+    .map((c) => ({
+      kind: "value" as const,
+      key,
+      label: `${key}=${c.label}`,
+      hint: c.hint,
+      pill: { key, value: c.value, label: c.label },
+    }));
+});
+
+/**
+ * Highlighted completion, or -1 for none — and -1 is the OPENING state on
+ * purpose.
+ *
+ * Auto-highlighting the first row would make ↵ mean "take the suggestion" from
+ * the first keystroke, and this input's other job is a plain search term: typing
+ * "as" to look for a ticket and pressing ↵ would silently turn into
+ * `assignee=`. With no highlight, ↵ acts on what was actually typed and the
+ * list is opt-in through ↓ or a click.
+ */
+const sugIdx = ref(-1);
+watch(draft, () => (sugIdx.value = -1));
+/**
+ * Is the input focused? The completion list is gated on it so it doesn't hang
+ * over the scope row after you've clicked away. Note the list's own rows use
+ * `@mousedown.prevent`, which is what stops picking one from blurring the input
+ * and unmounting the row mid-click.
+ */
+const draftFocused = ref(false);
+
+function applySuggestion(sg: Suggestion): void {
+  if (sg.kind === "key") {
+    draft.value = `${sg.key}=`;
+    return;
+  }
+  if (sg.pill) addPill(sg.pill);
+  draft.value = "";
+}
+
+function addPill(pill: Pill): void {
+  // Same key twice is an OR (see `matches`), so a duplicate would be a pill that
+  // widens nothing and can still be removed to change the result.
+  if (pills.value.some((x) => x.key === pill.key && x.value === pill.value)) return;
+  pills.value = [...pills.value, pill];
+}
+function removePill(i: number): void {
+  pills.value = pills.value.filter((_, n) => n !== i);
+}
+
+/** ↵ in the input: take the highlighted completion, else commit what was typed. */
+function commitDraft(): void {
+  const sg = suggestions.value[sugIdx.value];
+  if (sg) {
+    applySuggestion(sg);
+    return;
+  }
+  const pill = parsePill(draft.value);
+  if (!pill) return; // bare text — it is already filtering, there is nothing to commit
+  addPill(pill);
+  draft.value = "";
+}
+
+function onDraftKey(e: KeyboardEvent): void {
+  if (e.key === "ArrowDown") {
+    e.preventDefault();
+    sugIdx.value = Math.min(sugIdx.value + 1, suggestions.value.length - 1);
+  } else if (e.key === "ArrowUp") {
+    e.preventDefault();
+    sugIdx.value = Math.max(sugIdx.value - 1, -1);
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    commitDraft();
+  } else if (e.key === "Escape") {
+    // The completion list first, the box second. Esc on this desk also closes
+    // the ticket panel (App.vue's capture handler), so this only stops the
+    // propagation it has actually consumed.
+    if (sugIdx.value >= 0) {
+      sugIdx.value = -1;
+      e.stopPropagation();
+    }
+  } else if (e.key === "Backspace" && !draft.value && pills.value.length) {
+    // The standard gesture, and the only one that reaches a pill without the
+    // mouse.
+    e.preventDefault();
+    removePill(pills.value.length - 1);
+  }
+}
+
+/** Does one pill's value admit this ticket? */
+function pillMatches(key: FilterKey, value: string, t: Ticket): boolean {
+  switch (key) {
+    case "project":
+      return t.repo === value;
+    case "status":
+      return t.status.category === value;
+    case "assignee":
+      return value === UNASSIGNED ? !t.assignee : t.assignee?.name === value;
+    case "epic":
+      // "This epic" means the epic and its children, so the row you filtered by
+      // stays on screen as the header for what it contains.
+      return t.key === value || t.parent?.key === value;
+  }
+}
+
 /**
  * The filter predicate, as a function rather than inline in `filtered`, because
  * on-demand epic children (DRY-83) have to pass through the SAME test.
@@ -378,17 +667,20 @@ const epicOptions = computed(() => {
  * rows on screen.
  */
 const matches = computed(() => {
-  const q = search.value.trim().toLowerCase();
+  const q = term.value.toLowerCase();
+  // Grouped OUT here, not inside the returned closure: this runs once per
+  // ticket and the grouping is the same for all of them.
+  //
+  // Two pills of one key are an OR, different keys an AND — which is what the
+  // selects could not express (one value each) and the reason a bad guess is
+  // survivable: `assignee=someone-not-here` beside `assignee=you` narrows to
+  // your tickets rather than emptying the sidebar.
+  const byKey = FILTER_KEYS.map(
+    (k) => [k, pills.value.filter((pill) => pill.key === k).map((pill) => pill.value)] as const,
+  ).filter(([, vals]) => vals.length > 0);
   return (t: Ticket): boolean => {
-    if (fProject.value && t.repo !== fProject.value) return false;
-    if (fStatus.value && t.status.category !== fStatus.value) return false;
-    // "This epic" means the epic and its children, so the row you filtered by
-    // stays on screen as the header for what it contains.
-    if (fEpic.value && t.key !== fEpic.value && t.parent?.key !== fEpic.value) return false;
-    if (fAssignee.value === UNASSIGNED) {
-      if (t.assignee) return false;
-    } else if (fAssignee.value && t.assignee?.name !== fAssignee.value) {
-      return false;
+    for (const [key, vals] of byKey) {
+      if (!vals.some((v) => pillMatches(key, v, t))) return false;
     }
     if (q) {
       // Searching an epic key finds its children too — the parent link is part
@@ -645,12 +937,174 @@ function epicRowTitle(node: EpicNode, expandable: boolean, roll: Rollup): string
   return `Expand or collapse ${node.key}${unpulled}`;
 }
 function clearFilters(): void {
-  search.value = "";
-  fProject.value = "";
-  fStatus.value = "";
-  fAssignee.value = "";
-  fEpic.value = "";
+  draft.value = "";
+  pills.value = [];
 }
+
+// --- looking outside the pull (DRY-82) -------------------------------------
+//
+// Every control above this line filters `props.tickets`, so the sidebar could
+// only ever find what had already been pulled — and the pull is open tickets in
+// the configured projects, backlog excluded. Typing a key for anything else
+// (a closed ticket, a project outside the scope) returned "No tickets match.",
+// which is the same sentence a healthy tracker with nothing in scope says.
+//
+// `/api/tracker/search` spans ALL statuses within the project scope and has been
+// sitting unused since it was built for the palette. It answers the question the
+// filters cannot: no tickets, or no tickets HERE?
+//
+// It runs BESIDE the local filter rather than instead of it. Replacing the
+// filter would trade an instant, local answer for a debounced round trip on the
+// common case, so what is on screen keeps working and this only ever ADDS rows
+// the pull doesn't have.
+
+/** Don't search for one character: every key and every word starts with one. */
+const MIN_SEARCH = 2;
+/**
+ * A request per keystroke against a tracker measured at 5.7-6s is the pathology
+ * DRY-72 spent a ticket removing, so the term has to settle first.
+ */
+const SEARCH_DEBOUNCE_MS = 400;
+
+interface FoundState {
+  /** The term these rows are FOR, so a render can't attribute them to a newer one. */
+  q: string;
+  loading: boolean;
+  rows: Ticket[];
+  error?: string;
+  /** A search has SETTLED for `q` — what tells "found nothing" from "not asked yet". */
+  done: boolean;
+  /**
+   * The project scope the request ACTUALLY went out with.
+   *
+   * Recorded rather than re-derived from the props at render time, because the
+   * scope can change while a result is on screen: adding a project chip would
+   * otherwise make the "nothing for X in DRY, FOO either" line name a project
+   * that was never asked about. Same reasoning as `isKnown` being derived
+   * rather than stored, pointing the other way — there the truth is current,
+   * here it is what the evidence was gathered under.
+   */
+  scope: string[];
+}
+/**
+ * A `ref` holding a whole object, NOT a `reactive` whose fields get patched.
+ *
+ * Every outcome replaces the state entirely, which is what `loadChildren` does
+ * with `childLoads[key]` and for the same reason: patching `rows` and `done` on
+ * success while leaving `error` standing renders "couldn't search — retry"
+ * forever over rows that were successfully fetched, and the retry control can
+ * then never visibly succeed. Making the state un-patchable is the version of
+ * that fix which can't come undone.
+ */
+const found = ref<FoundState>({ q: "", loading: false, rows: [], done: false, scope: [] });
+
+let searchTimer: ReturnType<typeof setTimeout> | null = null;
+/**
+ * Retires a result whose term is no longer the one in the box.
+ *
+ * DRY-72 says a new request path goes through the single entry point the poll
+ * and Refresh share, and the reason it gives is that overlapping pulls are how
+ * an epoch guard turns into a silence. That reason is honoured here; the literal
+ * chaining is not, deliberately. `runTicketPull` serialises the LIST pull, whose
+ * fan-out is those 5.7-6s — queueing a one-shot lookup behind it would make the
+ * fast path wait on the slow one for no benefit, since they are different routes
+ * with different cache keys. What that rule is protecting against is two
+ * searches in flight and the failing one's outcome being discarded on arrival,
+ * so: one at a time, newest wins, and every outcome is guarded.
+ */
+let searchEpoch = 0;
+let searchInFlight: Promise<void> | null = null;
+
+function runSearch(text: string): Promise<void> {
+  const epoch = ++searchEpoch;
+  // Scoped to what the sidebar is pulling, host defaults plus the chips somebody
+  // added. Wider than the pull in status (this spans closed work), never wider
+  // in project — which is why a miss here is reported as "in the projects it
+  // searches" rather than as "nowhere". Read ONCE, here, and carried on the
+  // state: it is the scope this answer was obtained under.
+  const scope = [...new Set([...props.scopeProjects, ...props.userProjects])];
+  // Said from the moment the gesture lands rather than from when the request
+  // goes out. The retry control is the one caller that doesn't come through
+  // `watch(term)`, so without this a click on it changes nothing on screen —
+  // including in the case where it goes on to fail again.
+  found.value = { q: text, loading: true, rows: [], done: false, scope };
+  const prior = searchInFlight ?? Promise.resolve();
+  const mine = prior.then(async () => {
+    // Superseded while queued behind the previous one — don't even ask.
+    if (epoch !== searchEpoch) return;
+    try {
+      const rows = await searchTickets(text, scope);
+      if (epoch !== searchEpoch) return;
+      found.value = { q: text, loading: false, rows, done: true, scope };
+    } catch (e: unknown) {
+      if (epoch !== searchEpoch) return;
+      found.value = { q: text, loading: false, rows: [], done: true, error: String(e), scope };
+    }
+  });
+  searchInFlight = mine;
+  void mine.finally(() => {
+    if (searchInFlight === mine) searchInFlight = null;
+  });
+  return mine;
+}
+
+watch(term, (text) => {
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = null;
+  // Bumped on every change, not only when a search starts: it is what retires a
+  // reply for the term that was in the box two keystrokes ago.
+  searchEpoch++;
+  // Replaced whole, so nothing from the last term survives into this one. Rows
+  // are dropped rather than kept, unlike everything else on this surface:
+  // keeping the last list is right when a re-pull may fail (see `loadChildren`),
+  // but here the previous rows are the answer to a DIFFERENT question, and
+  // leaving them under a term they don't match is a wrong answer rather than a
+  // stale one.
+  found.value = {
+    q: text,
+    loading: text.length >= MIN_SEARCH,
+    rows: [],
+    done: false,
+    scope: [],
+  };
+  if (!found.value.loading) return;
+  searchTimer = setTimeout(() => {
+    searchTimer = null;
+    void runSearch(text);
+  }, SEARCH_DEBOUNCE_MS);
+});
+
+onBeforeUnmount(() => {
+  if (searchTimer) clearTimeout(searchTimer);
+  searchTimer = null;
+  // Nothing may commit into a reactive object whose component is gone.
+  searchEpoch++;
+});
+
+/**
+ * The found rows that aren't already on this desk.
+ *
+ * Against `augmented` — everything LOADED — rather than against `filtered`,
+ * because "elsewhere" is a claim about the pull, not about the filter. A row the
+ * pull has and a pill is currently hiding has not been found elsewhere.
+ *
+ * Rendered in a block of its own rather than merged into the groups. Merging is
+ * what DRY-83 does for an epic's children and it is right there, because those
+ * rows are in-scope work; these are deliberately out of scope and mostly closed,
+ * so grouping them under a repo heading would quietly restate what the sidebar
+ * is showing.
+ */
+const elsewhere = computed(() => {
+  const here = new Set(augmented.value.map((t) => t.key));
+  return found.value.rows.filter((t) => !here.has(t.key));
+});
+
+/**
+ * The projects the search actually covered, for the copy when it finds nothing.
+ *
+ * Off the RESULT's own record of them, never off the props — see `FoundState`.
+ */
+const searchScope = computed(() => found.value.scope.join(", "));
 </script>
 
 <template>
@@ -701,40 +1155,74 @@ function clearFilters(): void {
 
     <!-- search + filters -->
     <div class="controls">
+      <!-- One box for both jobs (DRY-82): bare text searches, `key=value`
+           becomes a pill. The four selects this replaced each cost a permanent
+           control in a 266px column, which is what made "add another filter"
+           expensive; a key costs nothing until it is typed. -->
       <div class="searchbox">
         <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="#5a636f" stroke-width="1.5">
           <circle cx="7" cy="7" r="4.5" />
           <path d="M11 11l3 3" stroke-linecap="round" />
         </svg>
-        <input v-model="search" type="text" placeholder="Search tickets…" spellcheck="false" />
+        <input
+          v-model="draft"
+          type="text"
+          placeholder="Search, or project=… status=…"
+          spellcheck="false"
+          title="Type to search every loaded ticket. `project=`, `status=`, `assignee=` and `epic=` become filter pills — ↵ to add, ⌫ on an empty box to take the last one back."
+          @keydown="onDraftKey"
+          @focus="draftFocused = true"
+          @blur="draftFocused = false"
+        />
         <button v-if="filtering" class="clear" title="Clear filters" @click="clearFilters">✕</button>
+        <!-- Completions from the LOADED set, which is the cheap half of the
+             answer to "no tickets, or no tickets here?" — offering only values
+             that exist means the ordinary path can't produce a pill that matches
+             nothing. Free text is still accepted; it just says so afterwards. -->
+        <div v-if="draftFocused && suggestions.length" class="suggest">
+          <div
+            v-for="(sg, i) in suggestions"
+            :key="sg.label"
+            class="sug"
+            :class="{ active: i === sugIdx }"
+            @mouseenter="sugIdx = i"
+            @mousedown.prevent="applySuggestion(sg)"
+          >
+            <span class="sug-label">{{ sg.label }}</span>
+            <span v-if="sg.hint" class="sug-hint">{{ sg.hint }}</span>
+          </div>
+        </div>
       </div>
-      <div class="filters">
-        <select v-model="fProject" :class="{ on: !!fProject }" title="Project">
-          <option value="">Project</option>
-          <option v-for="p in projects" :key="p" :value="p">{{ p }}</option>
-        </select>
-        <select v-model="fStatus" :class="{ on: !!fStatus }" title="Status">
-          <option value="">Status</option>
-          <option v-for="s in statuses" :key="s.category" :value="s.category">{{ s.label }}</option>
-        </select>
-        <select v-model="fAssignee" :class="{ on: !!fAssignee }" title="Assignee">
-          <option value="">Assignee</option>
-          <option v-for="a in assignees" :key="a" :value="a">{{ a }}</option>
-          <option v-if="hasUnassigned" :value="UNASSIGNED">Unassigned</option>
-        </select>
-      </div>
-      <!-- Epic filter (DRY-13) gets its own full-width row: epic titles are
-           sentences, and squeezed into the quarter-width the row above would
-           leave, every option truncates to the same few characters. -->
-      <div v-if="epicOptions.length" class="filters">
-        <select v-model="fEpic" :class="{ on: !!fEpic }" title="Epic">
-          <option value="">Epic</option>
-          <option v-for="e in epicOptions" :key="e.key" :value="e.key">{{ e.key }} — {{ e.title }}</option>
-        </select>
+      <!-- The pills themselves. A filter pill is instant and local; the chips a
+           row below change what the daemon FETCHES. Two different animals, so
+           they don't wear the same clothes — see `.pill` and `.chip`. -->
+      <div v-if="pills.length" class="pills">
+        <span
+          v-for="(pill, i) in pills"
+          :key="`${pill.key}=${pill.value}`"
+          class="pill"
+          :class="{ unknown: !isKnown(pill) }"
+          :title="
+            isKnown(pill)
+              ? `Showing only ${pill.key} ${pill.label}`
+              : `No loaded ticket has ${pill.key} “${pill.label}” — it may be in a project this daemon isn't pulling, or in the backlog bucket`
+          "
+        >
+          <span class="pill-k">{{ pill.key }}</span>
+          <span class="pill-v">{{ pill.label }}</span>
+          <button class="chip-x" :title="`Remove ${pill.key} filter`" @click="removePill(i)">✕</button>
+        </span>
       </div>
       <!-- pull scope (DRY-30): which projects the daemon fetches, not a view filter -->
       <div class="scope">
+        <!-- Labelled since DRY-82. The filters above are pills now, so "these
+             two rows are different things" no longer follows from one of them
+             being made of <select>s — and the difference is a local instant
+             against a 5.7-6s tracker round trip. -->
+        <span
+          class="scope-label"
+          title="What the daemon FETCHES from the tracker — a round trip, unlike the filters above"
+        >pull</span>
         <span
           v-for="p in scopeProjects"
           :key="p"
@@ -799,7 +1287,33 @@ function clearFilters(): void {
           {{ refreshing ? "Retrying…" : "Retry" }}
         </button>
       </div>
-      <p v-else-if="!groups.length" class="empty">No tickets match.</p>
+      <!-- "No tickets match." on its own is the sentence a healthy tracker with
+           nothing in scope says, which is why it can't be the whole answer to a
+           filter that was typed free-hand (DRY-82). The two things it can't
+           account for say so: a pill naming something the pull doesn't contain,
+           and a term the tracker itself has no ticket for in the projects it
+           searches. -->
+      <div v-else-if="!groups.length" class="empty">
+        <!-- "No tickets match." is a statement about the tracker, and it stops
+             being true the moment the block below has found something. The
+             sentence narrows to what this pull holds instead. -->
+        <p>{{ elsewhere.length ? "Nothing in this pull matches." : "No tickets match." }}</p>
+        <p v-if="unknownPills.length" class="empty-why">
+          Nothing loaded has
+          <template v-for="(pill, i) in unknownPills" :key="`${pill.key}=${pill.value}`"
+            ><template v-if="i">, </template><b>{{ pill.key }}={{ pill.label }}</b></template>.
+          It may be in a project this daemon isn't pulling, or in the backlog.
+        </p>
+        <!-- `found.rows`, NOT `elsewhere`. `elsewhere` is deliberately what the
+             pull doesn't already have (see the computed), and reading it here
+             makes this sentence claim the TRACKER has nothing whenever a pill is
+             what emptied the list: `status=Blocked` plus "Coalesce" finds DRY-2
+             perfectly well, drops it from `elsewhere` because the pull holds it,
+             and the sidebar then denies it exists. Two different statements. -->
+        <p v-else-if="found.done && !found.error && !found.rows.length && term" class="empty-why">
+          {{ outageSubject }} has nothing for “{{ term }}” in {{ searchScope || "the projects it searches" }} either.
+        </p>
+      </div>
       <template v-for="grp in rendered" :key="grp.repo">
         <button class="grp" :class="{ open: isOpen(grp.repo) }" @click="toggle(grp.repo)">
           <span class="chev">▸</span>
@@ -947,6 +1461,55 @@ function clearFilters(): void {
           </template>
         </template>
       </template>
+
+      <!-- What the tracker has and this pull doesn't (DRY-82).
+           `/api/tracker/search` spans every status inside the project scope, so
+           this is where a closed ticket, or one in the backlog bucket, or one in
+           a project the filters can't offer, actually turns up. Its own block
+           and its own row class: these are deliberately out of scope, and
+           folding them into the repo groups would present them as work in this
+           pull. -->
+      <template v-if="term.length >= MIN_SEARCH">
+        <div v-if="found.loading" class="found-note">searching {{ outageSubject }}…</div>
+        <div
+          v-else-if="found.error"
+          class="found-note bad"
+          :title="short(found.error)"
+          @click="runSearch(found.q)"
+        >couldn't search {{ outageSubject }} — retry</div>
+        <template v-else-if="elsewhere.length">
+          <div class="found-head">
+            elsewhere in {{ outageSubject }}
+            <span
+              class="found-n"
+              title="Outside this pull — a different project, a status the pull excludes, or already closed. Spawning here still works."
+            >{{ elsewhere.length }}</span>
+          </div>
+          <div
+            v-for="t in elsewhere"
+            :key="`found:${t.key}`"
+            class="found-row"
+            :title="`${t.key} — ${t.title}`"
+            @click="emit('launch', t)"
+          >
+            <span
+              class="status"
+              :style="{
+                background: CATEGORY_COLOR[t.status.category].c,
+                boxShadow: `0 0 6px ${CATEGORY_COLOR[t.status.category].g}`,
+              }"
+            ></span>
+            <div class="meta">
+              <div class="line1">
+                <span class="key">{{ t.key }}</span>
+                <span class="slabel">{{ t.status.label }}</span>
+                <span class="found-repo">~/{{ t.repo }}</span>
+              </div>
+              <div class="ttitle">{{ t.title }}</div>
+            </div>
+          </div>
+        </template>
+      </template>
     </div>
   </aside>
 </template>
@@ -1053,6 +1616,7 @@ function clearFilters(): void {
   gap: 6px;
 }
 .searchbox {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -1089,31 +1653,175 @@ function clearFilters(): void {
 .clear:hover {
   color: #c3ccd6;
 }
-.filters {
-  display: flex;
-  gap: 5px;
+/* Completions (DRY-82). Overlaid rather than pushing the list down: it is open
+   for as long as somebody is typing, and a scope row that jumps 100px on every
+   keystroke is worse than the selects it replaced. */
+.suggest {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 3px);
+  left: -1px;
+  right: -1px;
+  background: #0f141a;
+  border: 1px solid #2a3340;
+  border-radius: 7px;
+  box-shadow: 0 10px 26px #000000a8;
+  padding: 3px;
+  max-height: 190px;
+  overflow-y: auto;
 }
-.filters select {
-  flex: 1;
-  min-width: 0;
-  background: #0b0e12;
-  border: 1px solid #20272f;
-  border-radius: 6px;
-  color: #8a94a0;
-  font-size: 10.5px;
-  padding: 5px 4px;
-  outline: none;
+.sug {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 4px 7px;
+  border-radius: 5px;
   cursor: pointer;
 }
-.filters select.on {
-  border-color: #3d6fa6;
-  color: #aecbe8;
+.sug.active {
+  background: #1a2632;
 }
-.filters select:focus {
-  border-color: #3d6fa6;
+.sug-label {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 10.5px;
+  color: #aecbe8;
+  flex: 0 0 auto;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sug-hint {
+  font-size: 10px;
+  color: #5a636f;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* View filters (DRY-82) — square-ish, muted and monospaced `key=value`, against
+   the scope chips' rounded blue below. The two rows have to be tellable apart at
+   a glance: one is a local re-filter of what is already here, the other is a
+   tracker round trip. */
+.pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.pill {
+  display: inline-flex;
+  align-items: center;
+  /* No gap: the `=` is a pseudo-element on the key, so any gap opens up between
+     it and the value and the pill reads "status= Blocked". */
+  gap: 0;
+  max-width: 100%;
+  font-family: "JetBrains Mono", monospace;
+  font-size: 10px;
+  color: #c3ccd6;
+  background: #161b22;
+  border: 1px solid #2f3a46;
+  border-radius: 4px;
+  padding: 2px 5px;
+}
+.pill-k {
+  color: #6f7d8c;
+  flex: 0 0 auto;
+}
+.pill-k::after {
+  content: "=";
+  color: #4f5965;
+}
+.pill-v {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A pill nothing can match. Amber like `.stale`, and for the same reason: the
+   sidebar is empty and that is NOT the tracker saying there is no such work —
+   it is this filter naming something the pull doesn't contain (DRY-55). */
+.pill.unknown {
+  color: #d6a651;
+  background: #d6a6511a;
+  border-color: #d6a65133;
+}
+.pill.unknown .pill-k,
+.pill.unknown .pill-k::after {
+  color: #a8823f;
+}
+/* The ✕ is shared with the scope chips, whose row has its own gap; here it has
+   to make its own room. */
+.pill .chip-x {
+  padding-left: 5px;
+}
+
+/* What the tracker has that this pull doesn't (DRY-82). Indented and quieter
+   than a `.row`: these are outside the scope on purpose, so they must not read
+   as more of the list. */
+.found-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 14px 10px 4px;
+  padding-top: 9px;
+  border-top: 1px solid #ffffff0d;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: #6b7682;
+}
+.found-n {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 9.5px;
+  font-weight: 600;
+  letter-spacing: 0;
+  color: #7a8696;
+  background: #141a21;
+  border: 1px solid #20272f;
+  border-radius: 4px;
+  padding: 0 4px;
+}
+.found-note {
+  margin: 12px 10px;
+  padding-top: 9px;
+  border-top: 1px solid #ffffff0d;
+  font-size: 11px;
+  color: #5a636f;
+}
+.found-note.bad {
+  color: #c98d84;
+  cursor: pointer;
+}
+.found-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  opacity: 0.82;
+}
+.found-row:hover {
+  background: #131820;
+  opacity: 1;
+}
+.found-repo {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 9.5px;
+  color: #56606c;
+  margin-left: auto;
 }
 
 /* pull scope (DRY-30) */
+/* Says which of the two rows this is (DRY-82). The filters above are pills now,
+   so the shape of the control no longer carries the distinction on its own. */
+.scope-label {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #4f5965;
+  margin-right: 1px;
+}
 .scope {
   display: flex;
   flex-wrap: wrap;
@@ -1252,6 +1960,25 @@ function clearFilters(): void {
   color: #5a636f;
   text-align: center;
   margin: 18px 0;
+}
+.empty p {
+  margin: 0;
+}
+/* The second line, when there is one to say (DRY-82). Left-aligned and inset:
+   it is a sentence, and centred sentences in a 266px column wrap into a
+   diamond. */
+.empty-why {
+  margin-top: 7px !important;
+  padding: 0 14px;
+  text-align: left;
+  font-size: 11px;
+  line-height: 1.45;
+  color: #6b7682;
+}
+.empty-why b {
+  font-family: "JetBrains Mono", monospace;
+  font-weight: 600;
+  color: #d6a651;
 }
 /* The empty state's replacement when the pull failed (DRY-55). Not named
    `.down` — that's the live dot's modifier, and the two would share a rule. */

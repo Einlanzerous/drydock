@@ -25,6 +25,7 @@
     "verify/auth.mts",
     "verify/backlog-toggle.mts",
     "verify/clipboard.mts",
+    "verify/desk-chrome.mts",
     "verify/epic-children.mts",
     "verify/gate-actions.mts",
     "verify/hang.mts",

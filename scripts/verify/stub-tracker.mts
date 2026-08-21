@@ -66,6 +66,14 @@ export interface StubCounts {
   epicList: number;
   children: number;
   lookup: number;
+  /**
+   * Free-text queries — `/api/tracker/search`, which the sidebar reaches for
+   * when a term finds nothing in the pull (DRY-82). Its own bucket rather than
+   * folded into `list`: it is the one query here that is meant to be DEBOUNCED,
+   * so counting it beside the poll's pulls would make the number that proves it
+   * unreadable.
+   */
+  search: number;
   total: number;
 }
 
@@ -87,7 +95,7 @@ export type Mode = "ok" | "502" | "hang";
 
 let mode: Mode = "ok";
 let latencyMs = 0;
-const counts: StubCounts = { list: 0, epicList: 0, children: 0, lookup: 0, total: 0 };
+const counts: StubCounts = { list: 0, epicList: 0, children: 0, lookup: 0, search: 0, total: 0 };
 const held = new Set<http.ServerResponse>();
 let inflight = 0;
 
@@ -235,8 +243,10 @@ const server = http.createServer(async (req, res) => {
   // it can ask. Counted so a harness can prove that cost is per EXPANSION and
   // not per poll.
   const single = url.pathname.match(/^\/v1\/tickets\/(.+)$/);
+  const text = url.searchParams.get("text");
   if (single) counts.lookup++;
   else if (parentId) counts.children++;
+  else if (text) counts.search++;
   else if (type === "epic") counts.epicList++;
   else counts.list++;
 
@@ -272,6 +282,14 @@ const server = http.createServer(async (req, res) => {
     if (parentId && t.parent_id !== parentId) return false;
     if (!parentId && type && t.type !== type) return false;
     if (statuses.length && !statuses.includes(t.status.category)) return false;
+    // Free text, honoured for DRY-82: the sidebar's out-of-scope lookup asks
+    // this endpoint for one key, and a stub that ignored `text` would hand it
+    // every ticket — which passes the "found it" assertion for the wrong reason
+    // and can never fail the "legitimately not here" one.
+    if (text) {
+      const hay = `${t.key} ${t.title}`.toLowerCase();
+      if (!hay.includes(text.toLowerCase())) return false;
+    }
     return true;
   });
   // No pagination: one page, no cursor. The cap/truncation path has its own

@@ -418,6 +418,144 @@ list. Nothing can fan out from rows that are not rendered, so the check passed
 against a fan-out AND against the bug that deleted the rows it had just typed
 for. Any assertion on this surface has to keep epic rows on screen first.
 
+## Desk chrome (DRY-82)
+
+The same counting stub as DRY-72 and DRY-83, with `STUB_DORMANT_EPIC` **off** —
+this file wants the plain set, where `DRY-3` is a closed child. That is the
+ticket the sidebar's pull structurally cannot contain (`open=true`), so it is
+what proves the out-of-scope lookup reaches `/api/tracker/search` rather than
+filtering the loaded list.
+
+The TTLs are turned right UP here, which is the opposite of every other tracker
+harness and deliberate: the claim is that a view filter costs the tracker
+nothing, so the 20s poll must be answered from the daemon's memory or every
+count is noise.
+
+`DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS=120000` is load-bearing in **both**
+directions, and section (f) is wrong without it. Shorter than the shell's own
+12s budget (the daemon's default is) and a silent stub reaches the browser as a
+prompt 502, so the shell's deadline is never exercised at all. Longer, but still
+inside the round, and the daemon gives up partway through — which unwedges the
+shell for free and makes the wedge check pass against the bug it exists for.
+Measured at 30s: it did.
+
+```sh
+bunx playwright install chromium             # once per machine; see "Running these"
+
+(cd daemon && STUB_PORT=4383 node --import tsx ../scripts/verify/stub-tracker.mts &)
+(cd daemon && DRYDOCK_PORT=4382 DRYDOCK_HOST=127.0.0.1 \
+   DRYDOCK_TRACKER=switchyard DRYDOCK_SWITCHYARD_URL=http://127.0.0.1:4383 \
+   DRYDOCK_TRACKER_PROJECTS=DRY \
+   DRYDOCK_TRACKER_CACHE_MS=60000 DRYDOCK_TRACKER_CHILD_STATS_CACHE_MS=60000 \
+   DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS=120000 \
+   DRYDOCK_DATABASE_URL= DRYDOCK_MULTI_USER= \
+   DRYDOCK_AUTH_PASSWORD=dry82-throwaway DRYDOCK_AUTH_USER=alexandra.dodson-admin \
+   DRYDOCK_STATE_FILE=/tmp/dry82-state.json \
+   DRYDOCK_SESSIONS_DIR=/tmp/dry82-sessions node --import tsx src/index.ts &)
+(cd shell && VITE_DAEMON_URL=http://127.0.0.1:4382 bunx vite --port 5382 --strictPort &)
+
+(cd daemon && node --import tsx ../scripts/verify/desk-chrome.mts)
+```
+
+**Clear `DRYDOCK_DATABASE_URL` explicitly**, and see the note under DRY-83's rig
+for what happens if you don't. `DRYDOCK_AUTH_PASSWORD` is the exception here: it
+is SET rather than cleared, and it is load-bearing. The header's account name /
+`Sign out` pair only renders when there is an account to name, and that pair is
+one of the five things the ticket lists as resizing `.controls` — measure the
+signed-out desk and section (b) measures the narrowest that cluster ever gets,
+which is the one posture where the overlap it checks for cannot happen. That is
+exactly how the first cut passed against 25px of overlap at 1100 and 95px at
+960. The harness signs in if it finds the door, so nothing else about the rig
+changes; override with `DESK_PASSWORD` / `DESK_ACCOUNT` if you change them here.
+
+**`DRYDOCK_AUTH_USER` is load-bearing for the same reason and was the second
+half of the same mistake.** The daemon's default is `owner` — five characters,
+about a third of the cap `.whoami` puts on that element — so a header measured
+with it says nothing about the header anybody with a real account name sees.
+Section (b) asserts the element has actually reached its cap before it measures
+anything, alongside the `.whoami`/`Clear finished` check.
+
+| harness | what it holds down |
+|---|---|
+| `desk-chrome.mts` | Runs against a daemon **with a password**, and injects a finished session into the session poll — both deliberate: the account name / `Sign out` pair and `Clear finished` are two of the five things that resize `.controls`, and without them section (b) measures the narrowest that cluster ever gets, which is the one posture where the overlap it checks for cannot happen. The header carries one spawn control, and the palette does what the two removed buttons did — asserted on the request BODIES, since a workspace is two POSTs and a pinned row issuing only the first looks identical on screen. The old `⇧↵` spawns nothing rather than being repurposed onto the selected ticket. The layout switcher is centred on the HEADER and stays there when the right-hand cluster changes width. Swept at 1600/1500/1441 (centred) and 1440/1240/1100/960 (packed — below the breakpoint the header stops centring rather than painting one control over another), against the FULLEST `.controls` this desk can carry: an account name at its cap, `Clear finished`, the folder chip. Plus a latch on the slack that breakpoint spends — the chip is the only child that can give, so a chip squeezed to its floor means the next control added to that cluster overlaps, which no `switcherRight <= controlsLeft` test can see. The four filter selects are `key=value` pills that cost the tracker no request, complete from the loaded set, and — typed free-hand — say when they name something this pull cannot contain. A closed ticket is found through `/api/tracker/search`, in a block of its own, debounced. And **(f)** the same path failing: a retry that succeeds shows the rows it fetched rather than the error it replaced, and a hung request gives up instead of wedging every later search for the life of the page. |
+
+Spawns are **intercepted** (`page.route` on `POST /api/sessions`, answered with
+a session-shaped 201). Letting them through would start a real `claude` per
+check on whatever host this runs on, and the claim is what the palette ASKS the
+daemon for.
+
+To see it discriminate, restore the shell half — the daemon is untouched by this
+ticket except for being asked a question it could already answer:
+
+```sh
+git show main:shell/src/App.vue > shell/src/App.vue
+git show main:shell/src/components/QuickLaunch.vue > shell/src/components/QuickLaunch.vue
+git show main:shell/src/components/TrackerSidebar.vue > shell/src/components/TrackerSidebar.vue
+git show main:shell/src/lib/tracker.ts > shell/src/lib/tracker.ts
+```
+
+`tracker.ts` is in that list because the deadline on `searchTickets` lives there,
+and it is one of the two things section (f) is for.
+
+Expect **44 failures of 72**. Restore with `git checkout -- shell/` — the
+redirects above write the worktree without staging, unlike
+`git checkout <ref> -- path`, which stages the revert.
+
+**Twenty-eight checks pass either way, and they are two different kinds — don't read
+the second as slack.** Some are guards on things that must NOT change: the
+switcher not overlapping the controls (true of the old layout too, which drifted
+without colliding), bare text still filtering the loaded list, the scope chips
+and the backlog switch surviving the redesign, and `no pill, and no keystroke,
+re-pulled the list`. The rest guard a REVIEW FINDING in a feature `main` doesn't
+have at all — `and the error note is gone with it`, `and the sidebar does NOT
+claim the tracker has nothing for it` — so they cannot discriminate against the
+pre-ticket tree and were each confirmed against the specific bug instead, by
+reinstating it. That is the only honest way to check a fix to a fix.
+
+**Six checks were vacuous when first written and had to be tightened**, which is
+the failure mode this whole directory is about: "no pills afterwards" is
+satisfied by a bar that never had one, "not merged into the repo groups" by
+nothing having been found at all, "not seven queries" by a shell that never
+searches, and the wedge probe by anything that rescues the hung request. The
+pinned-row selection check is the sharpest example — see below.
+
+Two of the twenty-two are the *other* direction of that rule and were added in the
+same round it was fixed: a ticket-shaped query must still select a ticket, and a
+generic word must claim no pinned row. Neither can fail against `main` (which
+has no pinned rows to claim), but the second is a real latch — `agent` was on
+two of the three rows, so `Ctrl K`, `agent`, `↵` spawned a bare claude in a repo
+where every ticket is about agents. Re-adding any of `agent`, `drawer`, `split`
+or `terminal` fails it.
+
+**The palette's fixture cannot collide by accident, and that hid a real bug for
+two rounds.** None of the five stub titles contains `shell`, `claude`,
+`workspace` or `wo`, so a check typing a pinned row's name sees no ticket
+matching the same query — and the selection rule reads BOTH. The original check
+then also *clicked* the row rather than pressing `↵`, which is the one gesture
+the `⇧↵` removal was justified by. `de` is the only string in this fixture
+inside both a pinned row's terms ("claude") and a loaded ticket's title (DRY-5,
+"…when hidden"), which is why that check uses a two-letter query that looks
+arbitrary. Same shape as DRY-83's "keep epic rows on screen or it proves
+nothing": the row you are NOT asserting on has to be there.
+
+**Section (f) was added after review**, which found two bugs by reading a path
+that 35 green checks had never once executed — a retry that could never visibly
+succeed, and a hung request wedging the search path permanently. Both first cuts
+of the new round passed against the bug they were for, and both fixes are worth
+knowing:
+
+- **Do not `__heal` before probing the wedge.** Healing releases the held
+  response, so the hung promise settles and unlatches the handle on its own.
+  `__break?mode=502` instead — the old request stays held, a new one fails fast,
+  so "the note changed" can only mean a request went out.
+- **Keep the wedge probe's own window short** (`WEDGE_PROBE_MS`). Under the fix
+  the next search lands in about a second; the only thing a longer window buys
+  is time for something else to rescue the hung request.
+
+Run `epic-children.mts`, `sidebar.mts` and `backlog-toggle.mts` beside this one.
+All three drive `.sidebar .searchbox input` or the scope row, which is what this
+ticket rebuilt around them.
+
 ## The tombstone's resume button (DRY-62)
 
 Needs a **database tier** — tombstones are drawn from session history, and only
@@ -1306,6 +1444,7 @@ tiers** — the file store is what a fresh clone runs.
 | `timings.mts` | Postgres only. Timings, not status codes: one request per window pays the timeout, the rest return in ms, the window widens 10 → 20 → 30 and stops, `/healthz` answers instantly while cooling and resets after a heal. |
 | `drift.sh` | Postgres only. An edited applied migration 503s naming the file while the live PTY keeps running; reverting clears it; a null checksum is adopted and backfilled. |
 | `epic-children.mts` | DRY-83. An epic with nothing under it in the pull expands to its open children, without widening the pull, without fanning out under a filter, and without the rows blinking out when Refresh re-pulls them. |
+| `desk-chrome.mts` | DRY-82. One spawn control on the header and a palette that carries what the two removed buttons did; a layout switcher centred on the window rather than on the slack its siblings leave; `key=value` filter pills that cost the tracker nothing and say when they name something this pull cannot contain; and a term the pull cannot contain found through `/api/tracker/search`, debounced. |
 
 Each exits non-zero on failure and prints one line per check.
 
@@ -1363,6 +1502,15 @@ git checkout <that commit>~1 -- daemon/src/session.ts shell/src/App.vue \
 (cd daemon && node --import tsx ../scripts/verify/prefill.mts)     # expect 8 failures of 17
 git checkout HEAD -- daemon/src/session.ts shell/src/App.vue \
   shell/src/components/TerminalPane.vue shell/src/components/WorkspacePane.vue
+
+# DRY-82 the desk chrome. Its merge is deliberately not written down either —
+# find it from the file that arrived with it:
+#   git log --diff-filter=A --format=%h -- scripts/verify/desk-chrome.mts
+git checkout <that commit>~1 -- shell/src/App.vue shell/src/lib/tracker.ts \
+  shell/src/components/QuickLaunch.vue shell/src/components/TrackerSidebar.vue
+(cd daemon && node --import tsx ../scripts/verify/desk-chrome.mts)  # expect 44 failures of 72
+git checkout HEAD -- shell/src/App.vue shell/src/lib/tracker.ts \
+  shell/src/components/QuickLaunch.vue shell/src/components/TrackerSidebar.vue
 ```
 
 The sidebar and epic-children counts are what DRY-80's re-run actually observed;
