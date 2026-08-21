@@ -1462,6 +1462,140 @@ Both halves have harnesses (`scripts/verify/ticket-brief.mts`,
 `tracker-getticket.mts`, in-process and seconds), because the failure is silent
 by construction and curl can't see it. Neither replaces trap 3.
 
+## Desk chrome: one spawn button, a fixed centre, pills (DRY-82)
+
+Three unrelated nits on the surrounding chrome, in `App.vue`,
+`QuickLaunch.vue` and `TrackerSidebar.vue`. Only the third has design in it.
+
+**One spawn control.** `+ claude` and `+ workspace` left the header, which is
+the third pass at the same cleanup — DRY-36 folded the workspace button off the
+ticket panel, DRY-39 removed the plain-shell button. They could not simply be
+deleted: the palette had exactly one pinned row and its own comment said so
+("blank claude agents live on the header's `+ claude`, not here"), so the
+capability moved first. Three pinned rows now, and they are **filtered by the
+query like the tickets are** — which is what replaces `⇧↵`, and what makes a
+fourth cost nothing.
+
+1. **The pinned-row count stopped being a constant, and that was the whole
+   indexing bug waiting to happen.** `idx` opened at 1 to land on the first
+   ticket, hard-coded to "one pinned row". Everything reads `pinned.length` now,
+   including the opening index, because the query can leave two of them on
+   screen or none.
+2. **`⇧↵` is swallowed, not repurposed.** Three pinned rows want one rule and a
+   chord for one of them is the worst of both, so there is no chord — but
+   letting the old one fall through to the plain `Enter` branch turns a reflex
+   for "give me a shell" into "spawn an agent on whatever ticket is selected".
+   A stale gesture doing nothing is the only safe way to retire it.
+3. **Assert on the request BODIES, not on a window.** A workspace is two POSTs
+   — the agent and the co-located zsh sharing its resolved cwd — and a pinned
+   row that issued only the first looks identical on screen for as long as
+   anyone would watch. The harness intercepts `POST /api/sessions` for the same
+   reason: otherwise it starts a real `claude` per check.
+4. **`prefill.mts` clicked `+ workspace`.** Deleting a control means finding the
+   harnesses that drive it; that one is DRY-88's, and it now goes through the
+   palette.
+
+**A centre that is a centre.** The Float/Tile/Focus switcher sat between two
+`flex:1` spacers, which hand each side equal *slack* rather than equal *width* —
+so its position was a function of how wide `.controls` happened to be, and a
+control on the left moved when something on the right resized. Five things do
+that: the folder chip follows focus, `Clear finished` appears and vanishes
+entirely, its badge is one or two digits, and the account name / `Sign out` pair
+arrives with auth. Now `grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr)`.
+
+1. **Pinning the repo chip would have fixed one of five** and truncated repo
+   names for the trouble. The fix has to stop deriving the centre from sibling
+   widths at all, or the next thing added to `.controls` puts the drift back.
+2. **`minmax(0, 1fr)`, not a bare `1fr`.** A bare one refuses to shrink below
+   its content, so at a laptop width the whole header overflows instead. The
+   give is taken by the repo chip, which ellipsises, and by the tagline, which
+   is dropped under 1180px; everything else in `.controls` is `flex: 0 0 auto`,
+   because a squeezed "New session" is a worse answer to a narrow window than a
+   truncated directory name.
+3. **Grid rather than `left:50%; transform:translateX(-50%)`** — the switcher
+   stays in flow, so it cannot end up painted over the controls. The harness
+   asserts that separately from the centring, at 1440 and at 1280.
+
+**The sidebar's filters are `key=value` pills.** Four selects (Project, Status,
+Assignee, and Epic on a row of its own, because epic titles are sentences) were
+five permanent controls in a 266px column before anything was typed — which is
+what made "add another filter" expensive, and the ask on this surface is for
+more of them. A pill costs a key name and nothing on screen.
+
+1. **Scope did NOT become a pill, and that is the seam.** The four selects are
+   VIEW filters — instant, local, over what is already loaded. The project chips
+   and the backlog switch are PULL SCOPE: a tracker round trip measured at
+   5.7-6s against a corporate Jira, a new cache key, and a fresh child-stats
+   fan-out (DRY-72). Two controls that look identical and cost 6000x differently
+   is how an app comes to read as randomly slow. Chips stayed exactly where they
+   were, wearing a `pull` label now that the shape of the control no longer
+   carries the distinction on its own.
+2. **A filter can only match what was pulled, so a free-hand pill can name
+   something that does not exist here.** `assignee=Ashley Dodson` is a perfectly
+   valid pill matching nothing, because her tickets are in a project the daemon
+   isn't pulling or in the backlog bucket — and an empty sidebar looks exactly
+   like a healthy tracker with nothing in scope, which is the silence DRY-55
+   exists to break. Completions come from the loaded set so the ordinary path
+   can't produce one; free text is still accepted and wears an amber state, and
+   the empty list names the pill. **Refusing the pill would be its own lie**
+   about what the tracker holds.
+3. **`isKnown` is derived, never stored on the pill.** Widening the pull is
+   exactly what turns an unknown pill into a known one — a flag written when the
+   pill was made would still be accusing it an hour later.
+4. **Two pills of one key are an OR, different keys an AND.** The selects held
+   one value each and could not express it, and it is what makes a bad guess
+   survivable: a wrong `assignee=` beside a right one narrows rather than
+   emptying the sidebar.
+5. **`term` is empty while a `key=` draft is in progress.** One box does both
+   jobs, so without this every keystroke of "assignee=Ash" is also applied as a
+   literal search for that string — which empties the sidebar on the way, and
+   force-opens every epic on the desk (DRY-83's fan-out state) while doing it.
+6. **The completion list opens with NOTHING highlighted.** Auto-highlighting the
+   first row makes `↵` mean "take the suggestion" from the first keystroke, so
+   typing "as" to search for a ticket and pressing ↵ silently becomes
+   `assignee=`.
+
+**And a term the pull cannot contain now reaches the daemon.** The sidebar's
+search was a filter over `props.tickets`, so a key for a closed ticket, or one
+in a project outside the scope, returned "No tickets match." —
+`searchTickets()` has wrapped `/api/tracker/search` since it was built for the
+palette and **nothing in the shell called it**. It spans every status inside the
+project scope, and it answers the question the filters cannot: no tickets, or no
+tickets *here*?
+
+7. **Beside the local filter, not instead of it.** Replacing the filter trades
+   an instant local answer for a debounced round trip on the common case. This
+   only ever ADDS rows the pull doesn't have, in a block of its own — merging
+   them into the repo groups (which is right for DRY-83's epic children, because
+   those are in-scope work) would present out-of-scope, mostly-closed tickets as
+   part of this pull.
+8. **DRY-72's rule is honoured, its letter deliberately isn't.** "Go through the
+   single entry point the poll and Refresh use" is there because overlapping
+   pulls are how an epoch guard turns into a silence. `runTicketPull` serialises
+   the LIST pull, whose fan-out is those 5.7-6s; queueing a one-shot lookup
+   behind it would make the fast path wait on the slow one for nothing, since
+   they are different routes with different cache keys. So: one search at a
+   time, newest wins, every outcome epoch-guarded — and debounced, or this is a
+   tracker query per keystroke, which is the pathology that ticket removed.
+9. **The rows are DROPPED when the term changes, unlike everything else here.**
+   Keeping the last list is right when a re-pull may fail (`loadChildren`); here
+   the previous rows are the answer to a different question, and leaving them
+   under a term they don't match is a wrong answer rather than a stale one.
+10. **A miss is a real answer and has to read as one.** The route is
+   project-scoped, so a key from a project the host doesn't pull legitimately
+   isn't there — it says which projects it searched rather than showing an empty
+   list.
+11. **The stub tracker ignored `text`.** It now honours it and counts search
+   queries in their own bucket. A stub that hands back every ticket passes the
+   "found it" assertion for the wrong reason and can never fail the
+   "legitimately not here" one.
+
+Harness: `scripts/verify/desk-chrome.mts`, rig in its README — the stub
+tracker's rig, a browser, about a minute. Confirm it discriminates: against the
+unpatched shell it fails **28 of 35**. Run `epic-children.mts`, `sidebar.mts`
+and `backlog-toggle.mts` beside it — they drive `.sidebar .searchbox input` and
+the scope row this ticket rebuilt around them.
+
 ## Expanding an epic to its children (DRY-83)
 
 The sidebar's pull excludes the backlog bucket (DRY-30) and exempts only the

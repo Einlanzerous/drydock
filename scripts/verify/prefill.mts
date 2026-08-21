@@ -10,7 +10,7 @@
 // Four rounds:
 //   1. the pre-fill arrives, once, unsubmitted, and the browser never typed it
 //   2. it survives a session poll landing mid-spawn
-//   3. the bare "+ workspace" has no prompt and types nothing
+//   3. a bare workspace (the palette's pinned row) has no prompt and types nothing
 //   4. the RETURN is the only difference between this and an autonomous run
 //
 // ON `page.evaluate` BODIES (DRY-80): no body here may bind a name to a
@@ -183,11 +183,16 @@ console.log("\n2. …and survives a session poll landing mid-spawn");
   await ctx.close();
 }
 
-console.log("\n3. the bare + workspace has no prompt to pre-fill");
+console.log("\n3. the bare workspace spawn has no prompt to pre-fill");
 {
   await reset();
   const { ctx, page } = await open(browser);
-  await page.locator("button.ghost", { hasText: "+ workspace" }).click();
+  // Through the palette, not a header button: DRY-82 folded "+ claude" and
+  // "+ workspace" into the pinned rows here, so this is now the only gesture
+  // that starts a bare workspace.
+  await page.click("button.new");
+  await page.fill(".palette .search input", "workspace");
+  await page.click(".palette .row.pinrow");
   await page.waitForSelector(".agent .xterm", { timeout: 15000 });
   await sleep(6000);
   const seen = await rows(page);

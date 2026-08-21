@@ -418,6 +418,75 @@ list. Nothing can fan out from rows that are not rendered, so the check passed
 against a fan-out AND against the bug that deleted the rows it had just typed
 for. Any assertion on this surface has to keep epic rows on screen first.
 
+## Desk chrome (DRY-82)
+
+The same counting stub as DRY-72 and DRY-83, with `STUB_DORMANT_EPIC` **off** —
+this file wants the plain set, where `DRY-3` is a closed child. That is the
+ticket the sidebar's pull structurally cannot contain (`open=true`), so it is
+what proves the out-of-scope lookup reaches `/api/tracker/search` rather than
+filtering the loaded list.
+
+The TTLs are turned right UP here, which is the opposite of every other tracker
+harness and deliberate: the claim is that a view filter costs the tracker
+nothing, so the 20s poll must be answered from the daemon's memory or every
+count is noise.
+
+```sh
+bunx playwright install chromium             # once per machine; see "Running these"
+
+(cd daemon && STUB_PORT=4383 node --import tsx ../scripts/verify/stub-tracker.mts &)
+(cd daemon && DRYDOCK_PORT=4382 DRYDOCK_HOST=127.0.0.1 \
+   DRYDOCK_TRACKER=switchyard DRYDOCK_SWITCHYARD_URL=http://127.0.0.1:4383 \
+   DRYDOCK_TRACKER_PROJECTS=DRY \
+   DRYDOCK_TRACKER_CACHE_MS=60000 DRYDOCK_TRACKER_CHILD_STATS_CACHE_MS=60000 \
+   DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS=3000 \
+   DRYDOCK_DATABASE_URL= DRYDOCK_AUTH_PASSWORD= DRYDOCK_MULTI_USER= \
+   DRYDOCK_STATE_FILE=/tmp/dry82-state.json \
+   DRYDOCK_SESSIONS_DIR=/tmp/dry82-sessions node --import tsx src/index.ts &)
+(cd shell && VITE_DAEMON_URL=http://127.0.0.1:4382 bunx vite --port 5382 --strictPort &)
+
+(cd daemon && node --import tsx ../scripts/verify/desk-chrome.mts)
+```
+
+**Clear `DRYDOCK_DATABASE_URL` and `DRYDOCK_AUTH_PASSWORD` explicitly**, and see
+the note under DRY-83's rig for what happens if you don't.
+
+| harness | what it holds down |
+|---|---|
+| `desk-chrome.mts` | The header carries one spawn control, and the palette does what the two removed buttons did — asserted on the request BODIES, since a workspace is two POSTs and a pinned row issuing only the first looks identical on screen. The old `⇧↵` spawns nothing rather than being repurposed onto the selected ticket. The layout switcher is centred on the HEADER and stays there when the right-hand cluster changes width, at 1440 and at a laptop 1280, without overlapping. The four filter selects are `key=value` pills that cost the tracker no request, complete from the loaded set, and — typed free-hand — say when they name something this pull cannot contain. A closed ticket is found through `/api/tracker/search`, in a block of its own, debounced. |
+
+Spawns are **intercepted** (`page.route` on `POST /api/sessions`, answered with
+a session-shaped 201). Letting them through would start a real `claude` per
+check on whatever host this runs on, and the claim is what the palette ASKS the
+daemon for.
+
+To see it discriminate, restore the shell half — the daemon is untouched by this
+ticket except for being asked a question it could already answer:
+
+```sh
+git show main:shell/src/App.vue > shell/src/App.vue
+git show main:shell/src/components/QuickLaunch.vue > shell/src/components/QuickLaunch.vue
+git show main:shell/src/components/TrackerSidebar.vue > shell/src/components/TrackerSidebar.vue
+```
+
+Expect **28 failures of 35**. Restore with `git checkout -- shell/` — the
+redirects above write the worktree without staging, unlike
+`git checkout <ref> -- path`, which stages the revert.
+
+Three checks pass either way on purpose and are guards rather than
+discriminators: the switcher not overlapping the controls (true of the old
+layout too, which drifted without colliding), bare text still filtering the
+loaded list, and no keystroke costing the tracker a request. **Three others were
+vacuous when first written and had to be tightened**, which is the failure mode
+this whole directory is about: "no pills afterwards" is satisfied by a bar that
+never had one, "not merged into the repo groups" by nothing having been found at
+all, and "not seven queries" by a shell that never searches. Each now asserts
+the state BEFORE as well.
+
+Run `epic-children.mts`, `sidebar.mts` and `backlog-toggle.mts` beside this one.
+All three drive `.sidebar .searchbox input` or the scope row, which is what this
+ticket rebuilt around them.
+
 ## The tombstone's resume button (DRY-62)
 
 Needs a **database tier** — tombstones are drawn from session history, and only
@@ -1306,6 +1375,7 @@ tiers** — the file store is what a fresh clone runs.
 | `timings.mts` | Postgres only. Timings, not status codes: one request per window pays the timeout, the rest return in ms, the window widens 10 → 20 → 30 and stops, `/healthz` answers instantly while cooling and resets after a heal. |
 | `drift.sh` | Postgres only. An edited applied migration 503s naming the file while the live PTY keeps running; reverting clears it; a null checksum is adopted and backfilled. |
 | `epic-children.mts` | DRY-83. An epic with nothing under it in the pull expands to its open children, without widening the pull, without fanning out under a filter, and without the rows blinking out when Refresh re-pulls them. |
+| `desk-chrome.mts` | DRY-82. One spawn control on the header and a palette that carries what the two removed buttons did; a layout switcher centred on the window rather than on the slack its siblings leave; `key=value` filter pills that cost the tracker nothing and say when they name something this pull cannot contain; and a term the pull cannot contain found through `/api/tracker/search`, debounced. |
 
 Each exits non-zero on failure and prints one line per check.
 
@@ -1363,6 +1433,15 @@ git checkout <that commit>~1 -- daemon/src/session.ts shell/src/App.vue \
 (cd daemon && node --import tsx ../scripts/verify/prefill.mts)     # expect 8 failures of 17
 git checkout HEAD -- daemon/src/session.ts shell/src/App.vue \
   shell/src/components/TerminalPane.vue shell/src/components/WorkspacePane.vue
+
+# DRY-82 the desk chrome. Its merge is deliberately not written down either —
+# find it from the file that arrived with it:
+#   git log --diff-filter=A --format=%h -- scripts/verify/desk-chrome.mts
+git checkout <that commit>~1 -- shell/src/App.vue \
+  shell/src/components/QuickLaunch.vue shell/src/components/TrackerSidebar.vue
+(cd daemon && node --import tsx ../scripts/verify/desk-chrome.mts)  # expect 28 failures of 35
+git checkout HEAD -- shell/src/App.vue \
+  shell/src/components/QuickLaunch.vue shell/src/components/TrackerSidebar.vue
 ```
 
 The sidebar and epic-children counts are what DRY-80's re-run actually observed;

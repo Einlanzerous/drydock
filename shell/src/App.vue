@@ -1188,6 +1188,24 @@ function blurSpawn(e: Event) {
   (e.currentTarget as HTMLElement | null)?.blur();
 }
 
+/**
+ * A pinned palette row was activated (DRY-82).
+ *
+ * The union is written out rather than imported: QuickLaunch declares the same
+ * one on its emit, and vue-tsc checks the two against each other where the
+ * handler is bound in the template — so a kind added there without being handled
+ * here fails the build rather than the click.
+ *
+ * `closePalette()` with no argument, deliberately: restoring focus fights the
+ * new pane, which claims the keyboard on mount (DRY-40). The header buttons
+ * this replaced called `blurSpawn` for the same reason.
+ */
+function spawnFromPalette(kind: "shell" | "claude" | "workspace"): void {
+  closePalette();
+  if (kind === "workspace") void spawnWorkspace();
+  else void spawnFresh(kind);
+}
+
 async function spawnFresh(kind: "claude" | "shell") {
   wm.setLayout("float");
   try {
@@ -1836,8 +1854,9 @@ onBeforeUnmount(stopDesk);
         </div>
       </div>
 
-      <div class="grow"></div>
-
+      <!-- No spacer div: the header is a grid whose outer tracks are equal by
+           construction, so the switcher is centred on the WINDOW rather than on
+           whatever the two clusters happen to weigh (DRY-82). -->
       <div class="switcher">
         <button
           v-for="m in layouts"
@@ -1848,8 +1867,6 @@ onBeforeUnmount(stopDesk);
           {{ m[0].toUpperCase() + m.slice(1) }}
         </button>
       </div>
-
-      <div class="grow"></div>
 
       <div class="controls">
         <!-- Only when there is something to clear, so the desk isn't carrying a
@@ -1871,24 +1888,17 @@ onBeforeUnmount(stopDesk);
           </svg>
           <span>{{ focusedRepo }}</span>
         </div>
+        <!-- The only spawn control on the desk (DRY-82). "+ claude" and
+             "+ workspace" stood beside it until the palette could do both —
+             three buttons for one gesture, the third pass at a cleanup DRY-36
+             and DRY-39 each made once. Everything they did is a pinned row in
+             here now. -->
         <button class="new" @click="openPalette()">
           <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="#9cc6ec" stroke-width="1.6">
             <path d="M8 3v10M3 8h10" />
           </svg>
           New session
           <span class="kbd">Ctrl K</span>
-        </button>
-        <!-- Plain shells spawn from the palette (⇧↵) — a header button here
-             duplicated the "New session (Ctrl K)" pill (DRY-39). -->
-        <button class="ghost" title="Bare claude agent" @click="blurSpawn($event), spawnFresh('claude')">
-          + claude
-        </button>
-        <button
-          class="ghost"
-          title="Ticket drawer + agent + zsh in one window"
-          @click="blurSpawn($event), spawnWorkspace()"
-        >
-          + workspace
         </button>
         <!-- Identity, and only when there is one to show (DRY-27). A daemon
              with auth off has nobody to name, and a "signed in as local" chip
@@ -2047,7 +2057,7 @@ onBeforeUnmount(stopDesk);
       :provider-name="providerName"
       @close="closePalette(true)"
       @launch="openTicket"
-      @spawn-shell="closePalette(), spawnFresh('shell')"
+      @spawn="spawnFromPalette"
     />
 
     <TicketDetail
@@ -2097,10 +2107,28 @@ onBeforeUnmount(stopDesk);
   color: #9aa6b2;
   font-size: 12px;
 }
+/* Three tracks, not two flexible spacers (DRY-82).
+ *
+ * The switcher used to sit between a pair of `flex:1` divs, which hands each
+ * side equal SLACK rather than equal WIDTH — so its position was a function of
+ * how wide `.controls` happened to be, and a control on the left of the screen
+ * moved whenever something on the right resized. Five things do: the folder
+ * chip follows focus, `Clear finished` appears and vanishes, its count badge is
+ * one or two digits, and the account name / Sign out pair arrives with auth.
+ * Pinning any one of them would have fixed a fifth of it.
+ *
+ * The outer tracks are equal regardless of content, so the middle one is
+ * centred on the window. `minmax(0, …)` rather than a bare `1fr` because a bare
+ * one refuses to shrink below its content and the whole header would overflow
+ * instead; the give is taken by the repo chip, which ellipsises (see `.repo`) —
+ * everything else in `.controls` holds its size. Grid rather than absolute
+ * positioning because this keeps the switcher in flow, where it cannot end up
+ * painted over the controls on a narrow window. */
 .topbar {
   height: 54px;
   flex: 0 0 auto;
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
   align-items: center;
   gap: 16px;
   padding: 0 14px;
@@ -2112,6 +2140,7 @@ onBeforeUnmount(stopDesk);
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
 }
 .word {
   display: flex;
@@ -2127,9 +2156,15 @@ onBeforeUnmount(stopDesk);
 .tagline {
   font-size: 12px;
   color: #5a636f;
+  white-space: nowrap;
 }
-.grow {
-  flex: 1;
+/* The one piece of the header that says nothing — it is a tagline — so it is
+   the first thing to go when the outer tracks get tight (DRY-82). Checked at a
+   laptop width, where the controls genuinely need the room. */
+@media (max-width: 1180px) {
+  .tagline {
+    display: none;
+  }
 }
 .switcher {
   display: flex;
@@ -2156,7 +2191,15 @@ onBeforeUnmount(stopDesk);
 .controls {
   display: flex;
   align-items: center;
+  justify-self: end;
   gap: 8px;
+  min-width: 0;
+}
+/* Nothing here shrinks except the repo chip: a squeezed "New session" or a
+   clipped count badge is a worse answer to a narrow window than a truncated
+   directory name, and the chip is the only item whose content is arbitrary. */
+.controls > :not(.repo) {
+  flex: 0 0 auto;
 }
 .repo {
   display: flex;
@@ -2167,9 +2210,18 @@ onBeforeUnmount(stopDesk);
   border-radius: 8px;
   padding: 0 10px;
   height: 34px;
+  min-width: 0;
   font-family: "JetBrains Mono", monospace;
   font-size: 12px;
   color: #9aa6b2;
+}
+.repo svg {
+  flex: 0 0 auto;
+}
+.repo span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .new {
   display: inline-flex;
@@ -2208,7 +2260,7 @@ onBeforeUnmount(stopDesk);
   line-height: 1;
   cursor: pointer;
 }
-/* Quieter than the two spawn buttons beside it and not proportional-font: this
+/* Quieter than the "New session" pill beside it and not proportional-font: this
    is housekeeping, and it appears unannounced when sessions end. It must not
    read as the primary action on a desk somebody just came back to. */
 .sweep {
