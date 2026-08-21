@@ -20,14 +20,15 @@
 // RIG (three terminals; the harness builds its own git fixture, so nothing here
 // touches a real repo):
 //
-//   (cd daemon && node --import tsx ../scripts/verify/stub-tracker.mts)
+//   (cd daemon && STUB_PORT=4396 node --import tsx ../scripts/verify/stub-tracker.mts)
 //
 //   cd daemon
-//   DRYDOCK_PORT=4390 DRYDOCK_HOST=127.0.0.1 DRYDOCK_SESSIONS_DIR=/tmp/d90 \
+//   DRYDOCK_PORT=4390 DRYDOCK_HOST=127.0.0.1 \
+//     DRYDOCK_SESSIONS_DIR=/tmp/dry90-sessions/sessions-4390 \
 //     DRYDOCK_STATE_FILE=/tmp/dry90-state.json \
 //     DRYDOCK_WORKTREES_ROOT=/tmp/dry90/wt DRYDOCK_REPO_PATHS=demo=/tmp/dry90/demo \
 //     DRYDOCK_WORKTREE_REAP_MS=4000 \
-//     DRYDOCK_TRACKER=switchyard DRYDOCK_SWITCHYARD_URL=http://127.0.0.1:4386 \
+//     DRYDOCK_TRACKER=switchyard DRYDOCK_SWITCHYARD_URL=http://127.0.0.1:4396 \
 //     DRYDOCK_SWITCHYARD_TOKEN=stub node --import tsx src/index.ts
 //
 //   (cd daemon && node --import tsx ../scripts/verify/worktree-reap.mts)
@@ -35,7 +36,14 @@
 // DRYDOCK_WORKTREES_ROOT is not optional and neither is DRYDOCK_REPO_PATHS:
 // unset, the first points at ~/.drydock/worktrees — the root the dev and prod
 // daemons share, full of real work — and this harness deletes worktrees for a
-// living. It refuses to run against the default root for that reason.
+// living. It asks the DAEMON where its root is and refuses to run if that isn't
+// the fixture's; comparing its own constant against a drydock-looking string,
+// which is what it did until review, cannot fail whatever the daemon is doing.
+//
+// DRYDOCK_SESSIONS_DIR is nested one level (`…/sessions-4390`) on purpose: the
+// cross-daemon case writes a sibling `sessions-4999` next to it, which is how a
+// daemon discovers that ANOTHER daemon has a live agent in a worktree it can
+// see. Point it somewhere flat like /tmp and that sibling lands in /tmp.
 //
 // DRYDOCK_WORKTREE_REAP_MS must match REAP_MS below (default 4000). Six hours
 // is the right default and a terrible test — the same trap DRY-49's timeout and
@@ -43,11 +51,19 @@
 //
 // Afterwards, kill the supervisor the in-use case leaves behind (CLAUDE.md's
 // loop over /proc/<pid>/exe, never `pkill -f supervisor/main`) and `rm -rf
-// /tmp/dry90`.
+// /tmp/dry90 /tmp/dry90-sessions`.
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { Detail, SessionsResponse, SpawnResponse } from "./api.mjs";
-import { addWorktree as addWt, buildFixture, commitIn, git, type Fixture } from "./git-fixture.mjs";
+import {
+  addWorktree as addWt,
+  assertDaemonRoot,
+  buildFixture,
+  commitIn,
+  git,
+  mergeToDefault,
+  type Fixture,
+} from "./git-fixture.mjs";
 
 const DAEMON = process.env.DAEMON ?? "http://127.0.0.1:4390";
 const ROOT = process.env.DRY90_ROOT ?? "/tmp/dry90";
@@ -55,6 +71,12 @@ const REPO = path.join(ROOT, "demo");
 const WT_ROOT = path.join(ROOT, "wt");
 /** Must equal the daemon's DRYDOCK_WORKTREE_REAP_MS. See the rig above. */
 const REAP_MS = Number(process.env.REAP_MS ?? 4000);
+/**
+ * Must equal the daemon's DRYDOCK_SESSIONS_DIR. Its PARENT is what matters: the
+ * cross-daemon case below writes a sibling `sessions-4999` next to it, which is
+ * how the daemon discovers another daemon's live sessions.
+ */
+const SESSIONS_DIR = process.env.SESSIONS_DIR ?? "/tmp/dry90-sessions/sessions-4390";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;
@@ -91,6 +113,24 @@ const there = (p: string) => fs.existsSync(p);
 let fixture: Fixture;
 const addWorktree = (name: string, branch: string, root?: string) => addWt(fixture, name, branch, root);
 
+/**
+ * A worktree whose branch has been genuinely merged — committed, pushed, and
+ * `--no-ff` into main.
+ *
+ * Most cases here need this rather than a bare `git worktree add`, because a
+ * freshly added branch sits exactly ON origin/main and that is what a branch
+ * that has never committed anything looks like. Pairing "kept because dirty"
+ * against a worktree that was never finished in the first place proves nothing
+ * about the dirt.
+ */
+function mergedWorktree(name: string, branch: string, file: string): string {
+  const p = addWorktree(name, branch);
+  commitIn(p, file, `work for ${branch}\n`);
+  git(p, "push", "-u", "origin", branch);
+  mergeToDefault(fixture, branch);
+  return p;
+}
+
 async function main(): Promise<void> {
   if (!Number.isFinite(REAP_MS) || REAP_MS <= 0 || REAP_MS > 30_000) {
     console.error(
@@ -98,10 +138,6 @@ async function main(): Promise<void> {
         `daemon with DRYDOCK_WORKTREE_REAP_MS at a few seconds and pass the same value\n` +
         `here. Passing against a six-hour interval by never reaching it is not a pass.`,
     );
-    process.exit(2);
-  }
-  if (WT_ROOT.includes(".drydock/worktrees")) {
-    console.error("refusing to run against the real worktrees root — see the rig above");
     process.exit(2);
   }
   const health = await fetch(`${DAEMON}/healthz`).catch(() => null);
@@ -112,6 +148,14 @@ async function main(): Promise<void> {
 
   console.log("building the git fixture…");
   fixture = buildFixture(ROOT);
+  // AFTER the fixture and BEFORE a single worktree is created: the daemon can
+  // only answer this once repo "demo" exists, and what it protects is the step
+  // that follows. Review found the guard this replaces could never fire — it
+  // compared the harness's own constant with a drydock-looking string, so the
+  // one thing it claimed to catch (DRYDOCK_WORKTREES_ROOT missing from the rig,
+  // leaving the daemon sweeping ~/.drydock/worktrees every 4s) walked straight
+  // past it.
+  await assertDaemonRoot(DAEMON, WT_ROOT);
 
   // --- 1. the policy, one worktree at a time -------------------------------
   //
@@ -120,13 +164,25 @@ async function main(): Promise<void> {
   // section 3.
   console.log("\npolicy (POST /api/worktrees/reap)");
 
-  // Merged and clean: the case the whole ticket is about. `agent/DRY-100` sits
-  // exactly on origin/main, which is what a branch looks like after its PR was
-  // merged and the branch was not advanced since.
-  const merged = addWorktree("demo-DRY-100", "agent/DRY-100");
+  // Merged and clean: the case the whole ticket is about. A REAL merge —
+  // commit, push, then `--no-ff` into main — so the branch tip is contained in
+  // origin/main without BEING it.
+  //
+  // This used to be a bare `git worktree add`, i.e. a branch sitting exactly on
+  // origin/main, and review was right that it tested the wrong thing: that
+  // shape is what a branch that has never committed anything looks like, which
+  // the reaper now refuses to call finished. `DRY-100` is in no tracker, so if
+  // the merge stopped counting this case would fail rather than pass by another
+  // route.
+  const merged = mergedWorktree("demo-DRY-100", "agent/DRY-100", "feature.txt");
   {
     const { json } = await post<ReapResponse>("/api/worktrees/reap", { worktree: merged });
     check("merged + clean is reaped", json.removed === true && !there(merged), json.reason);
+    check(
+      "…on the strength of the MERGE, not a tracker lookup",
+      json.reason === "merged into origin/main",
+      json.reason,
+    );
     // Trap 3: the branch is not the worktree. Reaping a branch is a different
     // and much less safe decision, and out of scope.
     const branches = git(REPO, "branch", "--list", "agent/DRY-100");
@@ -148,7 +204,7 @@ async function main(): Promise<void> {
 
   // Merged, but with a tracked file modified. Everything the reaper looks at
   // says go except the one thing that matters.
-  const dirty = addWorktree("demo-DRY-101", "agent/DRY-101");
+  const dirty = mergedWorktree("demo-DRY-101", "agent/DRY-101", "a.txt");
   fs.writeFileSync(path.join(dirty, "README.md"), "# demo\nlocal edit nobody committed\n");
   {
     const { json } = await post<ReapResponse>("/api/worktrees/reap", { worktree: dirty });
@@ -163,7 +219,7 @@ async function main(): Promise<void> {
   // Merged, clean by every other measure, one untracked file. This is the case
   // a "git status is clean" shortcut gets wrong, and the file it deletes is
   // somebody's scratch note.
-  const untracked = addWorktree("demo-DRY-102", "agent/DRY-102");
+  const untracked = mergedWorktree("demo-DRY-102", "agent/DRY-102", "b.txt");
   fs.writeFileSync(path.join(untracked, "notes.md"), "half an idea\n");
   {
     const { json } = await post<ReapResponse>("/api/worktrees/reap", { worktree: untracked });
@@ -177,7 +233,7 @@ async function main(): Promise<void> {
   // The inverse, and the reason `--porcelain` is read rather than `--ignored`:
   // build output is reproducible, and counting it would make every worktree of
   // every real project permanently unreapable.
-  const ignored = addWorktree("demo-DRY-103", "agent/DRY-103");
+  const ignored = mergedWorktree("demo-DRY-103", "agent/DRY-103", "c.txt");
   fs.mkdirSync(path.join(ignored, "build"));
   fs.writeFileSync(path.join(ignored, "build/out.js"), "// generated\n");
   {
@@ -257,6 +313,59 @@ async function main(): Promise<void> {
     );
   }
 
+  // --- 2b. a branch that has never committed anything -----------------------
+  //
+  // Review's find, and the sharpest case in this file. A freshly added worktree
+  // sits exactly ON origin/main, so `merge-base --is-ancestor` says yes and the
+  // obvious reading — "merged, therefore finished" — reaps it without ever
+  // asking the tracker. That is evidence of nothing having happened being read
+  // as evidence the work is done, and it is not a hypothetical: it is the shape
+  // of every worktree between `git worktree add` and the agent's first commit.
+  //
+  // Both halves are checked, because only the pair distinguishes "asks the
+  // tracker" from "never reaps a fresh worktree".
+  const fresh = addWorktree("demo-DRY-4", "agent/DRY-4");
+  {
+    const { json } = await post<ReapResponse>("/api/worktrees/reap", { worktree: fresh });
+    check(
+      "a branch with NO commits and an open ticket is kept",
+      json.removed === false && json.verdict === "unfinished" && there(fresh),
+      json.reason,
+    );
+    check("…named as the open ticket, not as a merge", /DRY-4 is still open/.test(json.reason ?? ""), json.reason);
+  }
+  // The same shape with a CLOSED ticket must still go — otherwise this rule is
+  // just "never reap a fresh worktree", which would leave exactly the litter
+  // the ticket is about. `agent/DRY-3` is recreated from scratch so it sits on
+  // origin/main again.
+  git(fixture.repo, "branch", "-D", "agent/DRY-3");
+  const freshClosed = addWorktree("demo-DRY-3", "agent/DRY-3");
+  {
+    const { json } = await post<ReapResponse>("/api/worktrees/reap", { worktree: freshClosed });
+    check(
+      "…and with a CLOSED ticket it is reaped",
+      json.removed === true && !there(freshClosed),
+      json.reason,
+    );
+  }
+
+  // --- 2c. a detached HEAD --------------------------------------------------
+  //
+  // What a removal promises is that the work is kept on the branch. Detached
+  // there is no branch, so that is a promise this cannot make — whatever the
+  // commit's containment says.
+  const detached = addWorktree("demo-DRY-109", "agent/DRY-109");
+  git(detached, "checkout", "--detach", "HEAD");
+  {
+    const { json } = await post<ReapResponse>("/api/worktrees/reap", { worktree: detached });
+    check(
+      "a detached HEAD is kept",
+      json.removed === false && json.verdict === "unsafe" && there(detached),
+      json.reason,
+    );
+    check("…and says why", /detached HEAD/.test(json.reason ?? ""), json.reason);
+  }
+
   // --- 3. a live session outranks everything --------------------------------
   //
   // Trap 2, and the one failure here that would cost somebody an agent rather
@@ -272,11 +381,55 @@ async function main(): Promise<void> {
   });
   const inUsePath = spawn.json.session?.worktree ?? wt("demo-DRY-106");
   check("the spawn isolated into a worktree", !!spawn.json.session?.worktree, inUsePath);
+  // Merged while the session runs in it, so that every other test in this file
+  // says remove it and the ONLY thing in the way is the session. Without this
+  // the worktree would be held back by having no commits, and the check would
+  // pass against a reaper that had never heard of the registry.
+  commitIn(inUsePath, "busy.txt", "an agent is working here\n");
+  git(inUsePath, "push", "-u", "origin", "agent/DRY-106");
+  mergeToDefault(fixture, "agent/DRY-106");
   {
     const { json } = await post<ReapResponse>("/api/worktrees/reap", { worktree: inUsePath });
     check(
       "a worktree with a live session is NOT reaped",
       json.removed === false && json.verdict === "in-use" && there(inUsePath),
+      json.reason,
+    );
+  }
+
+  // --- 3b. a session belonging to ANOTHER daemon ----------------------------
+  //
+  // The registry is per-process; `~/.drydock/worktrees` is per HOST. So the
+  // prod daemon on :4318 can see the dev daemon's worktrees, and its own
+  // registry answers "not in use" about them perfectly truthfully — after which
+  // a live agent loses its checkout mid-run, because `git worktree remove` does
+  // not care that a process is cwd'd inside. Review found this; nothing in the
+  // single-daemon rig could have.
+  //
+  // Simulated the way it actually presents: a sibling sessions directory beside
+  // this daemon's, holding one session record that names the worktree. That is
+  // exactly what another daemon's DRY-57 index looks like from here.
+  const sibling = path.join(path.dirname(SESSIONS_DIR), "sessions-4999");
+  const foreign = mergedWorktree("demo-DRY-110", "agent/DRY-110", "e.txt");
+  fs.mkdirSync(sibling, { recursive: true });
+  fs.writeFileSync(
+    path.join(sibling, "11111111-2222-3333-4444-555555555555.json"),
+    JSON.stringify({ id: "11111111-2222-3333-4444-555555555555", cwd: foreign, worktree: foreign }),
+  );
+  {
+    const { json } = await post<ReapResponse>("/api/worktrees/reap", { worktree: foreign });
+    check(
+      "another daemon's live session protects it too",
+      json.removed === false && json.verdict === "in-use" && there(foreign),
+      json.reason,
+    );
+  }
+  fs.rmSync(sibling, { recursive: true, force: true });
+  {
+    const { json } = await post<ReapResponse>("/api/worktrees/reap", { worktree: foreign });
+    check(
+      "…and it goes once that daemon has forgotten it",
+      json.removed === true && !there(foreign),
       json.reason,
     );
   }
@@ -337,7 +490,7 @@ async function main(): Promise<void> {
   // boot sweep and this one are the same call; this is the one a harness can
   // reach without restarting a daemon that holds live sessions.
   console.log(`\nthe scheduled sweep (waiting out ${REAP_MS}ms)`);
-  const sweepable = addWorktree("demo-DRY-200", "agent/DRY-200");
+  const sweepable = mergedWorktree("demo-DRY-200", "agent/DRY-200", "d.txt");
   const keepable = addWorktree("demo-DRY-201", "agent/DRY-201");
   fs.writeFileSync(path.join(keepable, "README.md"), "# demo\nstill editing\n");
   await sleep(REAP_MS * 2 + 1500);

@@ -393,7 +393,8 @@ unrecoverable — clean, and every commit either pushed or already in the defaul
 branch — *and* the work is finished, meaning the branch is merged or the ticket
 is closed. Both halves, always: no trigger may skip the safety check, closing a
 window never deletes anything on its own, and a session in the worktree outranks
-everything. The branch is always kept. It runs at boot (which is when a merge
+everything — including one belonging to another daemon on the same host, since
+the worktrees root is shared while each daemon's session registry is not. The branch is always kept. It runs at boot (which is when a merge
 that landed while the daemon was down gets noticed) and every
 `DRYDOCK_WORKTREE_REAP_MS` after that; set it to `0` to never reap. Anything
 removed is named in the daemon log, with the branch it kept.

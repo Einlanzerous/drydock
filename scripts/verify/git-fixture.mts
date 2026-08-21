@@ -97,3 +97,50 @@ export function commitIn(dir: string, file: string, text: string): void {
   git(dir, "add", "-A");
   git(dir, "commit", "-m", `add ${file}`);
 }
+
+/**
+ * Merge `branch` into the fixture's default branch and push, i.e. what a merged
+ * PR leaves behind.
+ *
+ * `--no-ff` on purpose: the point of a genuinely merged branch is that its tip
+ * is CONTAINED in the default branch without BEING it. A fast-forward leaves
+ * the two tips equal, which is indistinguishable from a branch that never
+ * committed anything — the case the reaper has to refuse to call finished.
+ */
+export function mergeToDefault(f: Fixture, branch: string): void {
+  git(f.repo, "merge", "--no-ff", "-m", `merge ${branch}`, branch);
+  git(f.repo, "push", "origin", "main");
+}
+
+/**
+ * Ask the daemon where it would put a worktree, and refuse to go on if that is
+ * not where this fixture is.
+ *
+ * The guard these harnesses actually need. Checking the harness's own constant
+ * against a drydock-looking path cannot fire — it is the same string either way
+ * — while the failure being guarded against is dropping DRYDOCK_WORKTREES_ROOT
+ * from a long rig line, which leaves the daemon sweeping `~/.drydock/worktrees`
+ * with a registry that knows nothing about the dev or prod daemons' sessions.
+ * The only account of the daemon's root that is worth anything comes from the
+ * daemon.
+ */
+export async function assertDaemonRoot(daemon: string, expected: string): Promise<void> {
+  const res = await fetch(`${daemon}/api/repos/resolve?repo=demo&ticket=DRY-1`).catch(() => null);
+  const body = (await res?.json().catch(() => null)) as { worktree?: string } | null;
+  if (!body?.worktree) {
+    console.error(
+      `the daemon on ${daemon} could not say where it would put a worktree for repo "demo".\n` +
+        `Set DRYDOCK_REPO_PATHS=demo=${path.join(path.dirname(expected), "demo")} — see the rig at the top of this file.`,
+    );
+    process.exit(2);
+  }
+  const theirs = path.dirname(body.worktree);
+  if (path.resolve(theirs) !== path.resolve(expected)) {
+    console.error(
+      `the daemon puts worktrees in ${theirs}, this harness is using ${expected}.\n` +
+        `Almost certainly DRYDOCK_WORKTREES_ROOT is missing from the rig — and this harness\n` +
+        `DELETES worktrees, so it will not run against a root it did not create.`,
+    );
+    process.exit(2);
+  }
+}

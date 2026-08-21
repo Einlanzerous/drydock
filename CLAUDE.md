@@ -1008,28 +1008,53 @@ DRYDOCK_PORT=4390 DRYDOCK_WORKTREES_ROOT=/tmp/dry90/wt \
    no-upstream worktree then reported "1 unpushed commit". DRY-15 branches off
    the human checkout's HEAD, a LOCAL branch, so a real agent worktree has no
    upstream until somebody pushes it. Fixtures must do the same.
-7. **"In use" means in the REGISTRY, not running.** An exited session is still a
-   card on somebody's desk with readable scrollback, and DRY-62's Resume spawns
-   straight back into that worktree. It also covers a session the daemon
-   reattached after a restart (DRY-57) — the ticket being closed says nothing
-   about whether an agent is in there right now.
-8. **Never `rm -rf`.** Deleting the directory leaves admin metadata in the parent
+7. **"In use" means in the REGISTRY, not running — and on the HOST, not in this
+   process.** An exited session is still a card on somebody's desk with readable
+   scrollback, and DRY-62's Resume spawns straight back into that worktree; a
+   session the daemon reattached after a restart (DRY-57) counts too.
+   The second half is the one review found, and it is the worst bug this feature
+   had: the sessions index is per-PORT by design, worktrees are per HOST
+   (`DRYDOCK_WORKTREES_ROOT` defaults to one `~/.drydock/worktrees` for
+   everybody), so the prod daemon on :4318 can see the dev daemon's worktrees
+   and its own registry answers "not in use" about them perfectly truthfully.
+   A live agent then loses its checkout mid-run — `git worktree remove` does not
+   care that a process is cwd'd inside, and takes the ignored files with it.
+   Liveness is therefore read from every daemon's on-disk index
+   (`occupiedDirs()` in sessions-dir.ts), not from `manager.list()` alone. Any
+   throwaway daemon started per the second-instance pattern lands on the default
+   root too, so this is not a prod-only concern.
+8. **`merged` is true for a branch that has never committed anything**, and no
+   amount of git can tell that from a real merge — a fast-forward leaves the
+   tips equal too. Which matters because it is the shape of EVERY worktree
+   between `git worktree add` and the agent's first commit: read as "merged,
+   therefore finished", a freshly spawned agent's checkout is reapable
+   immediately and the ticket's state never gets asked about at all. So
+   `atDefaultTip` is reported by the predicate and refused as evidence by
+   `consider`, which falls through to the tracker instead. A fast-forward merge
+   pays one tracker lookup for the privilege; that is the price of a distinction
+   the repo does not contain.
+9. **A detached HEAD is refused outright rather than measured.** Everything in
+   the predicate reasons about HEAD, but what a removal PROMISES is that the
+   work is kept on the branch — and detached there is no branch, so the one
+   guarantee this makes is the one it cannot make. (The comment said so before
+   the code did; review caught the two disagreeing.)
+10. **Never `rm -rf`.** Deleting the directory leaves admin metadata in the parent
    repo's `.git/worktrees/`, so the branch stays "checked out somewhere" and a
    later re-spawn of the same ticket cannot re-add it. The harness proves this by
    re-adding the worktree afterwards, which is the operation that would fail.
-9. **A tracker that can't answer has not said no.** An outage, an unknown key, a
+11. **A tracker that can't answer has not said no.** An outage, an unknown key, a
    provider with no such ticket all mean "couldn't tell", and the worktree is
    kept. This is also where a SQUASH merge is caught: the squashed commit is a
    different object, so `merge-base --is-ancestor` says no while the ticket has
    been closed for a week.
-10. **Age alone is not a reason.** The five-week-old worktree was reapable
+12. **Age alone is not a reason.** The five-week-old worktree was reapable
    because its ticket was done, not because it was old. A stale-but-dirty one is
    the likeliest of all to hold something nobody has looked at.
-11. **The interval goes through `msOrOff`, not `num()`** — DRY-60's trap 9 and
+13. **The interval goes through `msOrOff`, not `num()`** — DRY-60's trap 9 and
    DRY-72's trap 6, on a knob whose off switch guards deletion. A deliberate 0
    must mean "never reap"; through `num()` it would silently restore the 6h
    default.
-12. **Say what was reaped.** A checkout disappearing with no record is
+14. **Say what was reaped.** A checkout disappearing with no record is
    indistinguishable from losing work, which is precisely the anxiety this
    feature must not create — so the daemon logs the path, the branch it kept and
    why, and the shell raises a line for the close-triggered case. That line is a
@@ -1037,28 +1062,40 @@ DRYDOCK_PORT=4390 DRYDOCK_WORKTREES_ROOT=/tmp/dry90/wt \
    deliberately not a DRY-58 notice: a notice is a condition its owner clears
    when it stops holding, and a removal is over the moment it happens, so
    nothing would ever take it down again.
-13. **`/api/worktrees/reap` can only see the managed root**, by identity rather
+15. **`/api/worktrees/reap` can only see the managed root**, by identity rather
    than string prefix. `/api/worktrees/remove` will act on any path it is given
    and always has; the reap route is the one a client calls with no human
-   reading a confirmation first, so it is scoped to what `listManagedWorktrees`
-   found under `DRYDOCK_WORKTREES_ROOT`.
-14. **The reaper's own failures are harmless by construction.** A repo that has
+   reading a confirmation first, so `describeManagedWorktree` refuses anything
+   whose parent directory isn't `DRYDOCK_WORKTREES_ROOT`.
+16. **The reaper's own failures are harmless by construction.** A repo that has
    moved, a worktree on an unmounted disk, a git that errors: logged and
    skipped. This runs in the process that holds every live PTY and
    `DRYDOCK_EXIT_ON_UNCAUGHT` has defaulted ON since DRY-57.
 
-Harnesses: `scripts/verify/worktree-reap.mts` for the policy and
-`worktree-reap-ui.mts` for which gesture may trigger it, rigs in their README —
-a throwaway daemon, the DRY-72 stub tracker, and for the second a browser and a
-vite server. Fifteen seconds and about a minute. It builds
-its own bare-origin-plus-clone fixture, so nothing it does touches a real repo,
-and it refuses to run against `~/.drydock/worktrees` or against an interval it
-would have to wait out. Confirm it discriminates: against the unconditional
-`--force` it fails 3 of 23 (the whole `/api/worktrees/remove` section), and
-against a reaper whose `consider` skips the predicate it fails 11 — including
-the scheduled sweep deleting a dirty worktree, which is the failure that would
-cost somebody work. The browser one fails 2 of 17 when the reap call is moved
-from `closeWindow` into the shared `endWindow`, and those two are trap 1.
+Harnesses: `scripts/verify/worktree-reap.mts` (31 checks) for the policy and
+`worktree-reap-ui.mts` (17) for which gesture may trigger it, rigs in their
+README — a throwaway daemon, the DRY-72 stub tracker, and for the second a
+browser and a vite server. Fifteen seconds and about a minute. They build their
+own bare-origin-plus-clone fixture, so nothing they do touches a real repo, and
+they **ask the daemon** where its worktrees root is and refuse to run if it
+isn't the fixture's. (The guard that compared the harness's own constant against
+a drydock-looking string could not fire — review's find, and the case it claimed
+to cover is dropping `DRYDOCK_WORKTREES_ROOT` from an eight-variable rig line,
+which leaves a 4-second sweep pointed at the real root.)
+
+Confirm they discriminate, and note the two enforcement points need two
+mutations:
+
+- `removeWorktree` back to an unconditional `--force`: **3 of 31**, the whole
+  `/api/worktrees/remove` section. The reaper's own cases survive, correctly —
+  `consider` refuses before the primitive is reached.
+- `consider` with its safety check deleted: **12 of 31**, including the
+  scheduled sweep deleting a dirty worktree.
+- the three pre-review reaper behaviours at once (registry-only liveness,
+  `merged` short-circuiting the tracker, a measured detached HEAD): **6 of 31**,
+  one pair per trap 7/8/9.
+- the browser one fails **2 of 17** when the reap call moves from `closeWindow`
+  into the shared `endWindow`, and those two are trap 1.
 
 ## The event stream carries exits (DRY-64)
 

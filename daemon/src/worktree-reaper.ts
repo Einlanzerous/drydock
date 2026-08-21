@@ -69,13 +69,23 @@ export interface ReapDecision {
 
 export interface ReapDeps {
   /**
-   * Is any session in the registry pointed at this path?
+   * Is any session on this HOST pointed at this path?
    *
-   * "In the registry", not "running": a session that has EXITED is still on
-   * somebody's desk with its scrollback readable, and DRY-62's Resume spawns
-   * straight back into this worktree. The registry is also the only thing that
-   * knows about a session the daemon reattached after a restart (DRY-57) — the
-   * ticket being closed says nothing about whether an agent is in there now.
+   * Three widenings, each of which was a way to reap a worktree somebody was
+   * working in:
+   *
+   *  - "in the registry", not "running": a session that has EXITED is still on
+   *    somebody's desk with its scrollback readable, and DRY-62's Resume spawns
+   *    straight back into this worktree.
+   *  - the registry also covers sessions the daemon reattached after a restart
+   *    (DRY-57); the ticket being closed says nothing about whether an agent is
+   *    in there right now.
+   *  - and the host, not this process. Worktrees are NOT per-port the way the
+   *    sessions index is: every daemon on the machine shares one
+   *    `~/.drydock/worktrees` by default, so this daemon's registry is a
+   *    truthful answer to the wrong question — it says "not mine", the reaper
+   *    hears "nobody's", and the dev daemon's live agent loses its checkout to
+   *    the prod daemon's sweep (review, DRY-92).
    */
   inUse(wtPath: string): boolean;
   /**
@@ -119,7 +129,7 @@ export class WorktreeReaper {
     if (!safety.safe) {
       return {
         worktree: wt,
-        verdict: safety.reason === "git can't read it" ? "error" : "unsafe",
+        verdict: safety.unreadable ? "error" : "unsafe",
         reason: safety.reason ?? "holds work that exists only here",
         safety,
       };
@@ -127,7 +137,17 @@ export class WorktreeReaper {
     // Merged into the repo's default branch is the finished case answered
     // locally, with no tracker involved at all — which is what makes this work
     // on a host with `DRYDOCK_TRACKER=fixture`, i.e. no tracker configured.
-    if (safety.merged) {
+    //
+    // Except when HEAD is the default branch's own tip, which is what a branch
+    // that has never committed anything looks like — an agent that was spawned
+    // and did nothing, or one that is running right now and hasn't written a
+    // file yet. Treating that as "merged" would answer the finished question
+    // with evidence of nothing having happened, and it short-circuits the
+    // tracker, so the ticket's state stops mattering at all. It is asked about
+    // properly instead (review, DRY-92). A fast-forward merge lands here too
+    // and pays one tracker lookup for the privilege; that is the price of a
+    // distinction the repo genuinely does not contain.
+    if (safety.merged && !safety.atDefaultTip) {
       return {
         worktree: wt,
         verdict: "reaped",
@@ -136,7 +156,10 @@ export class WorktreeReaper {
       };
     }
     if (!wt.ticket) {
-      return { worktree: wt, verdict: "unfinished", reason: "not merged, and no ticket to ask about", safety };
+      const why = safety.atDefaultTip
+        ? `nothing has been committed on ${safety.defaultBranch}, and no ticket to ask about`
+        : "not merged, and no ticket to ask about";
+      return { worktree: wt, verdict: "unfinished", reason: why, safety };
     }
     if (opts.mayAskTracker === false) {
       return {

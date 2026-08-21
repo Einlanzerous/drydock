@@ -162,12 +162,33 @@ function gitOk(cwd: string, ...args: string[]): boolean {
 
 /** What `worktreeSafety` found in a worktree. */
 export interface WorktreeSafety {
+  /**
+   * git could not answer at all — an unmounted disk, a repo that moved, a
+   * directory somebody deleted by hand.
+   *
+   * A field rather than a distinguished `reason` string, because the reaper
+   * reports this as `error` and everything else as `unsafe`, and telling them
+   * apart by matching prose written in another file is a coupling nothing
+   * checks: reword the sentence and every unreadable worktree silently becomes
+   * an ordinary refusal.
+   */
+  unreadable: boolean;
   /** Nothing modified, staged or untracked (ignored files don't count). */
   clean: boolean;
   /** Commits on HEAD that its upstream doesn't have; -1 when there is no upstream. */
   unpushed: number;
   /** HEAD is an ancestor of the repo's default branch — the merged case. */
   merged: boolean;
+  /**
+   * HEAD is EXACTLY the default branch's tip, which `merged` cannot distinguish
+   * from a branch that has done nothing at all.
+   *
+   * Both read as "contained in the default branch", and from the repo alone
+   * they are genuinely indistinguishable — a fast-forward merge leaves the tips
+   * equal too. So this is surfaced rather than decided here, and the reaper
+   * refuses to treat it as evidence the work is finished (see `consider`).
+   */
+  atDefaultTip: boolean;
   /** The default branch that was compared against, when one was found. */
   defaultBranch?: string;
   /** Nothing here exists only here: the checkout may be removed. */
@@ -212,20 +233,40 @@ function defaultBranchRef(cwd: string): string | undefined {
  *    what makes a finished ticket reapable at all).
  *
  * A question git can't answer is answered NO. No upstream and not merged is
- * unsafe, a detached or unborn HEAD is unsafe, a repo that has moved out from
- * under the worktree is unsafe — because the alternative to "leave it alone" is
- * deleting the only copy of something.
+ * unsafe, a detached or unborn HEAD is unsafe (there is no branch for the work
+ * to be kept on, which is the one thing a removal promises), a repo that has
+ * moved out from under the worktree is unsafe — because the alternative to
+ * "leave it alone" is deleting the only copy of something.
+ *
+ * What this deliberately does NOT decide is whether the work is FINISHED. That
+ * needs one more distinction it can only report, never resolve: `merged` is
+ * true for a branch that has been merged AND for one that has never committed
+ * anything, and no amount of git can tell those apart (a fast-forward merge
+ * leaves the tips equal too). See `atDefaultTip`.
  */
 export function worktreeSafety(wtPath: string): WorktreeSafety {
   const cwd = expandHome(wtPath);
+  const unknown = { unreadable: true, clean: false, unpushed: -1, merged: false, atDefaultTip: false, safe: false };
   const status = gitTry(cwd, "status", "--porcelain");
   if (status === null) {
     // Not a work tree any more — an unmounted disk, a repo that moved, a
     // directory somebody deleted by hand. Never our business to remove.
-    return { clean: false, unpushed: -1, merged: false, safe: false, reason: "git can't read it" };
+    return { ...unknown, reason: "git can't read it" };
   }
   const clean = status === "";
   const dirtyCount = status === "" ? 0 : status.split("\n").length;
+
+  // A DETACHED HEAD is refused outright rather than measured. Everything below
+  // reasons about HEAD, but what a removal promises to keep is the BRANCH — and
+  // detached there is no branch to keep, so the one guarantee this function
+  // exists to make ("the work is somewhere else") is one it cannot make. It is
+  // also a state nothing here creates: somebody did it by hand, in a checkout
+  // they can perfectly well delete by hand.
+  const head = gitTry(cwd, "rev-parse", "--abbrev-ref", "HEAD");
+  if (head === null) return { ...unknown, reason: "git can't read its HEAD" };
+  if (head === "HEAD") {
+    return { ...unknown, unreadable: false, clean, reason: "a detached HEAD, so there is no branch to keep the work on" };
+  }
 
   const defaultBranch = defaultBranchRef(cwd);
   // `merge-base --is-ancestor` is the containment test, and it answers for a
@@ -234,6 +275,8 @@ export function worktreeSafety(wtPath: string): WorktreeSafety {
   // upstream test below (the commits are still on the remote) or, failing that,
   // by the ticket being closed; it is never caught by pretending this said yes.
   const merged = !!defaultBranch && gitOk(cwd, "merge-base", "--is-ancestor", "HEAD", defaultBranch);
+  const atDefaultTip =
+    merged && gitTry(cwd, "rev-parse", "HEAD") === gitTry(cwd, "rev-parse", defaultBranch!);
 
   const upstream = gitTry(cwd, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}");
   let unpushed = -1;
@@ -243,8 +286,9 @@ export function worktreeSafety(wtPath: string): WorktreeSafety {
     if (!Number.isFinite(unpushed)) unpushed = -1;
   }
 
+  const found = { unreadable: false, clean, unpushed, merged, atDefaultTip, defaultBranch };
   const safe = clean && (merged || unpushed === 0);
-  if (safe) return { clean, unpushed, merged, defaultBranch, safe };
+  if (safe) return { ...found, safe };
 
   const why: string[] = [];
   if (!clean) why.push(`${dirtyCount} uncommitted change${dirtyCount === 1 ? "" : "s"}`);
@@ -258,7 +302,7 @@ export function worktreeSafety(wtPath: string): WorktreeSafety {
           : "no upstream branch and no default branch to compare with",
     );
   }
-  return { clean, unpushed, merged, defaultBranch, safe, reason: why.join(" and ") };
+  return { ...found, safe, reason: why.join(" and ") };
 }
 
 /**

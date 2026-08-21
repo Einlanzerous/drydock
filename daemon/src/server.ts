@@ -9,7 +9,7 @@ import { SessionManager } from "./manager.js";
 import type { PtySession, SpawnOptions } from "./session.js";
 import { expandHome, resolveRepoCwd } from "./repos.js";
 import { sanitizeSpawnEnv } from "./spawn-env.js";
-import { sessionsDir } from "./sessions-dir.js";
+import { occupiedDirs, sessionsDir } from "./sessions-dir.js";
 import {
   describeManagedWorktree,
   ensureWorktree,
@@ -69,13 +69,19 @@ manager.onRunEnd(runEndHandler(tracker));
  * git.
  */
 const reaper = new WorktreeReaper({
-  // Every session the registry holds, not just the running ones: an exited
-  // session is still a card on somebody's desk with readable scrollback, and
-  // DRY-62's Resume spawns straight back into this worktree. Both `worktree`
-  // and `cwd` are checked because a spawn that fell back to the plain repo cwd
-  // (the DRY-15 catch) records only the latter.
+  // Two sources, and the second is the one that matters. This daemon's registry
+  // holds every session it knows about — running or exited, since an exited one
+  // is still a card on somebody's desk that DRY-62's Resume spawns back into.
+  // But `~/.drydock/worktrees` is shared by every daemon on the host while the
+  // registry is per-process, so the registry alone answers "not in use" for the
+  // dev daemon's live agents when the PROD daemon sweeps (review, DRY-92).
+  // `occupiedDirs()` reads the on-disk session index of every daemon here.
+  //
+  // Both `worktree` and `cwd` are checked on both sides, because a spawn that
+  // fell back to the plain repo cwd (the DRY-15 catch) records only the latter.
   inUse: (wtPath) =>
-    manager.list().some((s) => samePath(s.worktree, wtPath) || samePath(s.cwd, wtPath)),
+    manager.list().some((s) => samePath(s.worktree, wtPath) || samePath(s.cwd, wtPath)) ||
+    occupiedDirs().some((dir) => samePath(dir, wtPath)),
   ticketDone: async (key) => {
     try {
       const ticket = await tracker.getTicket(key);

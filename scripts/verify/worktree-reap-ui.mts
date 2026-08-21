@@ -24,7 +24,8 @@
 //   (cd daemon && STUB_PORT=4396 node --import tsx ../scripts/verify/stub-tracker.mts)
 //
 //   cd daemon
-//   DRYDOCK_PORT=4390 DRYDOCK_HOST=127.0.0.1 DRYDOCK_SESSIONS_DIR=/tmp/d90 \
+//   DRYDOCK_PORT=4390 DRYDOCK_HOST=127.0.0.1 \
+//     DRYDOCK_SESSIONS_DIR=/tmp/dry90-sessions/sessions-4390 \
 //     DRYDOCK_STATE_FILE=/tmp/dry90-state.json \
 //     DRYDOCK_WORKTREES_ROOT=/tmp/dry90/wt \
 //     DRYDOCK_REPO_PATHS=demo=/tmp/dry90/demo,dry=/tmp/dry90/demo \
@@ -49,11 +50,11 @@
 //
 // VERBOSE=1 prints the daemon's verdict for every worktree request.
 //
-// Afterwards: `rm -rf /tmp/dry90`, and kill the supervisors this leaves behind
+// Afterwards: `rm -rf /tmp/dry90 /tmp/dry90-sessions`, and kill the supervisors it leaves behind
 // (CLAUDE.md's loop over /proc/<pid>/exe, never `pkill -f supervisor/main`).
 import { chromium } from "playwright";
 import * as fs from "node:fs";
-import { addWorktree, buildFixture, git } from "./git-fixture.mjs";
+import { addWorktree, assertDaemonRoot, buildFixture, git } from "./git-fixture.mjs";
 
 const SHELL = "http://127.0.0.1:5390";
 const DAEMON = "http://127.0.0.1:4390";
@@ -101,6 +102,11 @@ await cleanDesk();
 // the case under test into "a dirty worktree" — which is refused, correctly,
 // and reads as the feature being broken.
 const fixture = buildFixture("/tmp/dry90");
+// The daemon's worktrees root, not this file's idea of it. Same guard and same
+// reason as `worktree-reap.mts`: what goes wrong is DRYDOCK_WORKTREES_ROOT
+// missing from a long rig line, and every constant here would still agree with
+// itself if it were.
+await assertDaemonRoot(DAEMON, `${fixture.worktrees}`);
 
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1600, height: 950 } });

@@ -896,7 +896,15 @@ The harness builds its own bare-origin-plus-clone under `/tmp/dry90`, so nothing
 here touches a real repo — but `DRYDOCK_WORKTREES_ROOT` is still the line that
 matters most in that block. Unset, it is `~/.drydock/worktrees`, which the dev
 and prod daemons share and which is full of real work; this harness deletes
-worktrees for a living, and it refuses to start if the root looks like that one.
+worktrees for a living. So it **asks the daemon** where its root is
+(`/api/repos/resolve`) and refuses to run if that isn't the fixture's. It used
+to compare its own constant against a drydock-looking string, which is the same
+string whatever the daemon is doing — a guard that could not fire, over the one
+mistake worth guarding.
+
+`DRYDOCK_SESSIONS_DIR` is nested one level (`…/sessions-4390`) on purpose: the
+cross-daemon case writes a sibling `sessions-4999` beside it, which is how a
+daemon finds out that ANOTHER daemon has a live agent in a worktree it can see.
 
 `DRYDOCK_WORKTREE_REAP_MS` must match the harness's `REAP_MS` (default 4000).
 Six hours is the right default and a terrible test — DRY-49's timeout and
@@ -920,11 +928,22 @@ What it holds down:
   output would make every worktree of every real project unreapable.
 - **Assert on the directory, never on the response.** The route can only report
   what it believes.
-- **A live session outranks the entire policy.** The in-use worktree is created
-  by the daemon's own spawn path, so it is merged and clean and every other check
-  in the file says remove it; the session is the only thing in the way. It is
-  re-checked after the scheduled sweep, because that is the trigger that runs
-  with nobody present.
+- **A live session outranks the entire policy, whoever's session it is.** The
+  in-use worktree is created by the daemon's own spawn path and then genuinely
+  merged, so every other check in the file says remove it and the session is the
+  only thing in the way. It is re-checked after the scheduled sweep, because that
+  is the trigger that runs with nobody present. A second case does the same with
+  a session belonging to a DIFFERENT daemon — the registry is per-process while
+  `~/.drydock/worktrees` is per host, so this daemon's own registry is a truthful
+  answer to the wrong question.
+- **A branch that has never committed anything is not "merged".** It sits
+  exactly on `origin/main`, so containment says yes; reading that as finished
+  reaps a freshly spawned agent's checkout without ever asking the tracker.
+  Asserted as a pair — the same shape with an open ticket must be kept and with
+  a closed one must go — because either alone reads as "never reap a fresh
+  worktree", which would leave exactly the litter this ticket is about. This is
+  also why the merged cases here do a real `--no-ff` merge rather than a bare
+  `git worktree add`.
 - **The branch survives, and the worktree can be re-added.** The second half is
   the `rm -rf` trap: deleting the directory leaves admin metadata behind, the
   branch stays "checked out somewhere", and the failure only shows up the next
@@ -936,16 +955,20 @@ What it holds down:
   which is delete uncommitted work without mentioning it.
 
 Discrimination (see [the section below](#making-sure-a-harness-still-discriminates)),
-and this one is worth running BOTH mutations, because the predicate is enforced
-in two places and a single mutation only proves one of them:
+and this one needs more than one mutation, because the predicate is enforced in
+two places and the liveness/finished rules are a third:
 
-- `removeWorktree` back to an unconditional `--force`: **3 of 23** fail, all in
+- `removeWorktree` back to an unconditional `--force`: **3 of 31** fail, all in
   the `/api/worktrees/remove` section. The reaper's own cases survive, correctly
   — `consider` refuses before the primitive is reached.
 - `WorktreeReaper.consider` with its safety check deleted (and the primitive
-  forced, or the belt underneath hides it): **11 of 23**, including `the sweep
+  forced, or the belt underneath hides it): **12 of 31**, including `the sweep
   … leaves the dirty one where it is`. That one is the failure that would cost
   somebody work.
+- the three pre-review reaper behaviours restored at once — registry-only
+  liveness, `merged` short-circuiting the tracker, and a detached HEAD measured
+  rather than refused: **6 of 31**, a pair per behaviour. Worth running as one
+  mutation, since the failing names map straight onto them.
 
 
 ### …and which gesture may trigger it
