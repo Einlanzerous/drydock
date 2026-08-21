@@ -114,7 +114,12 @@ prod_port() {
   # .env with no DRYDOCK_PORT line in it. Either way the answer is the default,
   # not an aborted deploy — and the original inline version of this line would
   # have taken the script down on a hand-edited prod .env.
-  port="$(grep -E '^DRYDOCK_PORT=' "$PROD_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  # `head -1`, not `tail -1`: `env.ts` skips a key already in the environment
+  # (`key in process.env`), so the FIRST occurrence in the file is the one the
+  # daemon uses. Last-wins put the probe on a port the daemon was not on — the
+  # ticket's own failure again, reached by editing this .env the way people
+  # actually edit it, which is to append (review).
+  port="$(grep -E '^DRYDOCK_PORT=' "$PROD_DIR/.env" 2>/dev/null | head -1 | cut -d= -f2- || true)"
   # Then read it the way the DAEMON reads it. `env.ts` trims the value and
   # strips a matching quote pair; `cut` does neither. So a prod .env holding
   # DRYDOCK_PORT="4318" — and that file is hand-edited, since the unit keeps all
@@ -183,16 +188,26 @@ probe_daemon() {
 
 # What a FAILING probe saw, and where to look next.
 #
-# The two arms point at completely different problems and only one of them is a
-# journal. Nothing listening is `journalctl`. A port answering as something else
-# means the daemon lost the bind and exited — the journal will say so, but what
-# you actually need is the name of whatever took the port. The first version of
-# this appended one `journalctl` hint to both arms while its own comment argued
-# they were different, which sends you to the wrong place half the time
-# (review).
+# Three arms, because they point at three different problems and only two of
+# them are a journal. Nothing listening is `journalctl`. A 5xx is either this
+# daemon throwing (`server.ts` turns any unhandled error into a 500) or a proxy
+# with a dead upstream, and both leave something in the journal worth reading.
+# Everything else — a 404, a plain 200 page, a redirect — means somebody else
+# has the port, the journal will only say the daemon could not bind, and what is
+# needed is the name of whatever took it.
+#
+# Both halves of this were wrong once. The first version appended one
+# `journalctl` hint to every failure while the comment above it argued they
+# differed; the second split them and then asserted, here and in two documents,
+# that a non-200 answer means the daemon is not the answerer — which its own
+# catch-all 500 contradicts. Both found in review, and they are the same
+# mistake pointing in opposite directions: a failure line is read by somebody
+# deciding where to look, so being confidently wrong costs more than being
+# vague.
 probe_failure() {
   case "${1:-}" in
     000|"") printf 'no HTTP response — check: journalctl --user -u drydock-daemon -n 50' ;;
+    5??) printf 'answered HTTP %s — this daemon erroring, or a proxy with a dead upstream; check: journalctl --user -u drydock-daemon -n 50' "$1" ;;
     *) printf 'answered HTTP %s, but not as a Drydock daemon — find out what else is bound to :%s' "$1" "${2:-}" ;;
   esac
 }

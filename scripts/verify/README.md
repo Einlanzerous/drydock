@@ -1194,7 +1194,7 @@ probe, and exits having touched nothing. Same argument as DRY-87's
 verifying the copy. It is worth knowing about on its own — "would this host's
 deploy call its daemon healthy?" is now a question you can ask without deploying.
 
-Four claims, and the middle two are the ones a naive fix gets wrong:
+Five claims, and the middle ones are what a naive fix gets wrong:
 
 - **A 401 means the daemon is up.** The posture is a real daemon with a real
   password, and its anonymous status code is asserted **before** the probe runs
@@ -1223,26 +1223,34 @@ Four claims, and the middle two are the ones a naive fix gets wrong:
 - **And it reads the `.env` the way the daemon does.** That file is hand-edited
   on a prod host, so `DRYDOCK_PORT="4318"` is an ordinary thing to find in it —
   and `cut` alone probes `:"4318"` while the daemon is on 4318, which is this
-  ticket again in a different spelling. There's a check for the quoted form.
+  ticket again in a different spelling. Appending a second `DRYDOCK_PORT` line
+  is the same trap and worse, since neither port looks wrong in the file:
+  `env.ts` takes the FIRST occurrence, so `tail -1` probes a port the daemon is
+  not on. There are checks for both shapes.
 
-The failure line is asserted on too, because it is what decides where somebody
-looks next: nothing listening points at `journalctl`, and a port answering as
-something else points at whatever took the port. Sending both to the journal —
-which the first version did — is wrong half the time.
+The failure line is asserted on too, in three arms, because it decides where
+somebody looks next. Nothing listening is a `journalctl`. A **5xx** is either a
+proxy with a dead upstream or the daemon's own catch-all — `server.ts` turns any
+unhandled throw into a 500 — so it is a journal too. Anything else means
+somebody has the port and the journal will only say the daemon could not bind.
+Both halves of that shipped wrong once, in opposite directions: one hint for
+every failure, then a split that asserted the daemon could never be the
+answerer.
 
 ### Making sure this one still discriminates
 
-Six mutations, all measured, each failing a different section — which is why
-there are six:
+Eight mutations, all measured, each failing a different section:
 
 | mutation | fails |
 |---|---|
-| accept only `200` (the ticket's bug) | **3 of 25**, all in "auth on" |
-| accept any HTTP response (the overcorrection) | **6 of 25**, every squatter check |
-| accept on the status code alone, body unread | **2 of 25**, the 200 squatter |
-| drop `-m 5` from the curl (unbounded) | **2 of 25**, the black-hole pair |
-| put `-f` back on the curl | **4 of 25**, "auth on" plus the static check |
-| `prod_port` without its quote/space trim | **1 of 25**, the quoted `.env` |
+| accept only `200` (the ticket's bug) | **3 of 28**, all in "auth on" |
+| accept any HTTP response (the overcorrection) | **8 of 28**, every squatter check |
+| accept on the status code alone, body unread | **2 of 28**, the 200 squatter |
+| drop `-m 5` from the curl (unbounded) | **2 of 28**, the black-hole pair |
+| put `-f` back on the curl | **4 of 28**, "auth on" plus the static check |
+| `prod_port` without its quote/space trim | **1 of 28**, the quoted `.env` |
+| `prod_port` back to `tail -1` | **1 of 28**, the duplicate-key `.env` |
+| one journal hint for every failure | **2 of 28**, the two 5xx squatters |
 
 The `-f` row is worth its own note, because it changed hands during review.
 While the probe read only the status code, `-f` was harmless — `-w

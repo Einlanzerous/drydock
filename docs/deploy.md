@@ -163,11 +163,14 @@ values and all, since that file is hand-edited — and prints what it saw.
   on.
 - `no HTTP response` means nothing is listening, and says so with the
   `journalctl` line to run.
+- `answered HTTP 5xx` is either the daemon itself erroring — its catch-all
+  turns any unhandled throw into a 500 — or a proxy with a dead upstream. Both
+  leave something worth reading in the journal, so that line names it too.
 - `answered HTTP <code>, but not as a Drydock daemon` means something ELSE is on
-  that port — including when it answers 200, because the probe checks the body
-  and not just the code. That is not a dead deploy and the journal is the wrong
-  place to look: if anything is already holding `:4318` the daemon loses the
-  bind and exits, so find out what took the port.
+  that port, including when it answers 200, because the probe checks the body
+  and not just the code. The journal is the wrong place for this one: if
+  anything is already holding `:4318` the daemon loses the bind and exits, so
+  find out what took the port.
 
 ## Who may use it (DRY-27)
 

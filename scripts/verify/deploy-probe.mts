@@ -43,17 +43,19 @@
 // they are what catches a second, differently-spelled curl being added to the
 // tail.
 //
-// CONFIRM IT DISCRIMINATES. Six mutations, each measured rather than counted by
-// hand, and each failing a different section — which is the point of having six:
+// CONFIRM IT DISCRIMINATES. Eight mutations, each measured rather than counted
+// by hand, and each failing a different section:
 //
-//   accept only 200 (the ticket's bug)          3 of 25, all in "auth on"
-//   accept any HTTP response (the overcorrect)  6 of 25, every squatter check
-//   accept on the status code alone             2 of 25, the 200 squatter
-//   drop `-m 5` from the curl (unbounded)       2 of 25, the black-hole pair
-//   put `-f` back on the curl                   4 of 25, "auth on" + the static
+//   accept only 200 (the ticket's bug)          3 of 28, all in "auth on"
+//   accept any HTTP response (the overcorrect)  8 of 28, every squatter check
+//   accept on the status code alone             2 of 28, the 200 squatter
+//   drop `-m 5` from the curl (unbounded)       2 of 28, the black-hole pair
+//   put `-f` back on the curl                   4 of 28, "auth on" + the static
 //     …and the same with the flag on the curl's SECOND line, which is the
 //     mutation the static check was blind to before the fold (review)
-//   `prod_port` without its quote/space trim    1 of 25, the quoted .env
+//   `prod_port` without its quote/space trim    1 of 28, the quoted .env
+//   `prod_port` back to `tail -1`               1 of 28, the duplicate-key .env
+//   one journal hint for every failure          2 of 28, the two 5xx squatters
 //
 // RIG: no browser, no database, no systemd, no second terminal — this file owns
 // its daemons.
@@ -391,6 +393,24 @@ async function main(): Promise<void> {
     `exit ${quoted.code} ${(quoted.out + quoted.err).trim()}`,
   );
 
+  // And the FIRST DRYDOCK_PORT line wins, because that is the one `env.ts`
+  // uses — it skips a key already in the environment, so a later line is dead
+  // text. Appending is how a .env gets edited, so last-wins put the probe on a
+  // port the daemon was not on: the ticket again, and nastier than the quoted
+  // case because the file makes neither port look wrong (review).
+  const spare = await freePort();
+  fs.mkdirSync(path.join(SCRATCH, "prod-dup"), { recursive: true });
+  fs.writeFileSync(
+    path.join(SCRATCH, "prod-dup", ".env"),
+    `DRYDOCK_PORT=${PORT}\n# somebody moved the port and appended it\nDRYDOCK_PORT=${spare}\n`,
+  );
+  const dup = await probe(path.join(SCRATCH, "prod-dup"));
+  check(
+    "a second DRYDOCK_PORT line does not win",
+    dup.code === 0,
+    `exit ${dup.code} ${(dup.out + dup.err).trim()}`,
+  );
+
   // The port comes from the .env the deploy just seeded, not from a guess. Same
   // daemon, still running: only the .env moves.
   const idle = await freePort();
@@ -468,13 +488,29 @@ async function main(): Promise<void> {
   // deploy-path case rather than a lab one — if anything is already holding
   // :4318 the daemon loses the bind and exits, so the squatter is what answers
   // the probe.
+  //
+  // `journal` is where each one should send you, and it is not a property of
+  // failing — it is a property of WHAT failed. A 5xx is either a proxy with a
+  // dead upstream or this daemon's own catch-all (`server.ts` turns any
+  // unhandled throw into a 500), and both leave something in the journal; a 404
+  // or a stray 200 page means somebody else has the port and the journal will
+  // only say the daemon could not bind. The 500 case is here because the
+  // failure line USED to assert that a non-200 answer meant the daemon was not
+  // the answerer, which its own error handler contradicts (review).
   const squatters = [
-    { code: 404, body: "nope\n", what: "a proxy with no route" },
-    { code: 503, body: "nope\n", what: "a proxy with a dead upstream" },
+    { code: 404, body: "nope\n", what: "a proxy with no route", journal: false },
+    { code: 503, body: "nope\n", what: "a proxy with a dead upstream", journal: true },
     {
       code: 200,
       body: "<html><body><h1>Welcome to nginx!</h1></body></html>",
       what: "a stray web server",
+      journal: false,
+    },
+    {
+      code: 500,
+      body: '{"error":"TypeError: boom"}',
+      what: "the daemon's own catch-all",
+      journal: true,
     },
   ];
   for (const sq of squatters) {
@@ -487,10 +523,10 @@ async function main(): Promise<void> {
       `exit ${squat.code}`,
     );
     check(
-      `and names the ${sq.code} rather than sending you to the journal`,
+      `and names the ${sq.code}, pointing ${sq.journal ? "at the journal" : "at the port"}`,
       new RegExp(`${sq.code}`).test(squat.err) &&
-        /not as a Drydock daemon/.test(squat.err) &&
-        !/journalctl/.test(squat.err) &&
+        /journalctl/.test(squat.err) === sq.journal &&
+        (sq.journal || /not as a Drydock daemon/.test(squat.err)) &&
         squat.err.includes(`:${PORT}`),
       squat.err.trim(),
     );
