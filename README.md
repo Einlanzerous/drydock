@@ -387,6 +387,17 @@ merge or inspect, and re-spawning the same ticket reuses the worktree — so rem
 is on demand (the panel's **Reset**, or `POST /api/worktrees/remove`). Repo-less
 projects (e.g. an ideas board) have no worktree and run directly in the cwd.
 
+**Reaping them (DRY-90).** Kept-on-close used to mean kept forever, so a host
+grew a full checkout per ticket. A worktree is now removed once it holds nothing
+unrecoverable — clean, and every commit either pushed or already in the default
+branch — *and* the work is finished, meaning the branch is merged or the ticket
+is closed. Both halves, always: no trigger may skip the safety check, closing a
+window never deletes anything on its own, and a session in the worktree outranks
+everything. The branch is always kept. It runs at boot (which is when a merge
+that landed while the daemon was down gets noticed) and every
+`DRYDOCK_WORKTREE_REAP_MS` after that; set it to `0` to never reap. Anything
+removed is named in the daemon log, with the branch it kept.
+
 ## Tracker config
 
 The sidebar/palette default to a built-in fixture set. Point at a live tracker

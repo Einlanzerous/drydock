@@ -51,6 +51,16 @@ Three groups:
   browser, under a minute. Run it when touching `PtySession.spawn` / `adopt` /
   `seedScrollback`, `SupervisorLink`'s handshake, or the order in which
   `supervisor/main.ts` spawns its PTY and binds its socket.
+- **Reaping finished worktrees (DRY-90)** —
+  [its own section](#reaping-finished-worktrees-dry-90). Two harnesses on one
+  fixture: `worktree-reap.mts` (a throwaway daemon and the DRY-72 stub tracker,
+  no browser, fifteen seconds) for the policy, and `worktree-reap-ui.mts` (a
+  browser too, about a minute) for which GESTURE is allowed to trigger it. Run
+  both when touching `daemon/src/worktree.ts`, `daemon/src/worktree-reaper.ts`
+  or either worktree route; run the second in particular when touching the close
+  paths in `App.vue`, because the one thing that must never delete a worktree is
+  DRY-60's automatic sweep and the only thing keeping it out is which function
+  the call sits in.
 - **The tombstone's resume button (DRY-62)** —
   [its own section](#the-tombstones-resume-button-dry-62). A browser and a
   throwaway Postgres, about a minute. Run it when touching
@@ -863,6 +873,103 @@ so a reader who runs this and sees a different total cannot tell a stale doc fro
 a harness that has quietly gained or lost assertions. **Re-measure both numbers
 when adding a case here** — do not count them by hand, which is how they were
 wrong.
+
+## Reaping finished worktrees (DRY-90)
+
+A throwaway daemon plus the DRY-72 stub tracker — no browser, no database.
+Fifteen seconds, four of which are waiting out a turned-down sweep interval.
+
+```sh
+(cd daemon && STUB_PORT=4396 node --import tsx ../scripts/verify/stub-tracker.mts &)
+
+(cd daemon && DRYDOCK_PORT=4390 DRYDOCK_HOST=127.0.0.1 DRYDOCK_SESSIONS_DIR=/tmp/d90 \
+   DRYDOCK_STATE_FILE=/tmp/dry90-state.json \
+   DRYDOCK_WORKTREES_ROOT=/tmp/dry90/wt DRYDOCK_REPO_PATHS=demo=/tmp/dry90/demo \
+   DRYDOCK_WORKTREE_REAP_MS=4000 \
+   DRYDOCK_TRACKER=switchyard DRYDOCK_SWITCHYARD_URL=http://127.0.0.1:4396 \
+   DRYDOCK_SWITCHYARD_TOKEN=stub node --import tsx src/index.ts &)
+
+(cd daemon && node --import tsx ../scripts/verify/worktree-reap.mts)
+```
+
+The harness builds its own bare-origin-plus-clone under `/tmp/dry90`, so nothing
+here touches a real repo — but `DRYDOCK_WORKTREES_ROOT` is still the line that
+matters most in that block. Unset, it is `~/.drydock/worktrees`, which the dev
+and prod daemons share and which is full of real work; this harness deletes
+worktrees for a living, and it refuses to start if the root looks like that one.
+
+`DRYDOCK_WORKTREE_REAP_MS` must match the harness's `REAP_MS` (default 4000).
+Six hours is the right default and a terrible test — DRY-49's timeout and
+DRY-60's sweep delay again — so it refuses anything over 30s rather than pass by
+never reaching a sweep.
+
+The stub tracker supplies the half git cannot answer: `DRY-2` is in progress and
+`DRY-3` is closed, which is how the SQUASH-merge case is tested — a branch whose
+commits are all on the remote but which no containment check will ever call
+merged.
+
+What it holds down:
+
+- **Every case is a PAIR.** A reaper that deletes the four stale checkouts on a
+  host is easy, and it is impossible to notice — until months later — that it
+  also deleted the one holding two unpushed commits. So each removable worktree
+  is asserted beside one that differs in exactly one respect and must survive:
+  merged-and-clean against merged-but-modified, against merged-but-untracked,
+  against clean-but-two-commits-unpushed, against never-pushed-at-all. And
+  against merged-with-an-IGNORED-file, which must still go — counting build
+  output would make every worktree of every real project unreapable.
+- **Assert on the directory, never on the response.** The route can only report
+  what it believes.
+- **A live session outranks the entire policy.** The in-use worktree is created
+  by the daemon's own spawn path, so it is merged and clean and every other check
+  in the file says remove it; the session is the only thing in the way. It is
+  re-checked after the scheduled sweep, because that is the trigger that runs
+  with nobody present.
+- **The branch survives, and the worktree can be re-added.** The second half is
+  the `rm -rf` trap: deleting the directory leaves admin metadata behind, the
+  branch stays "checked out somewhere", and the failure only shows up the next
+  time somebody spawns that ticket. Proved by re-adding it.
+- **The dependency gets its own pair.** `POST /api/worktrees/remove` on a dirty
+  worktree must 409 with the safety report and leave it there; the same request
+  with `force: true` must still discard it. Reset is a human pressing a button
+  and has to keep working — what it must not do is what it did until DRY-90,
+  which is delete uncommitted work without mentioning it.
+
+Discrimination (see [the section below](#making-sure-a-harness-still-discriminates)),
+and this one is worth running BOTH mutations, because the predicate is enforced
+in two places and a single mutation only proves one of them:
+
+- `removeWorktree` back to an unconditional `--force`: **3 of 23** fail, all in
+  the `/api/worktrees/remove` section. The reaper's own cases survive, correctly
+  — `consider` refuses before the primitive is reached.
+- `WorktreeReaper.consider` with its safety check deleted (and the primitive
+  forced, or the belt underneath hides it): **11 of 23**, including `the sweep
+  … leaves the dirty one where it is`. That one is the failure that would cost
+  somebody work.
+
+
+### …and which gesture may trigger it
+
+`worktree-reap-ui.mts` is the browser half, and it needs a vite server and two
+more daemon settings — the rig is in its header. The claims are the ones the
+daemon cannot distinguish, because the kill it receives is byte-identical
+whoever sent it:
+
+- **B**: closing a window reaps its worktree and the desk says so, naming the
+  branch it kept.
+- **C**: DRY-60's automatic sweep closes a window and reaps NOTHING — asserted
+  against the very worktree B just proved reapable (same ticket, same branch,
+  same predicate), so the only variable is who closed the window. Aim this at a
+  worktree the policy would refuse anyway and it passes against the bug.
+- **A**: the panel's Reset refuses a dirty worktree, says what is in it, and
+  discards it on the second press.
+
+`DRYDOCK_WORKTREE_REAP_MS=0` in that rig is not laziness — the scheduled reaper
+has to be OFF or it removes C's worktree on its own and the sweep gets the
+blame. Discrimination: move the `reapClosedWorktree` call out of `closeWindow`
+and into `endWindow` (the shared path — exactly the mistake the ticket warns
+about) and it fails **2 of 17**: `the worktree is STILL THERE` and `nothing
+claimed otherwise`. Those two are the whole point of the file.
 
 ## A session's first output (DRY-79)
 

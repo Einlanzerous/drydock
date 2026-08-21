@@ -7,7 +7,7 @@ import {
   type Ticket,
   type TicketDetail,
 } from "../lib/tracker.js";
-import { removeWorktree, resolveRepoCwd } from "../lib/daemon.js";
+import { removeWorktree, resolveRepoCwd, WorktreeNotSafe } from "../lib/daemon.js";
 import type { PermissionMode, SessionVisibility } from "../lib/protocol.js";
 import { isMultiUser } from "../lib/auth.js";
 import { renderMarkdown } from "../lib/markdown.js";
@@ -150,6 +150,12 @@ const branch = ref("");
 const worktreePath = ref("");
 const worktreeExists = ref(false);
 const resetting = ref(false);
+// What the daemon refused to discard, in its own words (DRY-90). Reset used to
+// pass `--force` unconditionally, so this state could not arise: the button
+// deleted uncommitted work without mentioning it. Null while nothing has been
+// refused; a sentence once something has, which is what the second button is
+// asking about.
+const resetRefused = ref<string | null>(null);
 
 function defaultPrompt(t: Ticket): string {
   return `Work ticket ${t.key}. Its full description is attached as context — implement it.`;
@@ -185,6 +191,7 @@ watch(
     branch.value = "";
     worktreePath.value = "";
     worktreeExists.value = false;
+    resetRefused.value = null;
     auto.value = true;
     pos.value = null; // re-center each freshly opened ticket
     // The panel is a scroll container since DRY-74, and it isn't re-created
@@ -267,14 +274,21 @@ function sendAutonomous(): void {
 // Prune the existing worktree (DRY-15 "reset"): removes it + starts the branch
 // fresh on the next spawn. The agent's branch is kept; only the checkout is
 // dropped. Re-previews so the reuse badge clears.
-async function resetWorktree(): Promise<void> {
+async function resetWorktree(force = false): Promise<void> {
   if (resetting.value || !worktreePath.value) return;
   resetting.value = true;
   try {
-    await removeWorktree({ repo: props.ticket.repo, worktree: worktreePath.value });
+    await removeWorktree({ repo: props.ticket.repo, worktree: worktreePath.value, force });
+    resetRefused.value = null;
     await previewTarget(props.ticket);
-  } catch {
-    /* surfaced via the panel staying on the reuse state */
+  } catch (e) {
+    // A refusal is the one failure here worth words: the worktree is still
+    // there ON PURPOSE, and naming what is in it is the whole difference
+    // between a second button and a mystery. Every other failure leaves the
+    // panel on the reuse state, which is already the honest report.
+    if (e instanceof WorktreeNotSafe) {
+      resetRefused.value = e.safety?.reason ?? "uncommitted or unpushed work";
+    }
   } finally {
     resetting.value = false;
   }
@@ -341,8 +355,23 @@ async function resetWorktree(): Promise<void> {
         </div>
         <p v-if="worktreeExists" class="wt-reuse">
           A worktree already exists here — it'll be <strong>reused</strong> (its branch and any changes kept).
-          <button class="wt-reset" :disabled="resetting" @click="resetWorktree">
+          <button class="wt-reset" :disabled="resetting" @click="resetWorktree(false)">
             {{ resetting ? "Resetting…" : "Reset" }}
+          </button>
+        </p>
+        <!-- The daemon refused, and said why (DRY-90). Shown rather than
+             swallowed because Reset now KEEPS work by default: without this the
+             button would appear to do nothing at all. The second press is the
+             `--force` this route used to apply to every press. -->
+        <p v-if="resetRefused" class="wt-refused">
+          Kept — it has <strong>{{ resetRefused }}</strong>.
+          <button
+            class="wt-reset"
+            :disabled="resetting"
+            :title="`Discard ${resetRefused} in ${worktreePath}. The branch stays.`"
+            @click="resetWorktree(true)"
+          >
+            {{ resetting ? "Discarding…" : "Reset anyway" }}
           </button>
         </p>
       </template>
@@ -654,6 +683,18 @@ async function resetWorktree(): Promise<void> {
 }
 .mono {
   font-family: "JetBrains Mono", monospace;
+}
+.wt-refused {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0 0;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: #d6a651; /* the same amber .wt-warn uses — a kept thing, not an error */
+}
+.wt-refused strong {
+  color: #edc178;
 }
 .wt-reuse {
   display: flex;
