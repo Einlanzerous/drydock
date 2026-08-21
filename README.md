@@ -359,8 +359,11 @@ if you deliberately give them the same workspace name.
   fallback only; the daemon injects it automatically).
 - `deploy/` + [docs/deploy.md](docs/deploy.md) — prod: systemd user unit for
   the daemon, GHCR nginx image for the shell (DRY-19).
-- `CLAUDE.md` — agent/contributor onboarding: caveats, verification patterns,
-  tracker smoke-test checklist.
+- `CLAUDE.md` — agent/contributor onboarding: build, the load-bearing
+  invariants, the recurring traps, conventions.
+- [docs/decisions/](docs/decisions/) — one doc per ticket: the trap list that
+  ticket produced, including the tracker smoke-test checklist. Indexed from
+  `CLAUDE.md`; read the one for a surface before changing it.
 
 ## Ticket-driven sessions
 
@@ -444,7 +447,8 @@ project key when a ticket has none. Those slugs are what `DRYDOCK_REPOS_ROOT` /
 sidebar groups by them, so an `SRE` project splits into its services. A
 multi-component ticket prefers a component with a configured path override.
 Status: implemented but not yet exercised against a live Jira instance; the
-verification checklist is in [CLAUDE.md](CLAUDE.md).
+verification checklist is in [docs/decisions/](docs/decisions/), indexed from
+[CLAUDE.md](CLAUDE.md).
 
 **Scope the pull (DRY-30).** Unscoped, "all open tickets" against a corporate
 tracker is the whole instance. Two safeguards, both applied in the upstream
@@ -469,7 +473,9 @@ Tokens never reach the browser — the shell only ever calls the daemon's
 Daemon API auth (see the warning under **Run it**), Tauri packaging, per-repo
 theming, side-by-side diff review, embedded webview, Windows/ConPTY validation,
 daemon-restart journaling, gemini-cli approval fallback, automated tests (the
-curl checklist in [CLAUDE.md](CLAUDE.md) is the regression suite for now).
+curl checklist in
+[docs/decisions/tracker-provider-checklist.md](docs/decisions/tracker-provider-checklist.md)
+is the regression suite for now).
 Tracked under [IDEA-3]'s other children.
 
 ## Targets

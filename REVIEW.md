@@ -58,7 +58,10 @@ buries one Important finding under twelve nits has failed at its job.
 ## Always check
 
 Each of these is a rule the repo learned by breaking something. `CLAUDE.md` has
-the incidents; these are the review-time questions.
+the recurring ones and `docs/decisions/` has the per-ticket incident that taught
+each; these are the review-time questions. **When a diff touches a surface with a
+doc there, read that doc** — it is the trap list for exactly this change, and it
+is where the detail moved when `CLAUDE.md` was split (DRY-95).
 
 - **Does it end a session that is running?** Anything touching the supervisor,
   the sessions dir, `/kill`, the systemd unit, or a cleanup loop. The specific
@@ -103,10 +106,12 @@ the incidents; these are the review-time questions.
   recorded exceptions.
 - **`protocol.ts` mirrored.** CI catches drift, but a PR that changes one copy
   and not the other is still worth naming rather than leaving to a red check.
-- **Does the diff invalidate something CLAUDE.md states as true?** That file is
-  this repo's regression suite. A behaviour change that leaves a documented trap
-  describing the old behaviour is a 🔴, not a nit — the next person will test
-  against it.
+- **Does the diff invalidate something the docs state as true?** `CLAUDE.md`
+  plus `docs/decisions/` are this repo's regression suite — it has no automated
+  tests, so a documented trap is the only record that a bug was ever fixed. A
+  behaviour change that leaves one describing the old behaviour is a 🔴, not a
+  nit — the next person will test against it. Check the ticket's own doc in
+  `docs/decisions/`, not just `CLAUDE.md`; the latter now holds the summary.
 
 ## The verification bar
 
