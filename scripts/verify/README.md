@@ -1228,7 +1228,7 @@ What it holds down:
   ever sends.
 
 Discrimination (see [the section below](#making-sure-a-harness-still-discriminates),
-which carries the recipe): against the pre-fix tree it fails **8 of 16**. Round
+which carries the recipe): against the pre-fix tree it fails **8 of 17**. Round
 2's timing checks are not among them,
 honestly: widening the gap between the two spawns — which is what provokes the
 poll race it is testing — also pushes the old pane's 700ms write past the point
@@ -1360,7 +1360,7 @@ git checkout HEAD -- shell/src/components/TrackerSidebar.vue shell/src/lib/track
 #   git log --diff-filter=A --format=%h -- scripts/verify/prefill.mts
 git checkout <that commit>~1 -- daemon/src/session.ts shell/src/App.vue \
   shell/src/components/TerminalPane.vue shell/src/components/WorkspacePane.vue
-(cd daemon && node --import tsx ../scripts/verify/prefill.mts)     # expect 8 failures of 16
+(cd daemon && node --import tsx ../scripts/verify/prefill.mts)     # expect 8 failures of 17
 git checkout HEAD -- daemon/src/session.ts shell/src/App.vue \
   shell/src/components/TerminalPane.vue shell/src/components/WorkspacePane.vue
 ```

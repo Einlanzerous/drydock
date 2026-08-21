@@ -54,8 +54,17 @@ const SEED_CHUNK_BYTES = 64 * 1024;
  * isn't listening yet does not error.
  *
  * Hence: arm on the first PAINT, wait for output to go quiet, and never fire
- * inside the floor. The floor is what covers a host slow enough to split the
- * paint across a gap wider than the settle.
+ * inside the floor.
+ *
+ * THE FLOOR IS LOAD-BEARING, and for two cases rather than the obvious one. It
+ * covers a host slow enough to split the paint across a gap wider than the
+ * settle — and it is also the whole margin under a MISREAD paint, which is a
+ * thing that can genuinely happen: a chunk boundary through an escape sequence
+ * leaves printable residue on the far side (`\x1b[?20` + `04h` reads as a
+ * paint), so a badly-cut stream can arm this clock at the CLI's very first
+ * write. Measured from there the floor still clears the 1400ms the CLI needs,
+ * which is why 2000ms rather than something snugger: it is sized to be right
+ * when `paintsSomething` is wrong.
  */
 const INITIAL_INPUT_SETTLE_MS = 1_200;
 const INITIAL_INPUT_FLOOR_MS = 2_000;

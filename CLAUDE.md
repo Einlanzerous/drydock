@@ -907,6 +907,12 @@ essentially t=0 of the process.
    two-character forms) and asks whether anything is left. Note the two-character
    rule has to be a RANGE: spelled as a hand-listed set it misses `ESC 7`, which
    is the first thing Claude Code writes, and the stray `7` reads as a paint.
+   **It can still be fooled, by design rather than by oversight**: a chunk
+   boundary through an escape leaves printable residue behind it, so a stream
+   cut badly enough arms the clock at the CLI's first write. That is what the
+   floor is sized for — 2000ms measured from a paint that early still clears the
+   1400ms the CLI needs — so this predicate is allowed to be approximate and the
+   floor is not.
 3. **The RETURN is the only difference between the two paths, and it hangs off
    `autonomous`.** A supervised spawn pre-fills and stops; the reason is in
    `flushInitialInput` and it is not "the shell asked for it" — it is that
@@ -935,7 +941,7 @@ essentially t=0 of the process.
 
 Harness: `scripts/verify/prefill.mts` + `stub-cli.mts`, rig in its README — a
 browser, about a minute. Confirm it discriminates: against the unpatched tree it
-fails 8 of 16. The stub is a MODEL of a measured CLI, so when Claude Code is
+fails 8 of 17. The stub is a MODEL of a measured CLI, so when Claude Code is
 upgraded, re-measure rather than trusting it — spawn a real one through
 `POST /api/sessions` with `input`, and read `typing initial prompt`'s
 `paintedAfterMs` and `waitedMs` against the table above.

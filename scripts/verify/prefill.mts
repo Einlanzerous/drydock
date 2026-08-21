@@ -29,7 +29,18 @@ const TICKET = process.env.TICKET ?? "SWY-12";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;
+let ran = 0;
+/**
+ * Counts as well as reports, and the summary prints BOTH numbers.
+ *
+ * The discrimination note in the README is "8 of N failed against the pre-fix
+ * tree", and that is how a later reader tells "still discriminates" from "a
+ * round stopped running". A denominator anyone has to count by hand is one that
+ * can be wrong the day it is written — this one was (16, for 17 checks), and
+ * review caught it rather than a run.
+ */
 const check = (n: string, ok: boolean, d: Detail = "") => {
+  ran++;
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${n}${d ? ` — ${d}` : ""}`);
   if (!ok) failures++;
 };
@@ -225,5 +236,5 @@ console.log("\n4. the RETURN is what separates a run from a pre-fill");
   check("neither dropped anything", !`${supervised}${unattended}`.includes("[dropped"));
 }
 
-console.log(failures ? `\n${failures} FAILED\n` : "\nall checks passed\n");
+console.log(failures ? `\n${failures} of ${ran} FAILED\n` : `\nall ${ran} checks passed\n`);
 process.exit(failures ? 1 : 0);
