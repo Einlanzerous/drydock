@@ -1,7 +1,8 @@
 # A deploy keeps the agents (DRY-87)
 
-Everything above about sessions surviving a restart was true of the daemon
-PROCESS dying and false of the way prod is redeployed. `deploy/drydock-daemon.service`
+Everything in [dry-57-session-durability.md](dry-57-session-durability.md) about
+sessions surviving a restart was true of the daemon PROCESS dying and false of
+the way prod is redeployed. `deploy/drydock-daemon.service`
 set no `KillMode`, so systemd's default `control-group` applied: `systemctl --user
 restart` — the last line of `install-prod.sh`, so this is what EVERY deploy did —
 SIGTERMed every process in the unit's cgroup. Measured on the prod host

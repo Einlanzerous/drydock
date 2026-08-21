@@ -5,7 +5,7 @@
 #
 # This is a COMPILE gate, not a test suite: the repo has no automated tests, and
 # behaviour is still verified by driving the real app (the `verify` skill) and
-# the tracker curls in CLAUDE.md. A green tick here means "it builds", nothing
+# the tracker curls in docs/decisions/. A green tick here means "it builds", nothing
 # more — don't read it as "it works".
 name: pr-checks
 

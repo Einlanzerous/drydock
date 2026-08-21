@@ -1,7 +1,8 @@
 # Verifying a tracker provider (Switchyard / Jira)
 
 The tracker is host config; the browser only ever sees `/api/tracker/*`.
-Checklist, using the second-instance pattern above with the provider's env.
+Checklist, using the second-instance pattern in `CLAUDE.md` with the provider's
+env.
 
 **Turn the caches OFF for all of it** (DRY-72) — add
 `DRYDOCK_TRACKER_CACHE_MS=0 DRYDOCK_TRACKER_CHILD_STATS_CACHE_MS=0` to the env

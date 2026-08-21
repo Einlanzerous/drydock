@@ -30,8 +30,9 @@ exists gives `greet()` a `child` to report that isn't there yet.
    answered 201 and `/api/sessions` listed a healthy session throughout. A
    command that keeps printing also looks fine, because the socket catches it
    live; only output that STOPS distinguishes the two. That is why this survived
-   DRY-57 to DRY-79 and why the DRY-27 harness note above worked around it
-   instead of reporting it.
+   DRY-57 to DRY-79 and why the DRY-27 harness note in
+   [dry-27-auth-tiers.md](dry-27-auth-tiers.md) worked around it instead of
+   reporting it.
 4. **Seed the ring in `bind`, not in its callers.** The bug WAS a caller that
    forgot — `adopt` seeded, `spawn` didn't — so the fix that only adds the line
    back leaves the same hole open for a third construction path. `bind` is the

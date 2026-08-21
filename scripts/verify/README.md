@@ -1,6 +1,7 @@
 # Verification harnesses
 
-There are no automated tests in this repo; CLAUDE.md's curls are the regression
+There are no automated tests in this repo; the curls in `docs/decisions/` are
+the regression
 suite. These are the part of that suite the curls can't express.
 
 None of these RUNS in CI or on install. Since DRY-80 they are all
@@ -1514,7 +1515,7 @@ typed it` is that round's discriminating check, and it is there for that reason.
 **The stub is a model, and models go stale.** When Claude Code is upgraded,
 re-measure rather than trusting a green run: spawn a real one with `input` set
 and read `paintedAfterMs` / `waitedMs` off the daemon's `typing initial prompt`
-line against the table in CLAUDE.md. A stub whose numbers have drifted from the
+line against the table in `docs/decisions/dry-88-initial-prompt.md`. A stub whose numbers have drifted from the
 CLI's is a harness asserting against last year's terminal.
 
 ## Workspace store: why a proxy and not `docker stop`
@@ -1522,7 +1523,7 @@ CLI's is a harness asserting against last year's terminal.
 `docker stop` frees the port, so every connect fails instantly with
 ECONNREFUSED and every latency bug hides. A real partition is host-up,
 packets-dropped: the connect ACKs and nothing comes back. Three separate bugs
-were only visible under the latter — see CLAUDE.md, "Verifying workspace state".
+were only visible under the latter — see `docs/decisions/dry-28-workspace-state.md`.
 
 `proxy-tcp.mts` also **freezes connections it has already established** rather
 than only refusing new ones. The pool keeps clients idle for 30s, so a proxy

@@ -76,10 +76,10 @@ The traps, all of them found the hard way:
    against v2.1.220, an untrusted cwd prompted identically with the marker set
    and with it stripped, so that `env -u` was never buying a trust dialog. The
    leak itself is real, and costs a false negative for a different reason —
-   transcripts (below). Note the strip covers PTYs the SUPERVISOR spawns, so a
-   `claude` you run by hand from inside a session still inherits everything:
-   the re-measurement below, and anything under `scripts/verify/`, are outside
-   it.
+   transcripts (see [dry-59-inherited-markers.md](dry-59-inherited-markers.md)).
+   Note the strip covers PTYs the SUPERVISOR spawns, so a `claude` you run by
+   hand from inside a session still inherits everything: that re-measurement,
+   and anything under `scripts/verify/`, are outside it.
 
 Verify the tracker comment against **both** providers — it is the first thing
 to exercise `comment()` on either. Switchyard against a throwaway ticket; Jira

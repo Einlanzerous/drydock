@@ -203,7 +203,7 @@ restart it to test things.
   the daemon typecheck, the shell's `vue-tsc -b && vite build`, the `scripts/`
   typecheck (DRY-80), and a check that the two `protocol.ts` copies haven't
   drifted. There are no automated tests, so green means "it compiles" —
-  everything above in this file is still verified by hand. CI installs with
+  everything in this file and in `docs/decisions/` is still verified by hand. CI installs with
   `--ignore-scripts` (no node-pty native build, no Playwright browser download)
   because nothing there spawns a PTY or opens a page. Both checks are
   **required** on `main` (ruleset "main: compile gate"), with admin bypass — so
