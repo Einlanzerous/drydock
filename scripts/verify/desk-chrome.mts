@@ -287,7 +287,7 @@ console.log("(a) the two spawn buttons are gone, and the palette does their job"
   await sleep(400);
   check("⇧↵ no longer spawns anything", spawns.length === 0, JSON.stringify(spawns));
 
-  // The pinned rows are searchable, which is what replaces the chord.
+  // The pinned rows are searchable at all, which is what replaces the chord.
   await ensurePalette(page);
   await page.fill(".palette .search input", "workspace");
   await sleep(200);
@@ -302,6 +302,45 @@ console.log("(a) the two spawn buttons are gone, and the palette does their job"
   );
   check("and does not claim nothing matches", !filtered.empty);
 
+  // The keyboard gesture, which is the one the chord was removed in favour of
+  // and the one three documents now assert works. It has to be checked with a
+  // TICKET matching the same query, because the selection rule reads both — and
+  // `de` is the only string this fixture has that does: it is inside "claude"
+  // and inside DRY-5's "…when hidden". Nothing in the plain stub set collides
+  // with `shell`, `claude`, `workspace` or `wo`, which is exactly why a check
+  // written with the obvious query passed against the bug.
+  await ensurePalette(page);
+  await page.fill(".palette .search input", "de");
+  await sleep(250);
+  const aimed = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll(".palette .row")];
+    const active = rows.findIndex((r) => r.classList.contains("active"));
+    return {
+      activeIsPinned: active >= 0 && rows[active].classList.contains("pinrow"),
+      pinned: rows.filter((r) => r.classList.contains("pinrow")).length,
+      tickets: rows.filter((r) => !r.classList.contains("pinrow")).length,
+    };
+  });
+  check(
+    "a query aimed at a pinned row highlights it, with a ticket matching too",
+    aimed.activeIsPinned && aimed.pinned === 1 && aimed.tickets > 0,
+    JSON.stringify(aimed),
+  );
+  spawns.length = 0;
+  await page.keyboard.press("Enter");
+  await waitFor(async () => spawns.length >= 1, 5000);
+  check(
+    // Under the bug this is silent rather than wrong-looking: ↵ opens a ticket
+    // panel, so no spawn is issued at all and the palette closes as if it had
+    // worked.
+    "and ↵ spawns it rather than opening a ticket",
+    spawns.length === 1 && spawns[0].command === "claude" && spawns[0].title === "claude-code",
+    JSON.stringify(spawns),
+  );
+
+  spawns.length = 0;
+  await ensurePalette(page);
+  await page.fill(".palette .search input", "workspace");
   await tryClick(page, ".palette .row.pinrow");
   // WAITED for, not read straight after the click: a workspace is two POSTs and
   // the second is issued from the first one's `.then`, so reading immediately
@@ -438,7 +477,13 @@ console.log("\n(c) key=value pills replace the four selects");
   // DRY-72). Measured upstream, since the daemon's cache would hide a re-pull.
   const spent = await stubState();
   check(
-    "no pill, and no keystroke, cost the tracker a request",
+    // Named for what it measures. `search` is excluded and has to be — the terms
+    // typed above are ≥ MIN_SEARCH and DO reach `/api/tracker/search` — so
+    // calling this "cost the tracker a request" claimed something this ticket
+    // made false. The seam is narrower than it was: a pill is instant and local,
+    // a keystroke in that box is a cheap debounced lookup, and a scope change is
+    // the 5.7-6s pull. Only the last one is what must not fire here.
+    "no pill, and no keystroke, re-pulled the list",
     spent.list === 0 && spent.children === 0 && spent.epicList === 0,
     `list=${spent.list} children=${spent.children} epicList=${spent.epicList}`,
   );
@@ -470,7 +515,7 @@ console.log("\n(d) a filter can only match what was pulled, and says so");
   await type(page, "assignee=Ashley Dodson");
   await page.keyboard.press("Enter");
   await sleep(400);
-  const s = await snap(page);
+  let s = await snap(page);
   check(
     "free text still becomes a pill",
     s.pills.join("|") === "assigneeAshley Dodson",
@@ -481,6 +526,34 @@ console.log("\n(d) a filter can only match what was pulled, and says so");
     "and the empty sidebar says which it is",
     !!s.emptyWhy && s.emptyWhy.includes("assignee=Ashley Dodson"),
     s.emptyWhy ?? "no explanation at all",
+  );
+
+  // The other direction, and the one that is a lie rather than a silence: a
+  // KNOWN pill emptying the list while the tracker has the term perfectly well.
+  // The line was gated on `elsewhere`, which is deliberately what the pull does
+  // NOT already hold — so a match the pull DOES hold drops out of it and the
+  // sidebar states the tracker has nothing, about a loaded, open ticket one
+  // pill away from the screen.
+  await tryClick(page, ".sidebar .searchbox .clear");
+  await type(page, "status=Blocked");
+  await page.keyboard.press("Enter");
+  await type(page, "Coalesce");
+  await waitFor(async () => {
+    const t = await snap(page);
+    return t.emptyHead !== null && t.foundNote === null;
+  });
+  s = await snap(page);
+  check(
+    // The empty block has to BE rendering, or "no explanation" is satisfied by
+    // there being nothing to explain.
+    "a pill hiding a loaded match empties the list",
+    s.emptyHead !== null && s.pills.length === 1,
+    `head=${s.emptyHead ?? "none"} pills=${s.pills.join("|") || "none"}`,
+  );
+  check(
+    "and the sidebar does NOT claim the tracker has nothing for it",
+    s.emptyWhy === null,
+    s.emptyWhy ?? "",
   );
   await close();
 }

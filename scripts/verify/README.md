@@ -481,19 +481,38 @@ git show main:shell/src/lib/tracker.ts > shell/src/lib/tracker.ts
 `tracker.ts` is in that list because the deadline on `searchTickets` lives there,
 and it is one of the two things section (f) is for.
 
-Expect **33 failures of 43**. Restore with `git checkout -- shell/` — the
+Expect **36 failures of 47**. Restore with `git checkout -- shell/` — the
 redirects above write the worktree without staging, unlike
 `git checkout <ref> -- path`, which stages the revert.
 
-Three checks pass either way on purpose and are guards rather than
-discriminators: the switcher not overlapping the controls (true of the old
-layout too, which drifted without colliding), bare text still filtering the
-loaded list, and no keystroke costing the tracker a request. **Three others were
-vacuous when first written and had to be tightened**, which is the failure mode
-this whole directory is about: "no pills afterwards" is satisfied by a bar that
-never had one, "not merged into the repo groups" by nothing having been found at
-all, and "not seven queries" by a shell that never searches. Each now asserts
-the state BEFORE as well.
+**Eleven checks pass either way, and they are two different kinds — don't read
+the second as slack.** Some are guards on things that must NOT change: the
+switcher not overlapping the controls (true of the old layout too, which drifted
+without colliding), bare text still filtering the loaded list, the scope chips
+and the backlog switch surviving the redesign, and `no pill, and no keystroke,
+re-pulled the list`. The rest guard a REVIEW FINDING in a feature `main` doesn't
+have at all — `and the error note is gone with it`, `and the sidebar does NOT
+claim the tracker has nothing for it` — so they cannot discriminate against the
+pre-ticket tree and were each confirmed against the specific bug instead, by
+reinstating it. That is the only honest way to check a fix to a fix.
+
+**Six checks were vacuous when first written and had to be tightened**, which is
+the failure mode this whole directory is about: "no pills afterwards" is
+satisfied by a bar that never had one, "not merged into the repo groups" by
+nothing having been found at all, "not seven queries" by a shell that never
+searches, and the wedge probe by anything that rescues the hung request. The
+pinned-row selection check is the sharpest example — see below.
+
+**The palette's fixture cannot collide by accident, and that hid a real bug for
+two rounds.** None of the five stub titles contains `shell`, `claude`,
+`workspace` or `wo`, so a check typing a pinned row's name sees no ticket
+matching the same query — and the selection rule reads BOTH. The original check
+then also *clicked* the row rather than pressing `↵`, which is the one gesture
+the `⇧↵` removal was justified by. `de` is the only string in this fixture
+inside both a pinned row's terms ("claude") and a loaded ticket's title (DRY-5,
+"…when hidden"), which is why that check uses a two-letter query that looks
+arbitrary. Same shape as DRY-83's "keep epic rows on screen or it proves
+nothing": the row you are NOT asserting on has to be there.
 
 **Section (f) was added after review**, which found two bugs by reading a path
 that 35 green checks had never once executed — a retry that could never visibly
@@ -1465,7 +1484,7 @@ git checkout HEAD -- daemon/src/session.ts shell/src/App.vue \
 #   git log --diff-filter=A --format=%h -- scripts/verify/desk-chrome.mts
 git checkout <that commit>~1 -- shell/src/App.vue shell/src/lib/tracker.ts \
   shell/src/components/QuickLaunch.vue shell/src/components/TrackerSidebar.vue
-(cd daemon && node --import tsx ../scripts/verify/desk-chrome.mts)  # expect 33 failures of 43
+(cd daemon && node --import tsx ../scripts/verify/desk-chrome.mts)  # expect 36 failures of 47
 git checkout HEAD -- shell/src/App.vue shell/src/lib/tracker.ts \
   shell/src/components/QuickLaunch.vue shell/src/components/TrackerSidebar.vue
 ```

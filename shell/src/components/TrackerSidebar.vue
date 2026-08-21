@@ -1304,7 +1304,13 @@ const searchScope = computed(() => found.value.scope.join(", "));
             ><template v-if="i">, </template><b>{{ pill.key }}={{ pill.label }}</b></template>.
           It may be in a project this daemon isn't pulling, or in the backlog.
         </p>
-        <p v-else-if="found.done && !found.error && !elsewhere.length && term" class="empty-why">
+        <!-- `found.rows`, NOT `elsewhere`. `elsewhere` is deliberately what the
+             pull doesn't already have (see the computed), and reading it here
+             makes this sentence claim the TRACKER has nothing whenever a pill is
+             what emptied the list: `status=Blocked` plus "Coalesce" finds DRY-2
+             perfectly well, drops it from `elsewhere` because the pull holds it,
+             and the sidebar then denies it exists. Two different statements. -->
+        <p v-else-if="found.done && !found.error && !found.rows.length && term" class="empty-why">
           {{ outageSubject }} has nothing for “{{ term }}” in {{ searchScope || "the projects it searches" }} either.
         </p>
       </div>

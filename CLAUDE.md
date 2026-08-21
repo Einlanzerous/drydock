@@ -1606,7 +1606,21 @@ is the argument for reading a deviation closely rather than for refusing it:
    object for the same reason, so patching isn't available. The retry also has
    to raise `loading` itself — it is the one caller that doesn't come through
    `watch(term)`, so without it the click changes nothing on screen.
-14. **"Is a pill being typed" is a question about the KEY, not about `=`.**
+14. **The highlight after a keystroke must read whether a PINNED row matched,
+   not only whether a ticket did.** Asking only about tickets sends the
+   selection to the first ticket the moment a query matches both — which is most
+   queries against a real tracker, where "wo" is in 18 of this project's 91
+   titles — so the pinned row sits above it greyed and `↵` opens a ticket panel.
+   That is the gesture `⇧↵` was removed in favour of, and README, CLAUDE.md and
+   the component comment all asserted it worked. A query that NARROWED the
+   pinned set is aimed at one of them; anything else keeps "Ctrl+K, ↵ on a
+   ticket".
+15. **"The tracker has nothing for X" is a different claim from "`elsewhere` is
+   empty".** `elsewhere` is deliberately what the pull does NOT already hold, so
+   a match the pull DOES hold drops out of it — and a known pill emptying the
+   list then had the sidebar deny a loaded, open ticket exists. Gate that
+   sentence on the search's own `rows`.
+16. **"Is a pill being typed" is a question about the KEY, not about `=`.**
    Gating `term` on the character disabled the box for any term containing one
    — a title with `=` in it, a mistyped `proj=` — and disabled it invisibly: no
    local filter, no lookup, `filtering` false so no ✕, and `parsePill` returning
@@ -1615,11 +1629,21 @@ is the argument for reading a deviation closely rather than for refusing it:
 
 Harness: `scripts/verify/desk-chrome.mts`, rig in its README — the stub
 tracker's rig, a browser, about ninety seconds. Confirm it discriminates:
-against the unpatched shell it fails **33 of 43**. Run `epic-children.mts`,
+against the unpatched shell it fails **36 of 47**. Run `epic-children.mts`,
 `sidebar.mts` and `backlog-toggle.mts` beside it — they drive
 `.sidebar .searchbox input` and the scope row this ticket rebuilt around them.
 
-**Section (f) exists because review found both of those bugs by reading, in a
+**Two review rounds found four bugs by READING, in code that was green at the
+time — and each was invisible to the harness for a reason worth keeping.** The
+search path had never been run failing (hence section (f)). And the palette's
+selection rule could not collide in this fixture: none of the five stub titles
+contains `shell`, `claude`, `workspace` or `wo`, so the obvious query proved
+nothing, and the one check that typed a pinned row's name then CLICKED it —
+the one gesture not under discussion. `de` is the only string here inside both
+a pinned row's terms and a loaded ticket's title, which is why an odd-looking
+two-letter query is the one that check uses.
+
+**Section (f) exists because review found two of those bugs by reading, in a
 path 35 green checks had never once run.** A search that is only ever tested
 when it succeeds is a search whose recovery has never been executed. Two things
 about that round are worth keeping, because the first cut of each passed against

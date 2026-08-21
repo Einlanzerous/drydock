@@ -112,7 +112,24 @@ watch(
     }
   },
 );
-watch(query, () => (idx.value = matches.value.length ? pinned.value.length : 0));
+/**
+ * Where the highlight lands after a keystroke.
+ *
+ * The first cut asked only whether any TICKET matched, so the moment a query
+ * matched both — which is most queries against a real tracker, where "wo" is in
+ * 18 of this project's 91 titles — the highlight went to the first ticket and
+ * the pinned row sat above it, greyed. `↵` then opened a ticket panel. That is
+ * the exact gesture this ticket removed the `⇧↵` chord in favour of, and three
+ * documents asserted it worked.
+ *
+ * A query that NARROWED the pinned rows is a query aimed at one of them, so it
+ * gets the top row. A query that left all three (or none) is aimed at the
+ * tickets, and the "Ctrl+K, ↵ on a ticket" flow is unchanged.
+ */
+watch(query, () => {
+  if (pinned.value.length < PINNED.length) idx.value = 0;
+  else idx.value = matches.value.length ? PINNED.length : 0;
+});
 
 /** Spawn or open whatever is at row `i`. */
 function activate(i: number): void {
