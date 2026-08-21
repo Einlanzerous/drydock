@@ -12,6 +12,8 @@
 #   DRYDOCK_PROD_REPO         override the clone source (default: this repo's origin)
 #   DRYDOCK_DEPLOY_PRINT_UNIT print the unit this host would get, and exit (DRY-87)
 #   DRYDOCK_DEPLOY_PROBE      probe the configured daemon, and exit (DRY-81)
+#   DRYDOCK_DEPLOY_PROBE_BUDGET  seconds to wait for the daemon (default 60; for
+#                             the harness — a deploy should not need it)
 #   DRYDOCK_DEPLOY_DETACHED   set by the script on itself; see the relaunch below
 set -euo pipefail
 
@@ -176,8 +178,25 @@ prod_port() {
 # (a wedged event loop, a stale nginx in front of it), and the old probe had no
 # timeout at all — so that case hung the deploy forever with nothing on stdout.
 probe_daemon() {
-  local port="$1" out="" code="" body=""
-  for _ in 1 2 3 4 5; do
+  local port="$1" out="" code="" body="" budget deadline
+  # A BUDGET IN SECONDS, not a count of attempts, and 60 rather than 5. The loop
+  # was `for _ in 1 2 3 4 5; do sleep 1`, and a refused loopback connect returns
+  # instantly, so a daemon that has not bound yet got five seconds flat. Prod's
+  # boot reconciles its sessions BEFORE `listen()` (DRY-57), so time-to-bind
+  # grows with the number of live supervisors on the host — and a host with
+  # enough agents to push it past five seconds gets this ticket's sentence
+  # again, reached through a slow boot instead of through auth (review). "Five
+  # attempts" reads generous in a way "five seconds" does not.
+  #
+  # The knob is for the harness, which has six cases that are SUPPOSED to fail
+  # and would otherwise wait out the full budget each: the right default here is
+  # a terrible test, same as DRY-49's timeout and DRY-60's sweep delay. A deploy
+  # should never set it. 0 is one attempt, which is a coherent thing to ask for
+  # rather than an off switch, so no msOrOff.
+  budget="${DRYDOCK_DEPLOY_PROBE_BUDGET:-60}"
+  case "$budget" in ''|*[!0-9]*) budget=60 ;; esac
+  deadline=$((SECONDS + budget))
+  while :; do
     sleep 1
     # `-w` appends the status as the last three characters of stdout — always
     # three, `000` when nothing answered — so one curl yields both halves
@@ -189,6 +208,7 @@ probe_daemon() {
       200) case "$body" in *'"sessions"'*) printf '%s\n' "$code"; return 0 ;; esac ;;
       401) case "$body" in *'"authRequired"'*) printf '%s\n' "$code"; return 0 ;; esac ;;
     esac
+    [ "$SECONDS" -lt "$deadline" ] || break
   done
   printf '%s\n' "${code:-000}"
   return 1
@@ -322,7 +342,11 @@ systemctl --user restart drydock-daemon.service
 
 PORT="$(prod_port)"
 if CODE="$(probe_daemon "$PORT")"; then
-  echo "drydock prod daemon healthy on :$PORT ($(git -C "$PROD_DIR" rev-parse --short HEAD), ref '$REF')"
+  # HTTP $CODE is already in hand, and it is worth printing: on a host that has
+  # turned auth on, a `healthy … (HTTP 200)` where 401 was expected is the
+  # visible tell that DRYDOCK_AUTH_PASSWORD has fallen out of the prod .env and
+  # the deploy has just reported a daemon that is up AND wide open (review).
+  echo "drydock prod daemon healthy on :$PORT (HTTP $CODE, $(git -C "$PROD_DIR" rev-parse --short HEAD), ref '$REF')"
   echo "note: to survive logout/reboot, enable lingering once: sudo loginctl enable-linger $USER"
   exit 0
 fi

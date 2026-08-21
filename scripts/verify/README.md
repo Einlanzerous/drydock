@@ -1213,9 +1213,14 @@ Five claims, and the middle ones are what a naive fix gets wrong:
   answering 404, 503 **and 200** must all fail, naming what they saw. This is a
   deploy-path case, not a lab one — if something is already holding `:4318` the
   daemon loses the bind and exits, and the squatter is what answers.
-- **The probe cannot hang the deploy.** It had no timeout at all, so a listener
-  that accepts and never answers waited forever with nothing on stdout. A
-  black-hole listener must give up, and the assertion is on wall-clock.
+- **The probe cannot hang the deploy, and cannot give up on it either.** It had
+  no timeout at all, so a listener that accepts and never answers waited forever
+  with nothing on stdout; `-m 5` bounds an attempt, and a black-hole listener
+  must give up, asserted on wall-clock. The budget for the whole poll went the
+  other way — it was five one-second sleeps, and prod reconciles its sessions
+  before it binds (DRY-57), so a host with enough live agents gets this ticket's
+  sentence again through a slow boot. Sixty seconds now, with
+  `DRYDOCK_DEPLOY_PROBE_BUDGET` for this harness's six failing cases.
 - **The probed path is the deploy's path.** Static reads of the script: one
   curl, no `-f`, and the deploy tail calling `probe_daemon`. They exist to catch
   a second, differently-spelled curl being added to the tail — which is the
@@ -1239,27 +1244,36 @@ answerer.
 
 ### Making sure this one still discriminates
 
-Ten mutations, all measured, each failing a different section:
+Twelve mutations, all measured, each failing a different section:
 
 | mutation | fails |
 |---|---|
-| accept only `200` (the ticket's bug) | **3 of 30**, all in "auth on" |
-| accept any HTTP response (the overcorrection) | **8 of 30**, every squatter check |
-| accept on the status code alone, body unread | **2 of 30**, the 200 squatter |
-| drop `-m 5` from the curl (unbounded) | **2 of 30**, the black-hole pair |
-| put `-f` back on the curl (either line) | **4 of 30**, "auth on" plus the static check |
-| `prod_port` without its quote/space trim | **2 of 30**, the quoted and spaced `.env` |
-| `prod_port` back to `tail -1` | **1 of 30**, the duplicate-key `.env` |
-| `prod_port` back to a bare `^KEY=` anchor | **2 of 30**, the indented and spaced `.env` |
-| drop `probe_failure`'s 5xx arm | **2 of 30**, the 503 and 500 squatters |
-| a journal hint on every arm | **2 of 30**, the 404 and 200 squatters |
+| accept only `200` (the ticket's bug) | **3 of 34**, all in "auth on" |
+| accept any HTTP response (the overcorrection) | **8 of 34**, every squatter check |
+| accept on the status code alone, body unread | **2 of 34**, the 200 squatter |
+| drop `-m 5` from the curl (unbounded) | **2 of 34**, the black-hole pair |
+| put `-f` back on the curl (either line) | **4 of 34**, "auth on" plus the static check |
+| `prod_port` without its quote/space trim | **2 of 34**, the quoted and spaced `.env` |
+| `prod_port` back to `tail -1` | **1 of 34**, the duplicate-key `.env` |
+| `prod_port` back to a bare `^KEY=` anchor | **2 of 34**, the indented and spaced `.env` |
+| drop `probe_failure`'s 5xx arm | **2 of 34**, the 503 and 500 squatters |
+| a journal hint on every arm | **2 of 34**, the 404 and 200 squatters |
+| the probe budget back to five seconds | **1 of 34**, the static budget check |
+| the deploy tail with its own inline port lookup | **2 of 34**, two static checks |
 
-The last two are a **pair with disjoint failures** — the 5xx squatters assert the
-journal hint is present, the 404 and 200 ones assert it is absent — so each
-mutation leaves the other's checks green. Review caught this table naming the
-wrong pair, which is worse than a missing row: the table is what the next person
-runs to decide whether this file still works, and two unexpected failures read
-as the mutation having hit something else.
+The last two rows exist because everything else here drives
+`DRYDOCK_DEPLOY_PROBE`, which calls `prod_port`, `probe_daemon` and
+`probe_failure` directly — so a deploy tail that grew its own inline `grep …
+| tail -1` would leave every behavioural check green. The static block binds all
+three, and asserts the default budget rather than waiting it out, since the
+failing probes here run at a turned-down one.
+
+The journal pair is a **pair with disjoint failures** — the 5xx squatters assert
+the hint is present, the 404 and 200 ones assert it is absent — so each mutation
+leaves the other's checks green. Review caught this table naming the wrong pair,
+which is worse than a missing row: the table is what the next person runs to
+decide whether this file still works, and two unexpected failures read as the
+mutation having hit something else.
 
 The `^KEY=` row is the one to read if you are reworking the `.env` checks. It
 failed **0 of 30** when those checks only asserted `exit 0`: `prod_port` falls

@@ -156,6 +156,12 @@ Ask the probe on its own, without deploying anything:
 DRYDOCK_DEPLOY_PROBE=1 deploy/install-prod.sh   # probes the configured port, exits
 ```
 
+The deploy gives the restarted daemon 60 seconds to answer, which matters on a
+host with many live agents: prod reconciles its sessions before it binds
+(DRY-57), so time-to-bind grows with the number of supervisors.
+`DRYDOCK_DEPLOY_PROBE_BUDGET` overrides it in seconds and exists for the
+verification harness — a deploy should not need it.
+
 It resolves the port from the prod `.env` the same way the deploy does — quoted
 values and all, since that file is hand-edited — and prints what it saw.
 

@@ -43,28 +43,30 @@
 // they are what catches a second, differently-spelled curl being added to the
 // tail.
 //
-// CONFIRM IT DISCRIMINATES. Ten mutations, each measured rather than counted by
-// hand, and each failing a different section:
+// CONFIRM IT DISCRIMINATES. Twelve mutations, each measured rather than counted
+// by hand, and each failing a different section:
 //
-//   accept only 200 (the ticket's bug)          3 of 30, all in "auth on"
-//   accept any HTTP response (the overcorrect)  8 of 30, every squatter check
-//   accept on the status code alone             2 of 30, the 200 squatter
-//   drop `-m 5` from the curl (unbounded)       2 of 30, the black-hole pair
-//   put `-f` back on the curl                   4 of 30, "auth on" + the static
+//   accept only 200 (the ticket's bug)          3 of 34, all in "auth on"
+//   accept any HTTP response (the overcorrect)  8 of 34, every squatter check
+//   accept on the status code alone             2 of 34, the 200 squatter
+//   drop `-m 5` from the curl (unbounded)       2 of 34, the black-hole pair
+//   put `-f` back on the curl                   4 of 34, "auth on" + the static
 //     …and the same with the flag on the curl's SECOND line, which is the
 //     mutation the static check was blind to before the fold (review)
-//   `prod_port` without its quote/space trim    2 of 30, the quoted + spaced .env
-//   `prod_port` back to `tail -1`               1 of 30, the duplicate-key .env
-//   `prod_port` back to a bare `^KEY=` anchor   2 of 30, the indented + spaced .env
-//   drop `probe_failure`'s 5xx arm              2 of 30, the 503 and 500 squatters
-//   a journal hint on EVERY arm                 2 of 30, the 404 and 200 squatters
+//   `prod_port` without its quote/space trim    2 of 34, the quoted + spaced .env
+//   `prod_port` back to `tail -1`               1 of 34, the duplicate-key .env
+//   `prod_port` back to a bare `^KEY=` anchor   2 of 34, the indented + spaced .env
+//   drop `probe_failure`'s 5xx arm              2 of 34, the 503 and 500 squatters
+//   a journal hint on EVERY arm                 2 of 34, the 404 and 200 squatters
+//   the probe budget back to five seconds       1 of 34, the static budget check
+//   the tail with its own inline port lookup    2 of 34, the two static ones
 //
-// The last two are a PAIR and their failures are disjoint: the 5xx squatters
-// assert the journal hint is there, the 404 and 200 ones assert it is not, so a
-// mutation that adds the hint everywhere leaves the 5xx checks green and vice
-// versa. Review caught this table naming the wrong pair — the count was right
-// and the attribution was not, which is worse than an absent row, because the
-// table is what the next person runs to see whether this file still works.
+// The 5xx pair is worth a note: their failures are DISJOINT, because the 5xx
+// squatters assert the journal hint is there and the 404/200 ones assert it is
+// not, so each mutation leaves the other's checks green. Review caught this
+// table naming the wrong pair — the count was right and the attribution was
+// not, which is worse than an absent row, because the table is what the next
+// person runs to see whether this file still works.
 //
 // RIG: no browser, no database, no systemd, no second terminal — this file owns
 // its daemons.
@@ -89,6 +91,8 @@ const PROD_DIR = path.join(SCRATCH, "prod");
 const STUB_BIN = path.join(SCRATCH, "bin");
 const STUB_MARKER = path.join(SCRATCH, "stubs-invoked");
 const PASSWORD = "dry81-throwaway-password";
+/** Seconds given to the probes that are meant to fail. See `probe`. */
+const FAIL_BUDGET = 4;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;
@@ -150,8 +154,9 @@ interface Run {
  * checkout older than DRY-87. They record that they ran; the last check in this
  * file asserts none of them ever did.
  */
-function probe(prodDir: string, timeoutMs = 90_000): Promise<Run> {
+function probe(prodDir: string, opts: { budget?: number } = {}): Promise<Run> {
   const started = Date.now();
+  const timeoutMs = 90_000;
   return new Promise((resolve) => {
     const child = spawn("bash", [INSTALLER], {
       env: {
@@ -159,6 +164,16 @@ function probe(prodDir: string, timeoutMs = 90_000): Promise<Run> {
         PATH: `${STUB_BIN}:${process.env.PATH ?? ""}`,
         DRYDOCK_DEPLOY_PROBE: "1",
         DRYDOCK_PROD_DIR: prodDir,
+        // The budget is turned down for the cases that are SUPPOSED to fail —
+        // six of them, each of which would otherwise wait out the script's real
+        // 60s. The SUCCESS cases deliberately leave it alone: they answer on
+        // the first attempt, so they run at the default and this file never
+        // asserts anything about a budget it set itself. Same reasoning as
+        // DRY-49's timeout and DRY-60's sweep delay; the default is checked
+        // statically below rather than waited out.
+        ...(opts.budget === undefined
+          ? {}
+          : { DRYDOCK_DEPLOY_PROBE_BUDGET: String(opts.budget) }),
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -430,7 +445,7 @@ async function main(): Promise<void> {
   // daemon, still running: only the .env moves.
   const idle = await freePort();
   const wrong = (await bindable(idle))
-    ? await probe(prodDirOn(idle, path.join(SCRATCH, "prod-wrong")))
+    ? await probe(prodDirOn(idle, path.join(SCRATCH, "prod-wrong")), { budget: FAIL_BUDGET })
     : null;
   check(
     "a .env naming another port probes THAT port",
@@ -481,7 +496,7 @@ async function main(): Promise<void> {
   // --- 3. it still fails when it should ---------------------------------------
   console.log("\nAnd still fails when the daemon really is missing");
   await stopDaemon();
-  const dead = await probe(prodDirOn(PORT));
+  const dead = await probe(prodDirOn(PORT), { budget: FAIL_BUDGET });
   check("nothing listening -> the probe fails", dead.code === 1, `exit ${dead.code}`);
   check(
     "and says there was no response at all",
@@ -530,7 +545,7 @@ async function main(): Promise<void> {
   ];
   for (const sq of squatters) {
     const server = await squatter(sq.code, sq.body);
-    const squat = await probe(prodDirOn(PORT));
+    const squat = await probe(prodDirOn(PORT), { budget: FAIL_BUDGET });
     await closeServer(server);
     check(
       `${sq.what} answering ${sq.code} -> the probe fails`,
@@ -539,7 +554,10 @@ async function main(): Promise<void> {
     );
     check(
       `and names the ${sq.code}, pointing ${sq.journal ? "at the journal" : "at the port"}`,
-      new RegExp(`${sq.code}`).test(squat.err) &&
+      // Anchored to the message, not a bare digit match: the line contains
+      // `:${PORT}` twice and PORT is an advertised override, so at PORT=5031
+      // the port's own digits satisfied a `/503/` test (review).
+      new RegExp(`answered HTTP ${sq.code}\\b`).test(squat.err) &&
         /journalctl/.test(squat.err) === sq.journal &&
         (sq.journal || /not as a Drydock daemon/.test(squat.err)) &&
         squat.err.includes(`:${PORT}`),
@@ -550,7 +568,7 @@ async function main(): Promise<void> {
   // --- 4. and cannot hang the deploy ------------------------------------------
   console.log("\nAnd is bounded when the port accepts but never answers");
   const hole = await blackHole();
-  const hung = await probe(prodDirOn(PORT));
+  const hung = await probe(prodDirOn(PORT), { budget: FAIL_BUDGET });
   await closeServer(hole);
   // Without `-m` on the curl this never returns, and the harness's own 90s
   // timer is what ends it — which shows up as a SIGKILL and no status, hence
@@ -560,7 +578,14 @@ async function main(): Promise<void> {
     hung.code === 1 && hung.signal === null,
     `exit ${hung.code} signal ${hung.signal}`,
   );
-  check("and does so in under a minute", hung.ms < 60_000, `${(hung.ms / 1000).toFixed(1)}s`);
+  // Budget plus one `-m`, plus slack. Without `-m` the first attempt never
+  // returns at all, so the harness's own 90s timer is what ends it — the
+  // mutation, and it fails both of these.
+  check(
+    "and does so within its budget",
+    hung.ms < (FAIL_BUDGET + 5) * 1000 + 5_000,
+    `${(hung.ms / 1000).toFixed(1)}s, budget ${FAIL_BUDGET}s`,
+  );
 
   // --- 5. the mode is the deploy's own probe ----------------------------------
   //
@@ -598,11 +623,33 @@ async function main(): Promise<void> {
     !/curl[^\n]*(\s-[a-zA-Z]*f[a-zA-Z]*\b|--fail)/.test(folded),
     (folded.match(/curl[^\n]*/) ?? [""])[0].trim(),
   );
+  // All THREE functions, not just the probe. Every other check in this file
+  // drives DRYDOCK_DEPLOY_PROBE, which calls them directly — so a deploy tail
+  // that grew its own inline `grep … | tail -1`, or its own one-hint-for-
+  // everything failure line, would leave all of them green. The port lookup is
+  // literally the line this ticket replaced (review).
   check(
     "the deploy tail calls probe_daemon",
     /if\s+CODE="\$\(probe_daemon\s+"\$PORT"\)"/.test(live),
     (live.match(/^.*probe_daemon "\$PORT".*$/m) ?? [""])[0].trim(),
   );
+  check(
+    "and prod_port",
+    /^PORT="\$\(prod_port\)"$/m.test(live),
+    (live.match(/^PORT=.*$/m) ?? [""])[0].trim(),
+  );
+  check(
+    "and probe_failure",
+    /probe_failure "\$CODE" "\$PORT"/.test(live),
+    (live.match(/^.*probe_failure "\$CODE".*$/m) ?? [""])[0].trim(),
+  );
+  const lookups = live.match(/grep -E '\^[^']*DRYDOCK_PORT/g) ?? [];
+  check("and the .env is read in exactly one place", lookups.length === 1, `${lookups.length} found`);
+  // The generous default is asserted rather than waited out: every failing
+  // probe above runs at FAIL_BUDGET, so nothing else here would notice the
+  // script's own budget dropping back to five seconds.
+  const budget = Number((live.match(/DRYDOCK_DEPLOY_PROBE_BUDGET:-(\d+)/) ?? [])[1] ?? 0);
+  check("the default probe budget is generous", budget >= 30, `${budget}s`);
 
   // Probing restarts nothing. If the mode ever stops exiting, the script runs
   // on into a clone, an install and a `systemctl --user restart
