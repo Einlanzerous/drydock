@@ -195,6 +195,29 @@ same image works for any deployment:
   without baked hostnames.
 - `DRYDOCK_DAEMON_URL` — full URL for a daemon somewhere else entirely.
 
+### Which commit is running
+
+The published image carries `org.opencontainers.image.revision` (the commit it
+was built from) and `org.opencontainers.image.source` (DRY-91):
+
+```sh
+docker inspect -f '{{index .Config.Labels "org.opencontainers.image.revision"}}' \
+  ghcr.io/einlanzerous/drydock/shell:latest
+```
+
+These labels are the *only* way to ask this image what it is — the daemon runs
+on the host, so there is no HTTP surface inside the container to probe — and
+they are what construct-server's `delivery-facts.sh` reads to place drydock in
+the delivery matrix.
+
+`org.opencontainers.image.version` is deliberately empty. Nothing here
+publishes a semver tag (`latest` + sha, pinned by sha in compose), and an empty
+version is a legitimate row that records the digest and shows the version as
+unknown — whereas filling it from `package.json`, which carries the *last*
+released version at every commit on `main`, would have every between-releases
+build claim to be a release. A plain local `docker build` sets no labels at
+all, so a hand-built image cannot be mistaken for a published one.
+
 ### construct-server stack
 
 Add to `~/construct-server/docker-compose.yml` (no Watchtower label — default
