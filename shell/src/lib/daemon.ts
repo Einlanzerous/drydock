@@ -174,9 +174,14 @@ export async function createSession(opts: {
    */
   permissionMode?: PermissionMode;
   /**
-   * First prompt, typed AND submitted by the daemon once the CLI settles.
-   * Autonomous runs must use this rather than `initialInput` on a pane: there
-   * is no pane, so nothing else would ever type it.
+   * First prompt, typed by the daemon once the CLI has painted and settled —
+   * and SUBMITTED only for an autonomous run, which is the one with nobody
+   * there to press return.
+   *
+   * Every prompt goes this way since DRY-88, supervised workspaces included.
+   * A pane cannot do this job: it only knows when its own socket opened, which
+   * is tens of milliseconds into a CLI that takes over a second to start
+   * listening, and its copy of the prompt dies with the component.
    */
   input?: string;
 }): Promise<SessionInfo> {

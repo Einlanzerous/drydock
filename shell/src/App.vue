@@ -178,7 +178,6 @@ const live = reactive<
   Record<string, { status?: SessionInfo["status"]; attention?: boolean; idle?: boolean }>
 >({});
 const ticketById = reactive<Record<string, string>>({});
-const initialInputById = reactive<Record<string, string>>({});
 
 /**
  * Poll-driven clock, for the one label that has to count DOWN (DRY-60).
@@ -494,7 +493,6 @@ function forgetWindow(id: string) {
   wm.remove(id);
   delete tombstones[id];
   awaitingHistory.delete(id);
-  delete initialInputById[id];
   delete ticketById[id];
   delete live[id];
   // A window nobody can see is not a window somebody is in (DRY-60).
@@ -1205,7 +1203,8 @@ async function spawnFresh(kind: "claude" | "shell") {
 // two PTYs — the agent (claude) and a co-located zsh shell sharing its cwd. The
 // window is registered *before* the next poll so reconcile claims the shell PTY
 // instead of giving it a standalone window. Ticket-bound spawns pre-open the
-// drawer and pre-fill the agent prompt (typed once by TerminalPane).
+// drawer and pre-fill the agent prompt — which the DAEMON types (DRY-88), so
+// nothing about it depends on this desk still being here a second from now.
 async function spawnWorkspace(
   opts: {
     ticket?: Ticket;
@@ -1232,13 +1231,17 @@ async function spawnWorkspace(
       // so the value is whitelisted daemon-side before it becomes part of a
       // command line — same behaviour, one validated path.
       permissionMode: opts.auto ? "auto" : undefined,
+      // Pre-fill, never submitted: the daemon presses RETURN only for a run
+      // nobody is watching (DRY-49), and this one has a human and a composer
+      // they may want to edit first. The bare "+ workspace" passes no prompt
+      // and so gets no `input` — it is a pair of terminals, not a briefing.
+      input: opts.prompt,
     });
     // Co-locate the human's shell in the agent's *resolved* cwd — which is the
     // worktree when isolated — so both panes start in exactly the same directory.
     // It passes no ticket, so it just runs there and never makes a second worktree.
     const shell = await createSession({ command: "shell", title: "shell", cwd: agent.cwd });
     if (opts.ticket) ticketById[agent.id] = opts.ticket.key;
-    if (opts.prompt) initialInputById[agent.id] = opts.prompt;
     wm.add({
       id: agent.id,
       kind: "workspace",
@@ -1305,10 +1308,9 @@ function onSendTicket(payload: {
  * it. An unattended run has neither a human nor a window, so the second PTY
  * would be a shell nobody can reach, kept alive for the length of the run.
  *
- * The prompt goes to the DAEMON rather than into `initialInputById`: that seed
- * is typed by TerminalPane when its socket opens, and there is no pane here to
- * open one. This is the one spawn path where the agent's first message is the
- * daemon's job.
+ * What it is NOT any more is the only path whose prompt the daemon types: a
+ * supervised workspace's does too since DRY-88. The difference that remains is
+ * the RETURN — nobody is here to press it, so this one submits.
  */
 async function spawnAutonomous(opts: {
   ticket: Ticket;
@@ -1349,15 +1351,9 @@ async function spawnAutonomous(opts: {
   }
 }
 
-// Seed consumed once: TerminalPane fires this after typing the pre-filled prompt,
-// so a re-mount (restore from dock, poll re-add) doesn't retype it.
-function onInitialSent(id: string) {
-  delete initialInputById[id];
-}
-
 // Closing a window terminates its session. Without the kill the 3s poller sees
-// the still-alive daemon session and re-adds the window (and the pane re-typed
-// the seed) — minimize→dock is the "keep running" path, the X means done.
+// the still-alive daemon session and re-adds the window — minimize→dock is the
+// "keep running" path, the X means done.
 async function closeWindow(id: string) {
   // Closing a WATCHED run's window stops watching it; it does not end the run
   // (DRY-49). The X means "done with this window", and for an autonomous run
@@ -1987,11 +1983,9 @@ onBeforeUnmount(stopDesk);
             :agent-session="sessionsById[w.id]"
             :shell-session="w.shellId ? sessionsById[w.shellId] : undefined"
             :active="wm.focusedId.value === w.id"
-            :initial-input="initialInputById[w.id]"
             @status="onStatus"
             @attention="onAttention"
             @idle="onIdle"
-            @initial-sent="onInitialSent"
             @patch="onWorkspacePatch"
             @open-file="openSessionFile"
           />
@@ -1999,12 +1993,10 @@ onBeforeUnmount(stopDesk);
             v-else-if="sessionsById[w.id]"
             :session="sessionsById[w.id]"
             :active="wm.focusedId.value === w.id"
-            :initial-input="initialInputById[w.id]"
             :read-only="isForeign(sessionsById[w.id])"
             @status="onStatus"
             @attention="onAttention"
             @idle="onIdle"
-            @initial-sent="onInitialSent"
             @open-file="openSessionFile"
           />
           <!-- DRY-56: the PTY is gone AND the daemon no longer lists it.

@@ -16,7 +16,6 @@ const props = defineProps<{
   session: SessionInfo;
   active?: boolean;
   hidden?: boolean; // collapsed in the dock — skip fit work
-  initialInput?: string; // typed once on first connect (spawn-on-ticket context)
   /**
    * Somebody else's public run (DRY-27): the scrollback streams, the keyboard
    * does not.
@@ -32,7 +31,6 @@ const emit = defineEmits<{
   (e: "status", id: string, status: SessionInfo["status"]): void;
   (e: "attention", id: string, pending: boolean): void;
   (e: "idle", id: string, idle: boolean): void; // agent yielded its turn ("your turn")
-  (e: "initial-sent", id: string): void; // seed typed once; parent clears it so re-mounts don't retype
   (e: "open-file", id: string, path: string): void; // Ctrl/Cmd-clicked a file token (DRY-35 doc viewer)
 }>();
 
@@ -186,7 +184,6 @@ const term = shallowRef<Terminal | null>(null);
 const fit = shallowRef<FitAddon | null>(null);
 const ws = shallowRef<WebSocket | null>(null);
 let resizeObserver: ResizeObserver | null = null;
-let sentInitial = false;
 
 const connected = ref(false);
 const pending = ref<{ requestId: string; tool: string; input: unknown } | null>(null);
@@ -300,23 +297,15 @@ function connect() {
 function openSocket(url: string) {
   const sock = new WebSocket(url);
   ws.value = sock;
+  // A ticket spawn's pre-filled prompt is NOT typed here (DRY-88). This pane
+  // used to do it 700ms after the socket opened, which is roughly t=700ms of a
+  // CLI that starts listening at ~1400ms — so it was written into a terminal
+  // nobody was reading and lost without a word. The daemon types both prompts
+  // now, off the output it can already see; see scheduleInitialInput.
   sock.onopen = () => {
     connected.value = true;
     attempts.value = 0;
     doFit();
-    if (!sentInitial && props.initialInput) {
-      sentInitial = true;
-      const text = props.initialInput;
-      // Tell the parent to drop the seed so a later re-mount (restore from dock,
-      // poll re-add) doesn't retype it. `text` is already captured locally.
-      emit("initial-sent", props.session.id);
-      // A multi-line ticket seed is sent as a bracketed paste (ESC[200~ … ESC[201~)
-      // so the CLI drops it into the prompt as one block instead of submitting
-      // each line. No trailing CR — we pre-fill, never auto-submit. Give the
-      // wrapped CLI a beat to draw its prompt (and enable paste mode) first.
-      const data = text.includes("\n") ? `\x1b[200~${text}\x1b[201~` : text;
-      setTimeout(() => sendWs({ type: "input", data }), 700);
-    }
   };
   // No `onerror` handler, deliberately. The WebSocket error event carries no
   // status — the spec makes it information-free so a page can't port-scan by
