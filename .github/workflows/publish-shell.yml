@@ -50,12 +50,20 @@ jobs:
           # several, they are the only one. Without them it is the single
           # first-party image that cannot appear in the matrix truthfully.
           #
-          # `revision` is the load-bearing half. This workflow can build the
-          # same source twice seconds apart — the push to main and the
-          # release-please merge that follows it both touch package.json — so
-          # two digests routinely carry one commit, and comparing digests
-          # invents drift that does not exist (SERV-88). The commit is what
-          # makes "is this the same code" answerable.
+          # `revision` is the load-bearing half, because digests lie and
+          # revisions don't (SERV-88). Two builds of ONE commit routinely
+          # disagree on digest here — a job re-run, or a workflow_dispatch on a
+          # commit its own push already built — since `nginx:1.27-alpine` is a
+          # floating tag that moves underneath us and the cache state differs.
+          # Comparing digests then invents drift that does not exist, while the
+          # commit is what makes "is this the same code" answerable.
+          #
+          # The estate rule's own worked example — one commit built twice, once
+          # on the push to main and once on the release tag — has NO counterpart
+          # here: the only triggers are the push and a bare workflow_dispatch,
+          # and the release-please merge is a DIFFERENT commit whose version
+          # bump changes a copied layer anyway. The conclusion carries over; the
+          # example does not.
           #
           # `version` is deliberately ABSENT, not forgotten. Nothing here has a
           # semver to state: the images are tagged :latest and :<sha> and pinned

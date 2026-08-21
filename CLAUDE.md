@@ -1830,10 +1830,17 @@ are not one route among several here; they are the only one.
    the digest and shows the version as unknown (`delivery-facts.sh` says so
    outright); a confident wrong one is the failure the matrix exists to avoid.
 2. **`revision` is the load-bearing half, because digests lie and revisions
-   don't** (SERV-88). This workflow can build one commit twice seconds apart —
-   the push to main and the release-please merge behind it both touch
-   `package.json`, which is in the `paths:` filter — so two digests routinely
-   carry one commit, and comparing digests invents drift that isn't there.
+   don't** (SERV-88). Two builds of ONE commit routinely disagree on digest
+   here — a job re-run, or a `workflow_dispatch` on a commit its own push
+   already built, rebuilt against a `nginx:1.27-alpine` that has moved
+   underneath it — so comparing digests invents drift that isn't there.
+   **The estate rule's worked example does not transfer, and importing it is
+   the mistake to avoid:** "one commit built twice, once on the push to main
+   and once on the release tag" needs a tag trigger, and this workflow has only
+   the push and a bare `workflow_dispatch`. The release-please merge is not a
+   substitute — it is a DIFFERENT commit, and its version bump changes a copied
+   layer, so that pair yields two revisions and two digests, not one commit
+   under two. The conclusion carries over; the example doesn't.
 3. **Through `labels:`, never an `ARG`/`LABEL` pair.** A build arg that changes
    every build invalidates every layer beneath it, which here is `bun install`
    and the Vite build. Labels are image config and cost no cache — measured:
