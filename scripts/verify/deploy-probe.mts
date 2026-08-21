@@ -43,23 +43,24 @@
 // they are what catches a second, differently-spelled curl being added to the
 // tail.
 //
-// CONFIRM IT DISCRIMINATES. Twelve mutations, each measured rather than counted
+// CONFIRM IT DISCRIMINATES. Thirteen mutations, each measured rather than counted
 // by hand, and each failing a different section:
 //
-//   accept only 200 (the ticket's bug)          3 of 34, all in "auth on"
-//   accept any HTTP response (the overcorrect)  8 of 34, every squatter check
-//   accept on the status code alone             2 of 34, the 200 squatter
-//   drop `-m 5` from the curl (unbounded)       2 of 34, the black-hole pair
-//   put `-f` back on the curl                   4 of 34, "auth on" + the static
+//   accept only 200 (the ticket's bug)          3 of 35, all in "auth on"
+//   accept any HTTP response (the overcorrect)  8 of 35, every squatter check
+//   accept on the status code alone             2 of 35, the 200 squatter
+//   drop `-m 5` from the curl (unbounded)       2 of 35, the black-hole pair
+//   put `-f` back on the curl                   4 of 35, "auth on" + the static
 //     …and the same with the flag on the curl's SECOND line, which is the
 //     mutation the static check was blind to before the fold (review)
-//   `prod_port` without its quote/space trim    2 of 34, the quoted + spaced .env
-//   `prod_port` back to `tail -1`               1 of 34, the duplicate-key .env
-//   `prod_port` back to a bare `^KEY=` anchor   2 of 34, the indented + spaced .env
-//   drop `probe_failure`'s 5xx arm              2 of 34, the 503 and 500 squatters
-//   a journal hint on EVERY arm                 2 of 34, the 404 and 200 squatters
-//   the probe budget back to five seconds       1 of 34, the static budget check
-//   the tail with its own inline port lookup    2 of 34, the two static ones
+//   `prod_port` without its quote/space trim    2 of 35, the quoted + spaced .env
+//   `prod_port` back to `tail -1`               1 of 35, the duplicate-key .env
+//   `prod_port` back to a bare `^KEY=` anchor   2 of 35, the indented + spaced .env
+//   drop `probe_failure`'s 5xx arm              2 of 35, the 503 and 500 squatters
+//   a journal hint on EVERY arm                 2 of 35, the 404 and 200 squatters
+//   the probe budget back to five seconds       1 of 35, the static budget check
+//   the tail with its own inline port lookup    2 of 35, the two static ones
+//   `prod_port` reading only $PROD_DIR/.env      1 of 35, the daemon/.env case
 //
 // The 5xx pair is worth a note: their failures are DISJOINT, because the 5xx
 // squatters assert the journal hint is there and the 404/200 ones assert it is
@@ -165,8 +166,8 @@ function probe(prodDir: string, opts: { budget?: number } = {}): Promise<Run> {
         DRYDOCK_DEPLOY_PROBE: "1",
         DRYDOCK_PROD_DIR: prodDir,
         // The budget is turned down for the cases that are SUPPOSED to fail —
-        // six of them, each of which would otherwise wait out the script's real
-        // 60s. The SUCCESS cases deliberately leave it alone: they answer on
+        // seven of them, each of which would otherwise wait out the script's
+        // real 60s. The SUCCESS cases deliberately leave it alone: they answer on
         // the first attempt, so they run at the default and this file never
         // asserts anything about a budget it set itself. Same reasoning as
         // DRY-49's timeout and DRY-60's sweep delay; the default is checked
@@ -421,11 +422,25 @@ async function main(): Promise<void> {
     },
     { name: "an indented DRYDOCK_PORT", body: `  DRYDOCK_PORT=${PORT}\n` },
     { name: "spaces around the =", body: `DRYDOCK_PORT = ${PORT}\n` },
+    // Which FILE, not which line. `env.ts` walks up from the daemon's cwd —
+    // `WorkingDirectory=<prod>/daemon` — and takes the first `.env` it finds,
+    // so a `daemon/.env` outranks the root one. The root file here names a port
+    // nothing is on, which is what makes this discriminate: reading only
+    // `$PROD_DIR/.env` probes THAT, or falls back to 4318 (review).
+    {
+      name: "a daemon/.env",
+      body: `DRYDOCK_PORT=${spare}\n`,
+      inner: `DRYDOCK_PORT=${PORT}\n`,
+    },
   ];
   for (const [i, shape] of envShapes.entries()) {
     const dir = path.join(SCRATCH, `prod-env-${i}`);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, ".env"), shape.body);
+    if ("inner" in shape && typeof shape.inner === "string") {
+      fs.mkdirSync(path.join(dir, "daemon"), { recursive: true });
+      fs.writeFileSync(path.join(dir, "daemon", ".env"), shape.inner);
+    }
     const run = await probe(dir);
     // The PORT is asserted, not just the exit status, and that is the whole
     // check on a developer's machine. `prod_port` falls back to 4318 when it

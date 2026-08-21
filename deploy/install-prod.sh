@@ -104,6 +104,29 @@ render_unit() {
   printf '%s\n' "$unit"
 }
 
+# The .env the DAEMON would load, by the daemon's own rule.
+#
+# `env.ts` walks up from the daemon's cwd — `WorkingDirectory=__APP_DIR__/daemon`
+# in the unit — and takes the FIRST `.env` it finds, five levels at most. Reading
+# only `$PROD_DIR/.env` therefore disagrees whenever a `daemon/.env` exists: the
+# daemon binds its port and the probe reports on another, or falls back to 4318,
+# which on a developer's box is the real prod daemon (review).
+#
+# Nothing in this repo creates `daemon/.env` and it is gitignored, so that takes
+# a hand, and this is the last of five divergences between these two readers —
+# every one of which turned out to be a false failure of exactly the kind this
+# ticket is about. Mirroring the rule is cheaper than documenting where it stops.
+prod_env_file() {
+  local dir="$PROD_DIR/daemon" i=0
+  while [ "$i" -lt 5 ]; do
+    if [ -f "$dir/.env" ]; then printf '%s\n' "$dir/.env"; return 0; fi
+    [ "$dir" != "/" ] || break
+    dir="$(dirname "$dir")"
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # The port this host's prod daemon is configured on.
 #
 # A function for the same reason render_unit is one: the probe mode below has to
@@ -128,7 +151,7 @@ prod_port() {
   # dev box that is not a miss, it is a healthy verdict about the REAL prod
   # daemon (review). Third spelling of the same gap; hence the anchor rather
   # than another special case.
-  port="$(grep -E '^[[:space:]]*DRYDOCK_PORT[[:space:]]*=' "$PROD_DIR/.env" 2>/dev/null \
+  port="$(grep -E '^[[:space:]]*DRYDOCK_PORT[[:space:]]*=' "$(prod_env_file || true)" 2>/dev/null \
             | head -1 | cut -d= -f2- || true)"
   # Then read it the way the DAEMON reads it. `env.ts` trims the value and
   # strips a matching quote pair; `cut` does neither. So a prod .env holding
@@ -291,6 +314,15 @@ if [ -z "${DRYDOCK_DEPLOY_DETACHED:-}" ] && grep -qs 'drydock-daemon\.service' /
               "--setenv=PATH=$PATH")
     if [ -n "${DRYDOCK_PROD_DIR:-}" ]; then run_args+=("--setenv=DRYDOCK_PROD_DIR=$DRYDOCK_PROD_DIR"); fi
     if [ -n "${DRYDOCK_PROD_REPO:-}" ]; then run_args+=("--setenv=DRYDOCK_PROD_REPO=$DRYDOCK_PROD_REPO"); fi
+    # A transient unit starts from the user manager's environment, so anything
+    # not forwarded here is silently dropped rather than refused — DRY-66's
+    # complaint, and this block is the path a real deploy takes, since deploying
+    # from inside a Drydock session is the normal case. Costs nothing today (the
+    # budget is documented as harness-only and the harness never comes through
+    # here); it is the shape that is worth not having.
+    if [ -n "${DRYDOCK_DEPLOY_PROBE_BUDGET:-}" ]; then
+      run_args+=("--setenv=DRYDOCK_DEPLOY_PROBE_BUDGET=$DRYDOCK_DEPLOY_PROBE_BUDGET")
+    fi
     exec systemd-run "${run_args[@]}" -- "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")" "$@"
   fi
   echo "warning: no systemd-run — this deploy may be killed partway by its own restart" >&2

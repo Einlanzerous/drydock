@@ -859,7 +859,7 @@ with the second deploy, on the host where a deploy is least casual.
    with the number of live supervisors on the host, and enough of them produce
    this ticket's sentence again through a slow boot (review). Sixty seconds now,
    as a deadline rather than an attempt count. `DRYDOCK_DEPLOY_PROBE_BUDGET`
-   exists for the harness, which has six cases that are meant to fail and would
+   exists for the harness, which has seven cases that are meant to fail and would
    otherwise wait out the full budget each — the right default being a terrible
    test, as ever.
 6. **`prod_port` has to read the `.env` the way `env.ts` does**, and getting
@@ -871,9 +871,14 @@ with the second deploy, on the host where a deploy is least casual.
    **first** occurrence of a key (`key in process.env` skips the rest), so
    `tail -1` probes a port the daemon is not on — nastier than the quoted case,
    because appending is how this file gets edited and neither line looks wrong
-   in it. Also needs `|| true`: under `set -eo pipefail` both a missing `.env`
-   and one with no `DRYDOCK_PORT` line make the pipeline non-zero, taking the
-   script down at its last step instead of falling back to the default.
+   in it. And it has to find the same FILE: `env.ts` walks up from the
+   daemon's cwd (`WorkingDirectory=<prod>/daemon`) and takes the first `.env`
+   it sees, so a `daemon/.env` outranks the root one. Also needs `|| true`:
+   under `set -eo pipefail` both a missing `.env` and one with no
+   `DRYDOCK_PORT` line make the pipeline non-zero, taking the script down at
+   its last step instead of falling back to the default. Five divergences
+   between these two readers, five rounds, every one of them a false failure of
+   exactly the kind this ticket is about.
 7. **The failure line decides where somebody looks next, and both ways of
    getting it wrong shipped.** Three arms: nothing listening is a `journalctl`;
    a **5xx** is either a proxy with a dead upstream or this daemon's own
@@ -895,15 +900,16 @@ Harness: `scripts/verify/deploy-probe.mts`, rig in its README — two daemons it
 starts itself, no browser, no systemd, about a minute. Its control runs the
 literal old command against the auth-on daemon and requires it to fail, so a
 posture that stopped being auth-on can't pass this file. Confirm it
-discriminates with any of twelve mutations, each failing a different section:
-accept only 200 (**3 of 34**), accept any HTTP response (**8 of 34**), accept on
-the status code alone (**2 of 34**), drop `-m 5` (**2 of 34**), put `-f` back
-(**4 of 34**, and try it on the curl's second line — the static check folds
+discriminates with any of thirteen mutations, each failing a different section:
+accept only 200 (**3 of 35**), accept any HTTP response (**8 of 35**), accept on
+the status code alone (**2 of 35**), drop `-m 5` (**2 of 35**), put `-f` back
+(**4 of 35**, and try it on the curl's second line — the static check folds
 continuations, and did not before review), `prod_port` without its trim
-(**2 of 34**), back to `tail -1` (**1 of 34**) or to a bare `^KEY=` anchor
-(**2 of 34**), drop the 5xx arm (**2 of 34**), a journal hint on every arm
-(**2 of 34**), the budget back to five seconds (**1 of 34**), and a deploy tail
-with its own inline port lookup (**2 of 34**).
+(**2 of 35**), back to `tail -1` (**1 of 35**) or to a bare `^KEY=` anchor
+(**2 of 35**), drop the 5xx arm (**2 of 35**), a journal hint on every arm
+(**2 of 35**), the budget back to five seconds (**1 of 35**), a deploy tail
+with its own inline port lookup (**2 of 35**), and `prod_port` reading only
+`$PROD_DIR/.env` (**1 of 35**).
 
 Three things about that table, all review's and all about the table rather than
 the code. The 5xx mutations are a PAIR whose failures are disjoint, so naming the
