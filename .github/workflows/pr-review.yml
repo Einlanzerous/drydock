@@ -29,10 +29,26 @@ name: PR Review
 # repos it was written for are private and single-author. On this repo it is
 # neither: anyone can fork it and open a pull request, the review runs on a
 # self-hosted runner on the same host as the prod daemon, and that runner holds
-# both secrets below. Those two conditions are what stop a fork's PR (or a
-# stranger's `@claude review`) from checking out its own code and running Bash
-# here. Anything that loosens either is a security change, not a config change,
-# which is why `.github/workflows/` is in `sensitive_paths`.
+# both secrets below. Anything that loosens either guard is a security change,
+# not a config change, which is why `.github/workflows/` is in `sensitive_paths`.
+#
+# But be exact about what those guards buy, because the first version of this
+# comment was not: they bound THE REVIEWER, not the runner. Under `pull_request`
+# GitHub runs the workflow files from the PR's HEAD, so a fork's copy of this
+# file decides whether construct-server's `if:` is ever reached — it can add a
+# job of its own with `runs-on: self-hosted` and never call the shared workflow
+# at all. Secrets are not passed to a fork-PR run, so the two below are not
+# exposed that way; what is exposed is code execution on this host, which also
+# runs the prod daemon and six other repos' runners.
+#
+# What actually bounds THAT is a repo setting rather than anything in this file:
+# Settings → Actions → "Require approval for all external contributors". The
+# default, `first_time_contributors`, stops only somebody's first PR. Drydock is
+# set to require approval for all of them (`approval_policy:
+# all_external_contributors`) — and that is a prerequisite of this workflow, not
+# a preference: it is the only thing standing between a fork PR and a shell on
+# the host. `pr-checks.yml` and the two publish workflows are `ubuntu-latest`,
+# so this adoption is what brought a self-hosted runner to a public repo.
 # ---------------------------------------------------------------------------
 
 on:
@@ -55,9 +71,12 @@ jobs:
       # Where a mistake in THIS repo widens access, loses data, leaks a secret,
       # or compromises the runner. A regex matching everything is the same as one
       # matching nothing (SGNT-36), so this was replayed against the last 16
-      # merged PRs before being written down: 6 escalate, 10 do not, and 3 of
-      # those 10 are release PRs that skip before the tier is decided. 6 of 13
-      # real PRs — the tier still carries information.
+      # merged PRs before being written down: 7 escalate, 9 do not, and 3 of
+      # those 9 are release PRs that skip before the tier is decided. 7 of 13
+      # real PRs, and 33 of 137 tracked files — the tier still carries
+      # information. `manager.ts` and `supervisor/link.ts` were added after the
+      # first replay and moved no PR across the line, only the hit counts within
+      # PRs that already escalated.
       #
       #   auth/, server.ts        who may drive a session (DRY-27): the route
       #                           guard, `mayDrive`, `ownershipApplies`, the
@@ -76,11 +95,22 @@ jobs:
       #   sessions-dir.ts         the index that is the only handle anything has
       #                           on a live supervisor; wrong order here leaves
       #                           processes no daemon can ever find
+      #   supervisor/link.ts      reads the supervisor's exit record — DRY-79
+      #                           trap 7, where getting it wrong turned a clean
+      #                           exit into a handoff saying nobody was watching
       #   worktree.ts             DRY-89: force-removes uncommitted work. This is
       #                           the repo's data-loss surface
-      #   index.ts                the multi-user boot check that must run before
-      #                           `server.js` is imported, and reconcile-before-
-      #                           listen (DRY-57 trap 3)
+      #   manager.ts              `visibleTo` (every client-facing surface goes
+      #                           through it), `adoptSessions` (DRY-27 trap 8),
+      #                           `reconcile()` (DRY-57), and the synchronous
+      #                           `remove()` that DRY-60 trap 8 and DRY-64 trap 2
+      #                           both turn on
+      #   index.ts                the multi-user boot check, which has to run
+      #                           BEFORE the dynamic `import("./server.js")`
+      #                           because a static import is hoisted and the
+      #                           daemon would bind its port and adopt every live
+      #                           session before deciding it shouldn't have
+      #                           started (DRY-27 trap 2)
       #   state/                  the store and its migrations — drift is a 503,
       #                           a bad migration is somebody's desk
       #   deploy/                 DRY-87: a missing `KillMode` in the unit killed
@@ -91,7 +121,7 @@ jobs:
       # recoverable, and it is a third of the tree), `tracker/` (read-only pulls;
       # a mistake is a stale sidebar), `scripts/`, `docs/`. Putting them in is how
       # this becomes signet's regex.
-      sensitive_paths: '^(daemon/src/(auth/|server\.ts|spawn-env\.ts|hooks\.ts|session\.ts|sessions-dir\.ts|worktree\.ts|index\.ts|supervisor/(wire|markers|main)\.ts|state/)|hooks/|deploy/|\.github/workflows/|REVIEW\.md|CLAUDE\.md|\.github/review-ignore)'
+      sensitive_paths: '^(daemon/src/(auth/|server\.ts|spawn-env\.ts|hooks\.ts|session\.ts|sessions-dir\.ts|worktree\.ts|manager\.ts|index\.ts|supervisor/(wire|markers|main|link)\.ts|state/)|hooks/|deploy/|\.github/workflows/|REVIEW\.md|CLAUDE\.md|\.github/review-ignore)'
     secrets:
       claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
       switchyard_token: ${{ secrets.SWITCHYARD_REVIEWER_TOKEN }}

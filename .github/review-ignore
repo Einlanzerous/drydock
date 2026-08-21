@@ -22,8 +22,20 @@
 # them. Both stay in scope.
 
 # release-please writes this from the commit subjects. A hand-edit to it is the
-# thing to fix, not the thing to review; the release PR that carries it is
-# skipped at triage anyway, from the set derived from release-please-config.json.
+# thing to fix, not the thing to review.
+#
+# Note what this does NOT do, because the obvious assumption is wrong here and
+# the reviewer caught it on this file's own PR: it does not make release PRs
+# green. Triage skips a release PR by deriving the expected file set from
+# release-please-config.json — manifest, changelog-path, extra-files — and this
+# repo is `release-type: node`, so every release PR also bumps `package.json`,
+# which that derivation does not know about. Verified on #52, #55 and #60: all
+# three carry exactly manifest + CHANGELOG + package.json. So `package.json`
+# reads as unexpected, the skip does not fire, and the review job hands a
+# bot-authored PR to claude-code-action, which refuses bot-initiated runs.
+# The `release_files` input cannot fix it — it is consulted only where there is
+# no config file. The fix is upstream, in the derivation; until it lands, a red
+# `review` on a release PR means "bot PR, refused", not "unreviewed code".
 ^CHANGELOG\.md$
 
 # The resolved dependency tree. Reviewing it line by line finds nothing anybody
