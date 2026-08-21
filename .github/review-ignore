@@ -1,0 +1,47 @@
+# Paths the PR reviewer does not read (DRY-92).
+#
+# One extended regex per line, matched against the repository-relative path of
+# every changed file. `#` comments and blank lines are ignored.
+#
+# What belongs here is REGENERATED ARTIFACTS, not merely large files. The test
+# is: if this file is wrong, is the fix to edit it? For a generated file the
+# answer is no — you re-run the generator — so a reviewer's comment on its diff
+# has nowhere to land. A large hand-written file is exactly what the reviewer
+# should be spending its budget on.
+#
+# THIS FILE IS READ FROM THE BASE BRANCH, never from the PR head, so a pull
+# request cannot exempt itself from review by adding a line here. Editing it
+# changes nothing until the PR merges — and because this path is in the
+# SENSITIVE list in `pr-review.yml`, the PR proposing the edit gets the deeper
+# pass rather than a lighter one.
+#
+# Note what is NOT here: `daemon/src/protocol.ts` and `shell/src/lib/protocol.ts`
+# are duplicated verbatim, and it is tempting to read the second as a copy of
+# the first. It isn't generated — nothing writes it — and the duplication is
+# exactly the kind of thing that drifts, which is why `pr-checks.yml` diffs
+# them. Both stay in scope.
+
+# release-please writes this from the commit subjects. A hand-edit to it is the
+# thing to fix, not the thing to review.
+#
+# Note what this does NOT do, because the obvious assumption is wrong here and
+# the reviewer caught it on this file's own PR: it does not make release PRs
+# green. Triage skips a release PR by deriving the expected file set from
+# release-please-config.json — manifest, changelog-path, extra-files — and this
+# repo is `release-type: node`, so every release PR also bumps `package.json`,
+# which that derivation does not know about. Verified on #52, #55 and #60: all
+# three carry exactly manifest + CHANGELOG + package.json. So `package.json`
+# reads as unexpected, the skip does not fire, and the review job hands a
+# bot-authored PR to claude-code-action, which refuses bot-initiated runs.
+# The `release_files` input cannot fix it — it is consulted only where there is
+# no config file. The fix is upstream, in the derivation; until it lands, a red
+# `review` on a release PR means "bot PR, refused", not "unreviewed code".
+^CHANGELOG\.md$
+
+# The resolved dependency tree. Reviewing it line by line finds nothing anybody
+# would act on — which dependency moved is in package.json, which is in scope.
+# This one is load-bearing rather than tidy: node-pty is built from source here
+# (see CLAUDE.md), so a dependency bump is a large lockfile diff attached to a
+# small, genuinely risky change, and the reviewer's budget should go to the
+# second one.
+^bun\.lock$
