@@ -114,7 +114,19 @@ prod_port() {
   # .env with no DRYDOCK_PORT line in it. Either way the answer is the default,
   # not an aborted deploy — and the original inline version of this line would
   # have taken the script down on a hand-edited prod .env.
-  port="$(grep -E '^DRYDOCK_PORT=' "$PROD_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2 || true)"
+  port="$(grep -E '^DRYDOCK_PORT=' "$PROD_DIR/.env" 2>/dev/null | tail -1 | cut -d= -f2- || true)"
+  # Then read it the way the DAEMON reads it. `env.ts` trims the value and
+  # strips a matching quote pair; `cut` does neither. So a prod .env holding
+  # DRYDOCK_PORT="4318" — and that file is hand-edited, since the unit keeps all
+  # prod config in it — put the daemon on 4318 and the probe on :"4318", which
+  # is this ticket's own failure in a different spelling (review). Whitespace
+  # goes wholesale rather than end-anchored: a port with a space in the middle
+  # is not a port, and this also takes the \r off a CRLF-edited file.
+  port="$(printf '%s' "$port" | tr -d '[:space:]')"
+  case "$port" in
+    \"*\") port="${port#\"}"; port="${port%\"}" ;;
+    \'*\') port="${port#\'}"; port="${port%\'}" ;;
+  esac
   printf '%s\n' "${port:-4318}"
 }
 
@@ -169,15 +181,19 @@ probe_daemon() {
   return 1
 }
 
-# What a FAILING probe saw, for the error line. A deploy that ends in a failure
-# it cannot explain sends somebody to `journalctl` on a prod daemon that may be
-# perfectly healthy; "no HTTP response" and "answered HTTP 200, but not as a
-# Drydock daemon" point at completely different problems, and only the first is
-# worth a journal.
+# What a FAILING probe saw, and where to look next.
+#
+# The two arms point at completely different problems and only one of them is a
+# journal. Nothing listening is `journalctl`. A port answering as something else
+# means the daemon lost the bind and exited — the journal will say so, but what
+# you actually need is the name of whatever took the port. The first version of
+# this appended one `journalctl` hint to both arms while its own comment argued
+# they were different, which sends you to the wrong place half the time
+# (review).
 probe_failure() {
   case "${1:-}" in
-    000|"") printf 'no HTTP response' ;;
-    *) printf 'answered HTTP %s, but not as a Drydock daemon' "$1" ;;
+    000|"") printf 'no HTTP response — check: journalctl --user -u drydock-daemon -n 50' ;;
+    *) printf 'answered HTTP %s, but not as a Drydock daemon — find out what else is bound to :%s' "$1" "${2:-}" ;;
   esac
 }
 
@@ -202,7 +218,7 @@ if [ -n "${DRYDOCK_DEPLOY_PROBE:-}" ]; then
     echo "drydock prod daemon answering on :$probe_port (HTTP $probe_code)"
     exit 0
   fi
-  echo "error: daemon not answering on :$probe_port ($(probe_failure "$probe_code"))" >&2
+  echo "error: daemon not answering on :$probe_port ($(probe_failure "$probe_code" "$probe_port"))" >&2
   exit 1
 fi
 
@@ -287,5 +303,5 @@ if CODE="$(probe_daemon "$PORT")"; then
   echo "note: to survive logout/reboot, enable lingering once: sudo loginctl enable-linger $USER"
   exit 0
 fi
-echo "error: daemon not answering on :$PORT ($(probe_failure "$CODE")) — check: journalctl --user -u drydock-daemon -n 50" >&2
+echo "error: daemon not answering on :$PORT ($(probe_failure "$CODE" "$PORT"))" >&2
 exit 1

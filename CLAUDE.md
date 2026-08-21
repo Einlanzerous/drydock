@@ -841,22 +841,35 @@ with the second deploy, on the host where a deploy is least casual.
    `"authRequired"`. And this is a deploy-path case rather than a lab one — if
    anything is already holding `:4318` the daemon loses the bind and exits, so
    the squatter is precisely what answers the probe.
-4. **`-f` is no longer what would reproduce it.** With `-w '%{http_code}'` the
-   flag still prints 401 and merely exits 22 (measured, curl 8.5.0), which the
-   `|| true` swallows. What would bring the bug back is the old IDIOM — `if curl
-   -fsS …; then` — so the guard against it is a style check, and the
-   behavioural guard is a live 401 from a real daemon.
+4. **`-f` reproduces the ticket again, and only because of trap 3.** With
+   `-w '%{http_code}'` and the body unread, the flag was harmless: it still
+   printed 401 and merely exited 22, which the `|| true` swallows (measured,
+   curl 8.5.0), so the guard against it was about idiom. Reading the body
+   changed that in the same commit — `-f` DISCARDS the body on a 4xx, so
+   `"authRequired"` cannot match and a healthy auth-on daemon is reported dead.
+   The comment saying otherwise survived that commit and review caught it, which
+   is the useful part: a note about why something is safe is only true of the
+   code it was written against.
 5. **The probe had no timeout, and that is a second bug in the same two lines.**
    A listener that accepts and never answers (a wedged event loop, a stale nginx
    in front of prod) hung the deploy forever with nothing on stdout. `-m 5`
    bounds an attempt.
-6. **`prod_port` needs its `|| true`.** The script runs under `set -eo
-   pipefail`, and both a missing `.env` and a `.env` with no `DRYDOCK_PORT` line
-   make that pipeline non-zero — which took the whole script down at the last
-   step rather than falling back to the default. Inherited from the inline
-   version; only reachable on a hand-edited prod `.env`, which is the file
-   people hand-edit.
-7. **One probe, called twice** — same reasoning as DRY-87's one renderer.
+6. **`prod_port` has to read the value the way `env.ts` does, and needs its
+   `|| true`.** Two separate hazards in one line, both about the same file:
+   prod's `.env` is hand-edited, because the unit deliberately keeps every
+   `DRYDOCK_*` in it. `env.ts` trims a value and strips a matching quote pair,
+   and `cut` does neither — so `DRYDOCK_PORT="4318"` puts the daemon on 4318 and
+   the probe on `:"4318"`, which is this ticket exactly, in a different spelling
+   (review). And under `set -eo pipefail` both a missing `.env` and one with no
+   `DRYDOCK_PORT` line make the pipeline non-zero, taking the whole script down
+   at its last step instead of falling back to the default.
+7. **The failure line decides where somebody looks next, so it can't be one
+   sentence.** Nothing listening is a `journalctl`. A port answering as
+   something else means the daemon lost the bind and exited — the journal says
+   so, but what is actually needed is the name of whatever took the port.
+   Appending one hint to both arms while the comment above argued they were
+   different is how the first version shipped.
+8. **One probe, called twice** — same reasoning as DRY-87's one renderer.
    `DRYDOCK_DEPLOY_PROBE=1 deploy/install-prod.sh` runs it against this host's
    configured daemon and exits, touching nothing, which is both what the harness
    drives and a question worth being able to ask ("would this host's deploy call
@@ -867,9 +880,12 @@ Harness: `scripts/verify/deploy-probe.mts`, rig in its README — two daemons it
 starts itself, no browser, no systemd, about a minute. Its control runs the
 literal old command against the auth-on daemon and requires it to fail, so a
 posture that stopped being auth-on can't pass this file. Confirm it
-discriminates with any of four mutations, each failing a different section:
-accept only 200 (**3 of 23**), accept any HTTP response (**6 of 23**), accept on
-the status code alone (**2 of 23**), drop `-m 5` (**2 of 23**).
+discriminates with any of six mutations, each failing a different section:
+accept only 200 (**3 of 25**), accept any HTTP response (**6 of 25**), accept on
+the status code alone (**2 of 25**), drop `-m 5` (**2 of 25**), put `-f` back
+(**4 of 25**, and try it on the curl's second line — the static check folds
+continuations, and did not before review), `prod_port` without its trim
+(**1 of 25**).
 
 ## A session's first output (DRY-79)
 

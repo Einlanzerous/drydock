@@ -1220,18 +1220,37 @@ Four claims, and the middle two are the ones a naive fix gets wrong:
   curl, no `-f`, and the deploy tail calling `probe_daemon`. They exist to catch
   a second, differently-spelled curl being added to the tail — which is the
   shape this bug had.
+- **And it reads the `.env` the way the daemon does.** That file is hand-edited
+  on a prod host, so `DRYDOCK_PORT="4318"` is an ordinary thing to find in it —
+  and `cut` alone probes `:"4318"` while the daemon is on 4318, which is this
+  ticket again in a different spelling. There's a check for the quoted form.
+
+The failure line is asserted on too, because it is what decides where somebody
+looks next: nothing listening points at `journalctl`, and a port answering as
+something else points at whatever took the port. Sending both to the journal —
+which the first version did — is wrong half the time.
 
 ### Making sure this one still discriminates
 
-Four mutations of `probe_daemon`, all measured, each failing a different
-section — which is why there are four:
+Six mutations, all measured, each failing a different section — which is why
+there are six:
 
 | mutation | fails |
 |---|---|
-| accept only `200` (the ticket's bug) | **3 of 23**, all in "auth on" |
-| accept any HTTP response (the overcorrection) | **6 of 23**, every squatter check |
-| accept on the status code alone, body unread | **2 of 23**, the 200 squatter |
-| drop `-m 5` from the curl (unbounded) | **2 of 23**, the black-hole pair |
+| accept only `200` (the ticket's bug) | **3 of 25**, all in "auth on" |
+| accept any HTTP response (the overcorrection) | **6 of 25**, every squatter check |
+| accept on the status code alone, body unread | **2 of 25**, the 200 squatter |
+| drop `-m 5` from the curl (unbounded) | **2 of 25**, the black-hole pair |
+| put `-f` back on the curl | **4 of 25**, "auth on" plus the static check |
+| `prod_port` without its quote/space trim | **1 of 25**, the quoted `.env` |
+
+The `-f` row is worth its own note, because it changed hands during review.
+While the probe read only the status code, `-f` was harmless — `-w
+'%{http_code}'` still prints 401 and the flag only sets exit 22, which the
+`|| true` swallows — so the static check on it was about idiom. Now that a 401
+has to carry `"authRequired"`, `-f` discards the body on a 4xx and brings DRY-81
+back in full. Run it with the flag on the curl's **second** line too: the static
+check folds line continuations before matching, and did not before review.
 
 Two notes for anyone reworking it. Its servers live in this process, so the
 probe runs with `spawn` and not `spawnSync` — `spawnSync` blocks the event loop,

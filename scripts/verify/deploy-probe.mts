@@ -43,14 +43,17 @@
 // they are what catches a second, differently-spelled curl being added to the
 // tail.
 //
-// CONFIRM IT DISCRIMINATES. Four mutations of `probe_daemon`, each measured
-// rather than counted by hand, and each failing a different section — which is
-// the point of having four:
+// CONFIRM IT DISCRIMINATES. Six mutations, each measured rather than counted by
+// hand, and each failing a different section — which is the point of having six:
 //
-//   accept only 200 (the ticket's bug)          3 of 23, all in "auth on"
-//   accept any HTTP response (the overcorrect)  6 of 23, every squatter check
-//   accept on the status code alone             2 of 23, the 200 squatter
-//   drop `-m 5` from the curl (unbounded)       2 of 23, the black-hole pair
+//   accept only 200 (the ticket's bug)          3 of 25, all in "auth on"
+//   accept any HTTP response (the overcorrect)  6 of 25, every squatter check
+//   accept on the status code alone             2 of 25, the 200 squatter
+//   drop `-m 5` from the curl (unbounded)       2 of 25, the black-hole pair
+//   put `-f` back on the curl                   4 of 25, "auth on" + the static
+//     …and the same with the flag on the curl's SECOND line, which is the
+//     mutation the static check was blind to before the fold (review)
+//   `prod_port` without its quote/space trim    1 of 25, the quoted .env
 //
 // RIG: no browser, no database, no systemd, no second terminal — this file owns
 // its daemons.
@@ -375,6 +378,19 @@ async function main(): Promise<void> {
     off.out.trim(),
   );
 
+  // The .env is hand-edited on a prod host — the unit keeps every DRYDOCK_* in
+  // it — so the probe has to read a value the way `env.ts` does. `cut` alone
+  // hands back `"4381"` including the quotes and probes `:"4381"`, which is
+  // this ticket's failure in a different spelling (review).
+  fs.mkdirSync(path.join(SCRATCH, "prod-quoted"), { recursive: true });
+  fs.writeFileSync(path.join(SCRATCH, "prod-quoted", ".env"), `DRYDOCK_PORT="${PORT}"\n`);
+  const quoted = await probe(path.join(SCRATCH, "prod-quoted"));
+  check(
+    "a quoted DRYDOCK_PORT still finds the daemon",
+    quoted.code === 0,
+    `exit ${quoted.code} ${(quoted.out + quoted.err).trim()}`,
+  );
+
   // The port comes from the .env the deploy just seeded, not from a guess. Same
   // daemon, still running: only the .env moves.
   const idle = await freePort();
@@ -437,6 +453,10 @@ async function main(): Promise<void> {
     /no HTTP response/.test(dead.err),
     dead.err.trim(),
   );
+  // This is the arm the journal answers, and the only one. A squatter means the
+  // daemon lost the bind and exited; the journal will say so, but what you need
+  // is the name of what took the port — hence the pairing with the check below.
+  check("and points at the journal", /journalctl/.test(dead.err), dead.err.trim());
 
   // The other half of the fix, and it is the half a naive one gets wrong twice
   // over. "Any HTTP response means it's up" cures the ticket and then reports a
@@ -467,8 +487,11 @@ async function main(): Promise<void> {
       `exit ${squat.code}`,
     );
     check(
-      `and names the ${sq.code} rather than blaming the daemon`,
-      new RegExp(`${sq.code}`).test(squat.err) && /not as a Drydock daemon/.test(squat.err),
+      `and names the ${sq.code} rather than sending you to the journal`,
+      new RegExp(`${sq.code}`).test(squat.err) &&
+        /not as a Drydock daemon/.test(squat.err) &&
+        !/journalctl/.test(squat.err) &&
+        squat.err.includes(`:${PORT}`),
       squat.err.trim(),
     );
   }
@@ -505,16 +528,24 @@ async function main(): Promise<void> {
     .join("\n");
   const curls = live.match(/\bcurl\b/g) ?? [];
   check("the script contains exactly one curl", curls.length === 1, `${curls.length} found`);
-  // A style guard, and worth saying which: in THIS shape `-f` would not even
-  // reproduce the ticket. Measured on curl 8.5.0 — `-f -w '%{http_code}'`
-  // against a 401 still prints 401 and merely exits 22, which the `|| true`
-  // swallows. What the flag would bring back is the old IDIOM (`if curl -fsS
-  // …; then`), and that is what this refuses. The behavioural guard is the
-  // live 401 above.
+  // BEHAVIOURAL, not a style guard, and it changed hands mid-review. While the
+  // probe only read the status code, `-f -w '%{http_code}'` still printed 401
+  // and merely exited 22, which the `|| true` swallowed — so the flag was
+  // harmless and this was a note about idiom. Now that a 401 has to CARRY
+  // `"authRequired"`, it isn't: `-f` discards the body on a 4xx, the glob can't
+  // match, and DRY-81 is back in full with a healthy daemon reported as dead.
+  // The live 401 above catches it too; this is the cheaper signal, and it names
+  // the flag.
+  //
+  // Line continuations are folded first. The curl is already split across two
+  // lines, so a `curl[^\n]*` test cannot see a flag added after the `\` —
+  // measured on a doctored installer, where the harness reported no `-f` with
+  // one sitting on line two (review).
+  const folded = live.replace(/\\\n\s*/g, " ");
   check(
     "and it does not pass -f/--fail",
-    !/curl[^\n]*(\s-[a-zA-Z]*f[a-zA-Z]*\b|--fail)/.test(live),
-    (live.match(/curl[^\n]*/) ?? [""])[0].trim(),
+    !/curl[^\n]*(\s-[a-zA-Z]*f[a-zA-Z]*\b|--fail)/.test(folded),
+    (folded.match(/curl[^\n]*/) ?? [""])[0].trim(),
   );
   check(
     "the deploy tail calls probe_daemon",
