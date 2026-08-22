@@ -1377,9 +1377,12 @@ const server = http.createServer(async (req, res) => {
     // carrying `total_cost_usd`, `num_turns` and `usage`, and writes it to
     // STDOUT alone. Its own JSONL transcript under `<config dir>/projects/` is
     // NOT a second copy: measured on `claude -p --output-format stream-json`
-    // (v2.1.240, `entrypoint: sdk-cli`), the persisted file held ten records,
-    // zero of type `result`, and no occurrence of `total_cost_usd` — while the
-    // same run's stdout held exactly one. Token counts are recoverable from
+    // (v2.1.240, `entrypoint: sdk-cli`), twice — standalone, then again on a
+    // run spawned through a daemon so the whole chain was under test. Ten
+    // records persisted in the first and eleven in the second; zero of type
+    // `result` and no occurrence of `total_cost_usd` in either, while each
+    // run's stdout held exactly one. (Two runs, hence two counts — they were
+    // written up as one and the mismatch was caught in review.) Token counts are recoverable from
     // that file, per assistant record and in more detail than the event gives;
     // the CLI's own cost arithmetic is not recoverable from it at all. It exists
     // in the bytes the PTY printed, and the daemon holds the only copy.
@@ -1457,11 +1460,26 @@ const server = http.createServer(async (req, res) => {
       return send(res, 200, {
         id: session.id,
         text,
-        // Of what is RETURNED, not of what was captured — `truncated` is the
-        // field that says bytes were dropped, and a length that disagreed with
-        // its own payload would be worse than no length.
+        // Of what is RETURNED, not of what was captured: a length that
+        // disagreed with its own payload would be worse than no length.
         bytes: Buffer.byteLength(text, "utf8"),
+        // Exactly one thing: this RESPONSE hit the cap above. It is not, and
+        // cannot be, the answer to "did I get the whole run" — at default
+        // config `CONFIG.scrollbackBytes` equals the cap and the ring trims
+        // BELOW it (stripping escapes shrinks the buffer further), so the loss
+        // that actually happens on a long run is invisible here and this field
+        // is `false` throughout. A route for machines that answered "nothing
+        // was dropped" while megabytes had been is the one way this can
+        // mislead, and it read that way until review caught it.
         truncated,
+        // So the honest answer rides beside it. `complete: true` is a
+        // guarantee — every byte the session printed is in `text`; `false`
+        // means something is or may be missing, whether to the cap here, to
+        // the ring, or to a reattach this daemon could not see behind (see
+        // `everythingSeen` in session.ts). Pessimistic by construction, which
+        // is the safe direction: a consumer may trust `true` and must
+        // re-derive nothing when it is `false`.
+        complete: session.transcriptComplete && !truncated,
       });
     }
 

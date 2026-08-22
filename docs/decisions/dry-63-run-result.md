@@ -34,13 +34,20 @@ weak: the host's 109,496 records were 99.9% `entrypoint: cli` (interactive), and
 "print mode doesn't persist a result record either" was a guess from a biased
 sample. So:
 
-| | result records | `total_cost_usd` |
-|---|---|---|
-| `claude -p --output-format stream-json` **stdout** | 1 | 1 |
-| the same run's persisted JSONL (11 records, `entrypoint: sdk-cli`) | 0 | 0 |
-
 Measured twice on v2.1.240 — standalone, and again on a run spawned through a
-throwaway daemon so the whole chain was under test. The ticket said "if print
+throwaway daemon so the whole chain was under test. Both runs, both streams:
+
+| | result records | `total_cost_usd` | records persisted |
+|---|---|---|---|
+| run 1 (standalone) — **stdout** | 1 | 1 | — |
+| run 1 — its persisted JSONL (`entrypoint: sdk-cli`) | 0 | 0 | 10 |
+| run 2 (spawned through the daemon) — **stdout** | 1 | 1 | — |
+| run 2 — its persisted JSONL (`entrypoint: sdk-cli`) | 0 | 0 | 11 |
+
+The two record counts are two runs, not a contradiction — worth spelling out
+because the first draft of this doc and the route's comment quoted one each
+while both said "the same run", which review caught. The counts are context;
+the zeros are the claim. The ticket said "if print
 mode does write a result record, this ticket is empty and should be closed". It
 does not. (A first pass appeared to find `total_cost_usd` in a transcript; it
 was the draft of the ticket itself, echoed back into the session log. Anyone
@@ -105,7 +112,35 @@ re-checking this will hit that same false positive.)
    comment claimed a newline search "settles both", which was true of every
    input the harness had and false of the one it didn't. CLAUDE.md trap 7, on
    a comment I had written myself an hour earlier.
-7. **The cap is NOT `DRYDOCK_SCROLLBACK_BYTES`.** They default to the same
+7. **`truncated` cannot answer "did I get the whole run", so something else
+   has to.** This is the one way a route built for machines could actively
+   mislead one, and it shipped in the first draft: `truncated` reports that the
+   *response* hit the 1 MiB HTTP cap, and at default config
+   `DRYDOCK_SCROLLBACK_BYTES` is the same 1 MiB and the ring trims to at or
+   below it — `stripAnsi` then shrinks the buffer further. So on an ordinary
+   daemon `full.byteLength > READ_CAP_BYTES` is false however much a run
+   printed, and an agent that emitted 8 MiB gets `200`, `truncated: false`,
+   `bytes: ~600000`, and no way to tell that 7.4 MiB is gone — `bytes` is
+   comfortably under the cap, so the loss cannot be inferred from a short
+   payload either. The comment beside the field said it was what reported
+   dropped bytes. It was the opposite.
+
+   Fixed by `complete`, computed from `PtySession.everythingSeen`: `true` is a
+   guarantee that every byte the session printed is in `text`, `false` means
+   something is or may be missing. One-directional and deliberately pessimistic
+   — a session adopted a minute after it started lost nothing and still answers
+   `false`, which is the safe direction for a completeness claim.
+
+   The four places it goes false are the four places output leaves this daemon's
+   sight: the ring dropping a chunk, and the three paths that install a buffer
+   somebody else was keeping — `adopt`, `adoptExited`, and a link reattach. The
+   last three are why `complete` is a "cannot promise" rather than a measurement:
+   whether a supervisor's own ring had trimmed before this daemon attached is
+   not knowable from here. It would take a `SessionMeta` field, and that means
+   bumping `PROTOCOL_VERSION` — which strands every live session on the host
+   (CLAUDE.md) to add a hint. Not worth it; saying so is.
+
+8. **The cap is NOT `DRYDOCK_SCROLLBACK_BYTES`.** They default to the same
    1 MiB, which makes tying them together look free. Raising the ring is a
    decision about how much history a reattach gets; it must not silently become
    a decision about how large an HTTP response may be. This also has a testing
@@ -129,14 +164,14 @@ pointed through. The cost is that a client must send back what the API gave it
 verbatim; one that normalises or expands the path first falls through to the
 cwd-confined arm and gets its 403.
 
-8. **A negative probe against a file that does not exist proves nothing.**
+9. **A negative probe against a file that does not exist proves nothing.**
    `/file` cannot distinguish a traversal attempt from a missing file — realpath
    fails on both, and the catch answers 404 for both, deliberately. So "another
    `.md` in runsRoot is refused" is only a claim if that `.md` is really on
    disk. Found the hard way: the probe passed while pointed at a decoy left over
    from hand-testing, and went 404 — not 403 — the moment the rig was cleaned.
    The harness writes its own decoy now.
-9. **Pick a session cwd that is not an ancestor of `runsRoot`.** The first run
+10. **Pick a session cwd that is not an ancestor of `runsRoot`.** The first run
    of these probes used `cwd: /tmp` with `DRYDOCK_RUNS_ROOT=/tmp/dry63-runs`,
    and "a different session's handoff is refused" came back 200 — correctly, by
    the ordinary confinement rule, because the file was under the cwd. Nothing
@@ -159,13 +194,16 @@ cwd-confined arm and gets its 403.
 ## Verifying it
 
 `scripts/verify/run-result.mts` — a throwaway daemon, no browser, about a
-minute. Twenty-four checks; its header carries the rig and the discrimination
-run. **Against `main`'s `server.ts` 18 of the 24 fail**, and the six that pass
-are the ones answered by code this ticket did not touch. Three more used to
+minute, and it needs TWO daemons — the ring has to sit on both sides of the
+route's cap and no one daemon can. Thirty checks; its header carries the rig and
+the discrimination run. **Against `main`'s `server.ts` 24 of the 30 fail**, and
+the six that pass are the ones answered by code this ticket did not touch. Three more used to
 join them: they were satisfied by an *empty* response and passed against the
 bug until the `text.length` guards went in.
 
-Section 2b is the one to keep if any of it is ever trimmed. It is the only
-check that caught a shipped bug rather than confirming a decision, and it
-discriminates hard — against the unbounded snap it reports `1 byte` where a
-megabyte was asked for.
+Sections 2b and 5 are the ones to keep if any of it is ever trimmed. They are
+the two that caught shipped bugs rather than confirming decisions, and both
+discriminate down to a single line: 2b reports `1 byte` where a megabyte was
+asked for against the unbounded snap, and 5 turns red — alone, with section 2's
+version of the same claim still green — when the one statement recording a ring
+drop is removed from `session.ts`.

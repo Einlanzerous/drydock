@@ -419,6 +419,25 @@ export class PtySession {
   private scrollbackBytes = 0;
   /** What `seedScrollback` last installed, before any live byte was appended. */
   private seededBytes = 0;
+  /**
+   * Can this daemon still vouch that `scrollback` is EVERYTHING the session
+   * printed? (DRY-63)
+   *
+   * Starts true and only ever goes false, in the four places output can leave
+   * this daemon's sight: the ring dropping a chunk, and the three paths that
+   * install a buffer somebody else was keeping — `adopt`, `adoptExited`, and a
+   * link reattach. It exists because `/api/sessions/:id/transcript` would
+   * otherwise have no honest way to answer "is this the whole run?": the
+   * response's own `truncated` flag reports the HTTP cap and nothing else, and
+   * at default config the ring trims BELOW that cap, so the loss that actually
+   * happens is the one `truncated` cannot see.
+   *
+   * Deliberately one-directional and deliberately pessimistic. `true` is a
+   * guarantee and must never be wrong; `false` may be gloomy — a session
+   * adopted a minute after it started lost nothing — and that is the safe
+   * direction for a completeness claim.
+   */
+  private everythingSeen = true;
 
   private readonly clients = new Set<WebSocket>();
   private readonly pending = new Map<string, PendingPermission>();
@@ -688,6 +707,13 @@ export class PtySession {
     session.rows = link.hello.rows;
     // The scrollback comes back inside `bind`, the same as it does for a spawn.
     session.bind(link);
+    // But unlike a spawn, what comes back is a ring somebody ELSE was keeping,
+    // for a run that started before this daemon existed. If it had already
+    // trimmed there is nothing here that could know (DRY-63) — the supervisor
+    // would have to say so on the wire, and a `SessionMeta` field for it means
+    // bumping PROTOCOL_VERSION, which strands every live session on the host to
+    // add a hint. So this daemon simply stops claiming to have seen it all.
+    session.everythingSeen = false;
     log.info("session adopted after a daemon restart", {
       id: meta.id,
       supervisorPid: link.hello.pid,
@@ -721,6 +747,9 @@ export class PtySession {
   ): PtySession {
     const session = new PtySession(meta, notifyGate, notifyRunEnd, notifyEnded);
     if (scrollback) session.seedScrollback(scrollback);
+    // Same as `adopt`: this is the supervisor's flushed ring, and whether it
+    // had trimmed before the flush is not knowable from here (DRY-63).
+    session.everythingSeen = false;
     session.status = "exited";
     session.exitCode = exitCode;
     session.endedAtValue = endedAt;
@@ -786,6 +815,10 @@ export class PtySession {
       // appending would print the session's history to every attached pane a
       // second time.
       this.seedScrollback(replay);
+      // Whatever the supervisor dropped while the connection was down, it
+      // dropped without this daemon watching (DRY-63). Usually nothing; not
+      // something the replay can be asked.
+      this.everythingSeen = false;
       log.info("supervisor reattached — scrollback resynced", {
         id: this.id,
         bytes: this.scrollbackBytes,
@@ -911,6 +944,12 @@ export class PtySession {
     while (this.scrollbackBytes > CONFIG.scrollbackBytes && this.scrollback.length > 1) {
       const dropped = this.scrollback.shift()!;
       this.scrollbackBytes -= dropped.byteLength;
+      // The moment this daemon stops holding the whole run (DRY-63). Recorded
+      // here rather than derived at read time because it is unrecoverable
+      // afterwards: once the chunk is gone nothing about the ring says it was
+      // ever bigger, which is exactly why `/transcript` used to answer
+      // `truncated: false` for a run that had lost megabytes.
+      this.everythingSeen = false;
     }
     this.noteOutputForInitialInput(data);
     this.broadcast({ type: "data", data });
@@ -1053,6 +1092,19 @@ export class PtySession {
       title: this.title,
       createdAt: this.createdAt,
     };
+  }
+
+  /**
+   * Is `transcript()` the whole of what this session printed? (DRY-63)
+   *
+   * A guarantee when true, a "cannot promise" when false — see
+   * `everythingSeen`. Read by `/api/sessions/:id/transcript`, which needs to
+   * say so on the wire: a consumer computing a run's cost from these bytes has
+   * to be able to tell a complete record from a partial one, and no other field
+   * in that response can tell it.
+   */
+  get transcriptComplete(): boolean {
+    return this.everythingSeen;
   }
 
   /** Scrollback with the terminal control codes taken out, for humans. */

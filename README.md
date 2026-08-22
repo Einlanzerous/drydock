@@ -289,7 +289,10 @@ no per-repo setup.
   the one stream nothing but Drydock captures: Claude Code's print mode writes
   its end-of-run `{"type":"result",…}` event — `total_cost_usd`, `num_turns`,
   `usage` — to stdout and to no file it keeps, so the PTY holds the only copy.
-  Readable until the sweep clears the session, so read it on `session-exit`.
+  The response carries **`complete`**, and that is the field to branch on: the
+  scrollback ring is finite, so a long run's early output is genuinely gone, and
+  `complete: true` is a guarantee that it isn't. Readable until the sweep clears
+  the session, so read it on `session-exit`.
 - **"Your turn" indicator (DRY-18).** The injected `Stop` hook flags a session
   idle when the agent yields; the window badge and dock light up. A turn ending
   means "done *or* waiting on your reply" — the UI never claims "complete".

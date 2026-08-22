@@ -40,9 +40,9 @@
 // to put it back. Restoring with `git checkout` instead would leave the revert
 // STAGED, and the next commit would carry it.
 //
-// Measured against that build: **18 of the 24 checks fail** — everything in
-// sections 1, 2 and 2b (the route 404s, since it does not exist) and the three
-// `own handoff` claims (403, since /file confines to the cwd).
+// Measured against that build: **24 of the 30 checks fail** — everything in
+// sections 1, 2, 2b and 5 (the route 404s, since it does not exist) and the
+// three `own handoff` claims (403, since /file confines to the cwd).
 //
 // The six that still pass are the point of doing this. `unknown id -> 404`, the
 // three negative handoff probes and the decoy's own existence are answered by
@@ -53,16 +53,27 @@
 // is how that was found: they were satisfied by an EMPTY response and passed
 // against the bug.
 //
-// RIG (throwaway daemon, per CLAUDE.md's second-instance pattern). The ring is
-// raised deliberately — the route's cap must NOT be a restatement of
-// DRYDOCK_SCROLLBACK_BYTES, and at the 1 MiB default the truncation branch can
-// never be reached to be tested:
+// RIG — TWO throwaway daemons, per CLAUDE.md's second-instance pattern. Two,
+// because the ring size has to be on both sides of the route's 1 MiB cap and no
+// single daemon can be: above it (4 MiB) the truncation branch is reachable and
+// section 2 can test it; below it (200 KB) the ring drops output while the cap
+// never fires, which is the only way to see what section 5 is about.
 //   cd daemon
 //   env $(env | grep -o '^DRYDOCK_[A-Z_0-9]*' | sed 's/^/-u /' | tr '\n' ' ') \
 //     DRYDOCK_PORT=4363 DRYDOCK_HOST=127.0.0.1 DRYDOCK_TRACKER=fixture \
 //     DRYDOCK_SESSIONS_DIR=/tmp/d63 DRYDOCK_STATE_FILE=/tmp/dry63-state.json \
 //     DRYDOCK_WORKTREES_ROOT=/tmp/dry63-wt DRYDOCK_RUNS_ROOT=/tmp/dry63-runs \
 //     DRYDOCK_SCROLLBACK_BYTES=4194304 node --import tsx src/index.ts
+//   env $(env | grep -o '^DRYDOCK_[A-Z_0-9]*' | sed 's/^/-u /' | tr '\n' ' ') \
+//     DRYDOCK_PORT=4364 DRYDOCK_HOST=127.0.0.1 DRYDOCK_TRACKER=fixture \
+//     DRYDOCK_SESSIONS_DIR=/tmp/d63b DRYDOCK_STATE_FILE=/tmp/dry63b-state.json \
+//     DRYDOCK_WORKTREES_ROOT=/tmp/dry63-wt DRYDOCK_RUNS_ROOT=/tmp/dry63-runs \
+//     DRYDOCK_SCROLLBACK_BYTES=200000 node --import tsx src/index.ts
+//
+// SEPARATE sessions dirs. One shared between them would have each daemon adopt
+// the other's live agents at boot and reparent them (CLAUDE.md: the sessions dir
+// is per-port on purpose), and section 5's whole premise — a ring of a known
+// size — would then depend on which daemon happened to spawn the session.
 //
 // DRYDOCK_RUNS_ROOT is not decoration: unset, the autonomous runs below write
 // handoff documents into ~/.drydock/runs, which the dev and prod daemons share.
@@ -73,6 +84,8 @@
 //
 // then, from another terminal:
 //   (cd daemon && node --import tsx ../scripts/verify/run-result.mts)
+// Section 5 SKIPS rather than passing if :4364 is not up, so a one-daemon run
+// still reports honestly instead of quietly dropping the claim.
 // Every session it starts exits on its own, so there are no supervisors left to
 // clean up — but the exited sessions sit in the registry until the DRY-60 sweep,
 // which is also what makes the route answer for them at all.
@@ -82,6 +95,15 @@ import * as path from "node:path";
 import type { Detail, FileResponse, SessionInfo, SessionsResponse, SpawnResponse } from "./api.mjs";
 
 const DAEMON = process.env.DAEMON ?? "http://127.0.0.1:4363";
+/**
+ * A SECOND daemon, with a ring far below the HTTP cap. Section 5 only.
+ *
+ * The two rigs cannot be one. Section 2 needs a ring bigger than the cap or the
+ * truncation branch is unreachable; section 5 needs one smaller, or the loss it
+ * is about is indistinguishable from the loss the cap causes. A harness with
+ * only the first rig cannot see the bug review found here at all.
+ */
+const SMALL_RING = process.env.DAEMON_SMALL_RING ?? "http://127.0.0.1:4364";
 /** Mirrors READ_CAP_BYTES in server.ts. */
 const READ_CAP = 1_048_576;
 /**
@@ -110,11 +132,12 @@ interface TranscriptResponse {
   text?: string;
   bytes?: number;
   truncated?: boolean;
+  complete?: boolean;
   error?: string;
 }
 
-async function spawn(body: Record<string, unknown>): Promise<string> {
-  const res = await fetch(`${DAEMON}/api/sessions`, {
+async function spawn(body: Record<string, unknown>, base = DAEMON): Promise<string> {
+  const res = await fetch(`${base}/api/sessions`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
@@ -124,8 +147,8 @@ async function spawn(body: Record<string, unknown>): Promise<string> {
   return json.session.id;
 }
 
-const sessions = async (): Promise<SessionInfo[]> =>
-  ((await (await fetch(`${DAEMON}/api/sessions`)).json()) as SessionsResponse).sessions;
+const sessions = async (base = DAEMON): Promise<SessionInfo[]> =>
+  ((await (await fetch(`${base}/api/sessions`)).json()) as SessionsResponse).sessions;
 
 /**
  * Wait for a session to exit, and return its record.
@@ -135,10 +158,10 @@ const sessions = async (): Promise<SessionInfo[]> =>
  * something is wrong with the rig, and a harness that waits indefinitely for it
  * reports that as a hang instead of a failure (CLAUDE.md trap 1).
  */
-async function ended(id: string, timeoutMs = 60_000): Promise<SessionInfo> {
+async function ended(id: string, base = DAEMON, timeoutMs = 60_000): Promise<SessionInfo> {
   const until = Date.now() + timeoutMs;
   for (;;) {
-    const found = (await sessions()).find((s) => s.id === id);
+    const found = (await sessions(base)).find((s) => s.id === id);
     if (!found) throw new Error(`session ${id} left the registry before it was read`);
     // `status`, never `exitCode`: a signalled process exits 129/137/143 and a
     // harness reading the number calls a deliberate stop a crash (CLAUDE.md
@@ -149,8 +172,11 @@ async function ended(id: string, timeoutMs = 60_000): Promise<SessionInfo> {
   }
 }
 
-async function transcript(id: string): Promise<{ status: number; json: TranscriptResponse }> {
-  const res = await fetch(`${DAEMON}/api/sessions/${id}/transcript`);
+async function transcript(
+  id: string,
+  base = DAEMON,
+): Promise<{ status: number; json: TranscriptResponse }> {
+  const res = await fetch(`${base}/api/sessions/${id}/transcript`);
   return { status: res.status, json: (await res.json()) as TranscriptResponse };
 }
 
@@ -239,6 +265,11 @@ console.log("\n1. the run-result event reaches GET /api/sessions/{id}/transcript
     `${json.bytes} vs ${Buffer.byteLength(text, "utf8")}`,
   );
   check("nothing this short is truncated", json.truncated === false, String(json.truncated));
+  // The `true` half of the completeness guarantee. This daemon spawned the
+  // session, watched every byte and never overflowed its ring, so it can vouch
+  // — and if it ever cannot, `complete` has become useless in the other
+  // direction: permanently false says as little as permanently true.
+  check("a run it watched start to finish is complete", json.complete === true, String(json.complete));
 }
 
 // --- 2. the cap keeps the end, on a line boundary ---------------------------
@@ -292,6 +323,11 @@ console.log("\n2. above the cap it keeps the TAIL, cut on a line boundary");
     /^LINE-\d+ padding-padding-padding-padding$/.test(first),
     JSON.stringify(first.slice(0, 60)),
   );
+  // The claim review asked for. `truncated` answers "this response hit the HTTP
+  // cap" and nothing else — at default config the ring trims BELOW that cap, so
+  // on a normal daemon it is false however much a run printed and lost. This is
+  // the field a consumer can actually ask "did I get the whole run".
+  check("a run over the cap is not complete", json.complete === false, String(json.complete));
 }
 
 // --- 2b. one line longer than the cap ---------------------------------------
@@ -424,6 +460,60 @@ console.log("\n4. /file serves the session's OWN handoff and nothing else");
 
   const inside = await readFileVia(mine.id, "inside.md");
   check("an ordinary read under the cwd still works", inside.status === 200, String(inside.status));
+}
+
+// --- 5. output the RING ate, below the HTTP cap -----------------------------
+
+console.log("\n5. a run whose output the ring dropped, with the cap never reached");
+{
+  let reachable = true;
+  try {
+    await fetch(`${SMALL_RING}/healthz`);
+  } catch {
+    reachable = false;
+  }
+  if (!reachable) {
+    // A skip, never a pass. This is the only section that can see the defect
+    // review found — `truncated` reporting `false` for a run that had lost
+    // megabytes — and a harness that quietly declared victory without the
+    // second daemon would be green on the exact build that reintroduced it.
+    skip("the ring-loss claims", `no daemon at ${SMALL_RING} — see the rig, it needs TWO`);
+  } else {
+    // ~600 KB: comfortably over that rig's 200 KB ring and comfortably under
+    // the route's 1 MiB cap. That gap is the whole point — it is where the
+    // response is lossy and `truncated` is nonetheless false.
+    const id = await spawn(
+      {
+        command: "/bin/sh",
+        args: [
+          "-c",
+          'echo HEAD-MARKER-DRY63; i=0; while [ $i -lt 12000 ]; do ' +
+            'echo "LINE-$i padding-padding-padding-padding"; i=$((i+1)); done; ' +
+            "echo TAIL-MARKER-DRY63",
+        ],
+        cwd: os.tmpdir(),
+        title: "dry63-ring-loss",
+      },
+      SMALL_RING,
+    );
+    await ended(id, SMALL_RING);
+    const { json } = await transcript(id, SMALL_RING);
+    const text = json.text ?? "";
+    // Asserted from the BYTES, not from the flag, so the flag has something
+    // independent to be checked against: the run printed a head marker and the
+    // response does not contain it.
+    check("the run's first line is gone", text.length > 0 && !text.includes("HEAD-MARKER-DRY63"), `${json.bytes} bytes`);
+    check("its last line is not", text.trimEnd().endsWith("TAIL-MARKER-DRY63"), JSON.stringify(text.slice(-25)));
+    // The defect, stated as the harness sees it: output was demonstrably lost
+    // (line above) and this field still says no.
+    check(
+      "truncated is false even so — the cap never fired",
+      json.truncated === false,
+      String(json.truncated),
+    );
+    // ...and the field that is allowed to answer the question does.
+    check("but complete says the run is not whole", json.complete === false, String(json.complete));
+  }
 }
 
 console.log(

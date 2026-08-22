@@ -760,14 +760,35 @@ a window B opened on purpose — so `=== 0` would fail against correct behaviour
 and (worse) written before the watch step existed it would have passed
 vacuously.
 
-Teardown: kill the daemons by EXECUTABLE, never by pattern — `pgrep -f "tsx
-src/index.ts"` also matches the shell whose command line contains that string,
-which is CLAUDE.md's `pkill -f supervisor/main` footgun one pattern over.
+Teardown needs TWO filters, and the executable is only the first of them. This
+block used to be exe-only (found by the DRY-63 review), and exe-only is not a
+narrowing at all for the supervisors: `pgrep -f "supervisor/main"` matches every
+supervisor on the machine and they are all the same `node` binary, so it
+`kill -9`s the dev daemon's live agents and prod's (`:4318`) along with these
+three. CLAUDE.md names this exact failure — "an exe-only loop kills live agents
+belonging to daemons you are not testing, including the one holding the terminal
+you are typing in".
+
+So: the exe test excludes the shell running the loop (whose command line
+contains both literals), and the throwaway `DRYDOCK_SESSIONS_DIR` — unique to
+these three daemons and present in every one of their supervisors' argv — is
+what excludes everybody else's agents. Supervisors FIRST, then the daemons, then
+the directories.
 
 ```sh
-for p in $(pgrep -f "tsx src/index.ts") $(pgrep -f "supervisor/main"); do
-  case "$(readlink /proc/$p/exe)" in *node*) kill -9 "$p";; esac
+# supervisors: exe AND this rig's own sessions dir
+for p in $(pgrep -f "supervisor/main"); do
+  case "$(readlink /proc/$p/exe)" in *node*)
+    tr '\0' ' ' < /proc/$p/cmdline | grep -q "/tmp/dry27s-" && kill -9 "$p";;
+  esac
 done
+# daemons: exe AND cwd, since other worktrees run their own
+for p in $(pgrep -f "src/index.ts"); do
+  case "$(readlink /proc/$p/exe)" in *node*)
+    case "$(readlink /proc/$p/cwd)" in *<your-worktree>*) kill "$p";; esac;;
+  esac
+done
+rm -rf /tmp/dry27s-off /tmp/dry27s-single /tmp/dry27s-multi
 docker rm -f dry27-db
 ```
 
@@ -1052,6 +1073,10 @@ About a minute, most of it spent printing a megabyte through a PTY.
 
 Two of those env vars are load-bearing rather than tidy:
 
+- **Two daemons, with rings on opposite sides of the cap.** :4363 at 4 MiB and
+  :4364 at 200 KB, on separate sessions dirs — shared, each would adopt the
+  other's agents at boot (CLAUDE.md: the sessions dir is per-port on purpose).
+  Section 5 SKIPS rather than passing when :4364 is absent.
 - **`DRYDOCK_SCROLLBACK_BYTES=4194304`.** The route caps its response at 1 MiB
   and the ring defaults to the same 1 MiB, so at the default the ring trims the
   output *before* the route ever sees a megabyte and the truncation branch is
@@ -1090,11 +1115,22 @@ What it holds down:
   multi-byte on purpose, since the fallback path has no line to cut on and only
   non-ASCII can show a cut landing mid-character.
 - **`bytes` describes the payload it ships with**, not what was captured.
+- **`complete` answers the question `truncated` cannot** (section 5, and the
+  reason the rig needs a second daemon). `truncated` reports one thing: this
+  response hit the HTTP cap. At default config the ring is the SAME 1 MiB and
+  trims below it, so on a normal daemon a run that printed 8 MiB comes back
+  `truncated: false` with most of itself missing — which is how the route read
+  until the DRY-63 review. The small-ring daemon reproduces that in seconds:
+  the harness asserts the head marker is gone *from the bytes*, that `truncated`
+  is nonetheless false, and that `complete` is false. Removing the one line in
+  `session.ts` that records a ring drop turns that last check red and nothing
+  else, which is what makes it worth its own daemon — section 2's version of the
+  claim passes on `!truncated` alone.
 - **`/file` serves this session's own handoff and nothing else** — three
   negative probes beside the positive one.
 
 Discrimination (see [the section below](#making-sure-a-harness-still-discriminates)):
-against `main` it fails **18 of 24**. Six survive, and all six should — the
+against `main` it fails **24 of 30**. Six survive, and all six should — the
 unknown-id 404, the three negative handoff probes, the ordinary in-cwd read, and
 the harness's check that its own decoy file exists. They are answered by code
 this ticket did not touch, so they are green either way; a harness made only of
