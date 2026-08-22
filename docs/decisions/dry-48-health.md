@@ -154,7 +154,7 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:4399/readyz   # 200, or 503 w
 Harness: `scripts/verify/health.mts` + `fault-inject.mts`, rig in its README — it
 starts the eight daemons it needs (plus a ninth that must refuse to start) and a
 stub tracker of its own, no browser, no database, about two minutes.
-Confirm it discriminates: against `main` it fails **48 of 62**, and the fourteen
+Confirm it discriminates: against `main` it fails **49 of 63**, and the fourteen
 survivors are the useful part of that number rather than slack — four are the
 legacy-compatibility checks (which are supposed to pass), five are premises this
 ticket didn't change (`=0` stays up, the default exits, a broken store already
@@ -167,15 +167,16 @@ the finished tree:
 
 | mutation | fails |
 |---|---|
-| `ok: status !== "down"` → `status === "ok"` | 3 of 62 |
-| `readiness()` refusing a degraded tracker | 1 of 62 |
-| the uncaught handler not calling `faults.record` | 7 of 62 |
-| `idle` counting only RUNNING sessions (review's bug) | 1 of 62 |
-| `idle` ignoring whether anything is running | 6 of 62 |
-| `idle` never arming (i.e. `stay` by another name) | 3 of 62 |
-| `TrackerWatch.failed` without its `CALLER_FAULT` arm | 1 of 62 |
-| `TrackerWatch.failed` quoting the tracker's own body | 2 of 62 |
-| `indexHealth` calling `sessionsDir()` | **0 of 62** — see trap 9 |
+| `ok: status !== "down"` → `status === "ok"` | 3 of 63 |
+| `readiness()` refusing a degraded tracker | 1 of 63 |
+| the uncaught handler not calling `faults.record` | 7 of 63 |
+| `idle` counting only RUNNING sessions (review's bug) | 1 of 63 |
+| `idle` ignoring whether anything is running | 6 of 63 |
+| `idle` never arming (i.e. `stay` by another name) | 3 of 63 |
+| `TrackerWatch.failed` without its `CALLER_FAULT` arm | 1 of 63 |
+| `TrackerWatch.failed` quoting the tracker verbatim | 3 of 63 |
+| `TrackerWatch.failed` never reporting the status | 1 of 63 |
+| `indexHealth` calling `sessionsDir()` | **0 of 63** — see trap 9 |
 
 Three things about that table. The three `idle` rows are one property seen from
 three sides, and each covers the others' blind spot: a policy that exits
@@ -184,9 +185,12 @@ exits passes "it stayed up while a session was running", and the one review foun
 passes BOTH. That middle row can only ever fail a single check — once the daemon
 has exited early everything after it in the section passes — which is the whole
 reason the check that catches it is placed while the finished card is still on
-the desk rather than after it is dismissed. The two `TrackerWatch` rows are
-disjoint (the 404 in section (b), the 500 body in (f2)), so naming the wrong one
-sends the next person looking for a bug that isn't there. And the zero is
+the desk rather than after it is dismissed. The three `TrackerWatch` rows are
+disjoint, and the last two are here because the first attempt at that mutation
+was wrong in an instructive way: neutering only the ternary's HTTP arm leaves the
+else-branch, which is itself half the fix, so it measured 1 rather than 3 and
+would have entered this table as evidence for a property it never tested. And the
+zero is
 recorded rather than dropped, because a harness's own vacuous check is worth
 naming: the reader who finds it needs to know it was measured, not assumed.
 

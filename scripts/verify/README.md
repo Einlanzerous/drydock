@@ -1581,7 +1581,7 @@ What it holds down:
 
 ### Making sure this one still discriminates
 
-Against `main` it fails **48 of 62**, and the fourteen survivors are worth
+Against `main` it fails **49 of 63**, and the fourteen survivors are worth
 reading rather than glossing:
 
 - **four are the legacy-compatibility checks** — `ok`, `sessions`, `store` and
@@ -1601,25 +1601,33 @@ reading rather than glossing:
 
 | mutation | fails |
 |---|---|
-| `ok: status !== "down"` → `status === "ok"` | **3 of 62**, the degraded checks |
-| `readiness()` refusing a degraded tracker | **1 of 62** |
-| the uncaught handler not calling `faults.record` | **7 of 62** |
-| `idle` counting only RUNNING sessions (review's bug) | **1 of 62**, and it can only be 1 |
-| `idle` ignoring whether anything is running | **6 of 62** |
-| `idle` never arming | **3 of 62** |
-| `TrackerWatch.failed` without its caller-fault arm | **1 of 62**, the 404 |
-| `TrackerWatch.failed` quoting the tracker's body | **2 of 62**, the (f2) pair |
-| `indexHealth` calling `sessionsDir()` | **0 of 62** — vacuous, and why is in [dry-48-health](../../docs/decisions/dry-48-health.md) |
+| `ok: status !== "down"` → `status === "ok"` | **3 of 63**, the degraded checks |
+| `readiness()` refusing a degraded tracker | **1 of 63** |
+| the uncaught handler not calling `faults.record` | **7 of 63** |
+| `idle` counting only RUNNING sessions (review's bug) | **1 of 63**, and it can only be 1 |
+| `idle` ignoring whether anything is running | **6 of 63** |
+| `idle` never arming | **3 of 63** |
+| `TrackerWatch.failed` without its caller-fault arm | **1 of 63**, the 404 |
+| `TrackerWatch.failed` quoting the tracker verbatim | **3 of 63**, both (f) and the (f2) pair |
+| `TrackerWatch.failed` never reporting the status | **1 of 63**, the other half of that pair |
+| `indexHealth` calling `sessionsDir()` | **0 of 63** — vacuous, and why is in [dry-48-health](../../docs/decisions/dry-48-health.md) |
 
 Three notes on that table. The three `idle` rows are one property seen from
 three sides, and the middle one — review's — **can only ever fail one check**:
 once the daemon has exited early, everything after it in the section passes,
 which is exactly why the check that catches it is placed where the finished card
-still exists. The two `TrackerWatch` rows are disjoint (one is the 404 in section
-(b), the other the 500 body in (f2)), so naming the wrong one sends the next
-person looking for a bug that isn't there. And the zero is recorded rather than
-dropped: a harness's own vacuous check is worth naming, because the reader who
-finds it needs to know it was measured.
+still exists.
+
+The three `TrackerWatch` rows are disjoint, and the last two exist because the
+first attempt at that mutation was wrong in a way worth recording. Neutering only
+the ternary's HTTP arm leaves the else-branch — which is itself part of the fix —
+so it measured 1, not 3, and would have gone into this table as evidence for a
+property it never tested. The mutation that tests "does it quote the tracker" is
+`this.lastError = oneLine(err)`, replacing the whole expression; the 1-failure
+one is a different (also real) property, that the STATUS is reported at all.
+
+And the zero is recorded rather than dropped: a harness's own vacuous check is
+worth naming, because the reader who finds it needs to know it was measured.
 
 **The rig's own trap, worth knowing before you edit this file.** Six postures
 share one port, so a daemon that outlives its section answers for the next one —

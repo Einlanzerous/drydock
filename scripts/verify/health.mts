@@ -36,29 +36,34 @@
 // starting eight throwaway daemons (a ninth is expected to refuse) and waiting
 // out the idle-exit polls.
 //
-// CONFIRM IT DISCRIMINATES. Against `main` it fails 48 of 62; the
+// CONFIRM IT DISCRIMINATES. Against `main` it fails 49 of 63; the
 // survivors are named one by one in this file's section in
 // scripts/verify/README.md — four are the legacy-compatibility checks (which are
 // meant to pass), the rest are premises this ticket didn't change, rig setup, or
 // checks that pass vacuously against a daemon with no health payload. Per
 // mutation, against the finished tree, all measured:
 //
-//   `ok: status !== "down"` → `ok: status === "ok"`      3 of 62, the degraded
+//   `ok: status !== "down"` → `ok: status === "ok"`      3 of 63, the degraded
 //     checks — i.e. the ticket's own "not to be restarted for being suspect"
-//   `readiness()` refusing a degraded tracker            1 of 62
-//   the uncaught handler not calling `faults.record`     7 of 62
-//   `idle` counting only RUNNING sessions                1 of 62 ┐ one property,
-//   `idle` ignoring whether anything is running          6 of 62 │ three sides;
-//   `idle` never arming at all                           3 of 62 ┘ see below
-//   `TrackerWatch.failed` without its CALLER_FAULT arm   1 of 62, the 404 in (b)
-//   `TrackerWatch.failed` quoting the tracker's body     2 of 62, the pair in (f2)
-//   `indexHealth` calling `sessionsDir()`                0 of 62 — vacuous, and
+//   `readiness()` refusing a degraded tracker            1 of 63
+//   the uncaught handler not calling `faults.record`     7 of 63
+//   `idle` counting only RUNNING sessions                1 of 63 ┐ one property,
+//   `idle` ignoring whether anything is running          6 of 63 │ three sides;
+//   `idle` never arming at all                           3 of 63 ┘ see below
+//   `TrackerWatch.failed` without its CALLER_FAULT arm   1 of 63, the 404 in (b)
+//   `TrackerWatch.failed` quoting the tracker verbatim   3 of 63, (f) and (f2)
+//   `TrackerWatch.failed` never reporting the status     1 of 63, (f2)'s first
+//   `indexHealth` calling `sessionsDir()`                0 of 63 — vacuous, and
 //     recorded as such rather than dropped: `ensured` makes the two spellings
 //     agree in a running daemon, so that check is a latch, not a discriminator.
 //
-// The first `idle` row is review's finding and can only ever fail ONE check:
-// once the daemon has exited early, every check after it in the section passes.
-// That is why the check catching it sits where the finished card still exists.
+// Two of those rows are worth reading twice. The first `idle` one is review's
+// finding and can only ever fail ONE check: once the daemon has exited early,
+// every check after it in the section passes — which is why the check catching
+// it sits where the finished card still exists. And the verbatim-quoting
+// mutation has to replace the WHOLE expression: neutering only its HTTP arm
+// leaves the else-branch, which is itself part of the fix, and measures 1
+// instead of 3.
 import { spawn, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as http from "node:http";
@@ -557,6 +562,15 @@ if (
     `${list} ${JSON.stringify(after.tracker)}`,
   );
   check("the process itself is not suspect", after?.faults?.total === 0, JSON.stringify(after.faults));
+  // The class, not the message — `JSON.parse` embeds the first characters of
+  // what it was handed in its SyntaxError, so a message here would be a second
+  // door for upstream text onto an endpoint that answers strangers. Node's
+  // failed connect is a TypeError; the point is that it is OUR word for it.
+  check(
+    "and it is described rather than quoted",
+    /^the tracker call failed \(\w+\)$/.test(after?.tracker?.error ?? ""),
+    after?.tracker?.error ?? "",
+  );
   const r = await readyz();
   check("/readyz is blind to the tracker too", r.code === 200 && r.body?.suspect === false, String(r.code));
   await stopDaemon();
