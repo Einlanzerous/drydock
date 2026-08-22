@@ -423,10 +423,11 @@ export class PtySession {
    * Can this daemon still vouch that `scrollback` is EVERYTHING the session
    * printed? (DRY-63)
    *
-   * Starts true and only ever goes false, in the four places output can leave
-   * this daemon's sight: the ring dropping a chunk, and the three paths that
+   * Starts true and only ever goes false, in the five places output can leave
+   * this daemon's sight: the ring dropping a chunk; the three paths that
    * install a buffer somebody else was keeping — `adopt`, `adoptExited`, and a
-   * link reattach. It exists because `/api/sessions/:id/transcript` would
+   * link reattach; and a supervisor that reports having trimmed before this
+   * daemon could attach, which is the one that reaches even a plain spawn. It exists because `/api/sessions/:id/transcript` would
    * otherwise have no honest way to answer "is this the whole run?": the
    * response's own `truncated` flag reports the HTTP cap and nothing else, and
    * at default config the ring trims BELOW that cap, so the loss that actually
@@ -809,6 +810,17 @@ export class PtySession {
   private bind(link: SupervisorLink): void {
     this.link = link;
     this.seedScrollback(link.takeReplay());
+    // The fifth place output leaves this daemon's sight, and the only one on
+    // the `true` side of the guarantee (DRY-63, found in review). Seeding on a
+    // SPAWN looked exempt — this daemon started the process, so what could it
+    // have missed? — but the supervisor spawns the PTY before it binds its
+    // socket and its own ring trims from the first chunk, so a command that
+    // prints a few MiB before anyone can attach hands back a ring, not a run.
+    // Nothing further need be printed, so the daemon's own trim never fires and
+    // it would have answered `complete: true` over a hole. `undefined` here is
+    // an older supervisor that cannot say; `adopt` is already pessimistic for
+    // exactly those, so the falsy check is the whole handling.
+    if (link.hello.dropped) this.everythingSeen = false;
     link.onReattach((replay) => {
       // A dropped-and-recovered connection hands back the whole buffer. Replace
       // rather than append: we can't know how much of it we already had, and

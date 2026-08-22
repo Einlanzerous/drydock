@@ -131,16 +131,45 @@ re-checking this will hit that same false positive.)
    — a session adopted a minute after it started lost nothing and still answers
    `false`, which is the safe direction for a completeness claim.
 
-   The four places it goes false are the four places output leaves this daemon's
-   sight: the ring dropping a chunk, and the three paths that install a buffer
-   somebody else was keeping — `adopt`, `adoptExited`, and a link reattach. The
-   last three are why `complete` is a "cannot promise" rather than a measurement:
-   whether a supervisor's own ring had trimmed before this daemon attached is
-   not knowable from here. It would take a `SessionMeta` field, and that means
-   bumping `PROTOCOL_VERSION` — which strands every live session on the host
-   (CLAUDE.md) to add a hint. Not worth it; saying so is.
+   It goes false in five places — see the next trap for the fifth, which is the
+   one that reaches a plain spawn.
 
-8. **The cap is NOT `DRYDOCK_SCROLLBACK_BYTES`.** They default to the same
+8. **The supervisor's ring trims before any daemon can attach, so a session
+   this daemon SPAWNED is not automatically one it saw whole.** The four sites
+   above were the obvious ones — the daemon's own ring, and the three paths that
+   install a buffer somebody else kept (`adopt`, `adoptExited`, a link
+   reattach). `bind`'s seed on a *spawn* looked exempt by construction: this
+   daemon started the process, so what could it have missed?
+
+   Its supervisor's ring. `supervisor/main.ts` spawns the PTY at module load and
+   binds its socket only afterwards; `remember()` trims from the first chunk the
+   whole time, and the daemon then polls for that socket before it can attach.
+   Measured on the big-ring rig, where nothing trims and the seed size is
+   therefore the true pre-attach volume: **118–145 KB arrives before anybody is
+   listening.** A command that prints more than the ring inside that window, and
+   then stops, leaves the daemon's own trim never firing — so it answered
+   `truncated: false, complete: true` over a hole. The same shape as trap 7,
+   moved onto the field added to fix it.
+
+   Closed exactly rather than by inference, via an optional `dropped` on
+   `SupervisorHello`. **No `PROTOCOL_VERSION` bump**, and that is a deliberate
+   reading rather than an oversight: `wire.ts` already states the policy for
+   `SessionMeta.owner` — the integer guards a field whose MEANING changed,
+   because guessing at one strands a live agent, while a field that is simply
+   absent is answerable. This one is additive and degrades safely both ways. An
+   older supervisor omits it and the daemon reads the absence as falsy, which is
+   the pessimistic answer `adopt` was already giving for exactly those sessions;
+   an older daemon decodes the JSON frame and ignores a key it does not know.
+   Bumping would make every running session on the host undrivable to buy
+   nothing.
+
+   The inference that was considered and rejected: "a seed at or above
+   `CONFIG.scrollbackBytes` came from a sender at its cap". It is unsound in the
+   direction that matters. The trim drops WHOLE CHUNKS, so a ring that has just
+   trimmed sits *below* the cap by up to one chunk — a 1 MiB ring landing at
+   ~1,000,000 bytes reads as "never trimmed" and the guarantee is wrong again.
+
+9. **The cap is NOT `DRYDOCK_SCROLLBACK_BYTES`.** They default to the same
    1 MiB, which makes tying them together look free. Raising the ring is a
    decision about how much history a reattach gets; it must not silently become
    a decision about how large an HTTP response may be. This also has a testing
@@ -164,14 +193,14 @@ pointed through. The cost is that a client must send back what the API gave it
 verbatim; one that normalises or expands the path first falls through to the
 cwd-confined arm and gets its 403.
 
-9. **A negative probe against a file that does not exist proves nothing.**
+10. **A negative probe against a file that does not exist proves nothing.**
    `/file` cannot distinguish a traversal attempt from a missing file — realpath
    fails on both, and the catch answers 404 for both, deliberately. So "another
    `.md` in runsRoot is refused" is only a claim if that `.md` is really on
    disk. Found the hard way: the probe passed while pointed at a decoy left over
    from hand-testing, and went 404 — not 403 — the moment the rig was cleaned.
    The harness writes its own decoy now.
-10. **Pick a session cwd that is not an ancestor of `runsRoot`.** The first run
+11. **Pick a session cwd that is not an ancestor of `runsRoot`.** The first run
    of these probes used `cwd: /tmp` with `DRYDOCK_RUNS_ROOT=/tmp/dry63-runs`,
    and "a different session's handoff is refused" came back 200 — correctly, by
    the ordinary confinement rule, because the file was under the cwd. Nothing
@@ -195,9 +224,9 @@ cwd-confined arm and gets its 403.
 
 `scripts/verify/run-result.mts` — a throwaway daemon, no browser, about a
 minute, and it needs TWO daemons — the ring has to sit on both sides of the
-route's cap and no one daemon can. Thirty checks; its header carries the rig and
-the discrimination run. **Against `main`'s `server.ts` 24 of the 30 fail**, and
-the six that pass are the ones answered by code this ticket did not touch. Three more used to
+route's cap and no one daemon can. Thirty-five checks; its header carries the
+rig and the discrimination run. **Against `main` 28 of the 35 fail**, and the
+seven that pass are the ones answered by code this ticket did not touch. Three more used to
 join them: they were satisfied by an *empty* response and passed against the
 bug until the `text.length` guards went in.
 

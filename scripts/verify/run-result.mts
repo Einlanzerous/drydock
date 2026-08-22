@@ -40,8 +40,8 @@
 // to put it back. Restoring with `git checkout` instead would leave the revert
 // STAGED, and the next commit would carry it.
 //
-// Measured against that build: **24 of the 30 checks fail** — everything in
-// sections 1, 2, 2b and 5 (the route 404s, since it does not exist) and the
+// Measured against that build: **28 of the 35 checks fail** — everything in
+// sections 1, 2, 2b, 5 and 5b (the route 404s, since it does not exist) and the
 // three `own handoff` claims (403, since /file confines to the cwd).
 //
 // The six that still pass are the point of doing this. `unknown id -> 404`, the
@@ -56,7 +56,7 @@
 // RIG — TWO throwaway daemons, per CLAUDE.md's second-instance pattern. Two,
 // because the ring size has to be on both sides of the route's 1 MiB cap and no
 // single daemon can be: above it (4 MiB) the truncation branch is reachable and
-// section 2 can test it; below it (200 KB) the ring drops output while the cap
+// section 2 can test it; below it (16 KB) the ring drops output while the cap
 // never fires, which is the only way to see what section 5 is about.
 //   cd daemon
 //   env $(env | grep -o '^DRYDOCK_[A-Z_0-9]*' | sed 's/^/-u /' | tr '\n' ' ') \
@@ -68,7 +68,7 @@
 //     DRYDOCK_PORT=4364 DRYDOCK_HOST=127.0.0.1 DRYDOCK_TRACKER=fixture \
 //     DRYDOCK_SESSIONS_DIR=/tmp/d63b DRYDOCK_STATE_FILE=/tmp/dry63b-state.json \
 //     DRYDOCK_WORKTREES_ROOT=/tmp/dry63-wt DRYDOCK_RUNS_ROOT=/tmp/dry63-runs \
-//     DRYDOCK_SCROLLBACK_BYTES=200000 node --import tsx src/index.ts
+//     DRYDOCK_SCROLLBACK_BYTES=16384 node --import tsx src/index.ts
 //
 // SEPARATE sessions dirs. One shared between them would have each daemon adopt
 // the other's live agents at boot and reparent them (CLAUDE.md: the sessions dir
@@ -479,7 +479,7 @@ console.log("\n5. a run whose output the ring dropped, with the cap never reache
     // second daemon would be green on the exact build that reintroduced it.
     skip("the ring-loss claims", `no daemon at ${SMALL_RING} — see the rig, it needs TWO`);
   } else {
-    // ~600 KB: comfortably over that rig's 200 KB ring and comfortably under
+    // ~600 KB: far over that rig's 16 KB ring and comfortably under
     // the route's 1 MiB cap. That gap is the whole point — it is where the
     // response is lossy and `truncated` is nonetheless false.
     const id = await spawn(
@@ -513,6 +513,79 @@ console.log("\n5. a run whose output the ring dropped, with the cap never reache
     );
     // ...and the field that is allowed to answer the question does.
     check("but complete says the run is not whole", json.complete === false, String(json.complete));
+  }
+}
+
+// --- 5b. output the SUPERVISOR's ring ate, before the daemon attached -------
+
+console.log("\n5b. a spawn that out-printed its supervisor before anyone attached");
+{
+  let reachable = true;
+  try {
+    await fetch(`${SMALL_RING}/healthz`);
+  } catch {
+    reachable = false;
+  }
+  if (!reachable) {
+    skip("the supervisor-side ring claims", `no daemon at ${SMALL_RING} — see the rig, it needs TWO`);
+  } else {
+    // The path that looked exempt: this daemon SPAWNED the session, so what
+    // could it have missed? The supervisor's own ring, which trims from the
+    // first chunk while the PTY runs and the socket is not yet bound — the
+    // daemon only then polls for that socket before it can attach.
+    //
+    // SIZED, not guessed, and the sizing is the whole of why this discriminates.
+    //
+    // The requirement is a payload that OVERFLOWS the supervisor's ring before
+    // the daemon attaches and then sends nothing afterwards — because the
+    // daemon's own `onData` trim is what makes `complete` false through the
+    // ordinary path, and any post-attach byte lets it fire and the check pass
+    // against the bug. Two earlier drafts did exactly that: a 20,000-iteration
+    // shell loop, and then `cat` of a 4 MiB file, both of which pass whether or
+    // not the supervisor reports anything.
+    //
+    // The window is measurable rather than theoretical. The daemon logs
+    // `replayBytes` for every spawn (the seed size), and on the big-ring rig —
+    // where nothing trims, so the number is the true pre-attach volume — it
+    // reads 118–145 KB across runs: the several hundred ms a supervisor spends
+    // booting node and the tsx loader before it binds its socket. So ~80 KB
+    // through a 16 KB ring sits inside that window with room to spare: all of
+    // it lands before anyone is listening, the ring keeps the last 16 KB, and
+    // the daemon receives nothing further to trim.
+    const big = path.join(os.tmpdir(), "dry63-big.txt");
+    const line = "S padding-padding-padding-padding-padding-padding\n";
+    fs.writeFileSync(big, "SUPERVISOR-HEAD-DRY63\n" + line.repeat(1_600));
+    const size = fs.statSync(big).size;
+    check("the payload fits the pre-attach window", size > 60_000 && size < 110_000, `${size} bytes`);
+    const id = await spawn(
+      {
+        command: "/bin/sh",
+        args: ["-c", `cat ${big}; echo SUPERVISOR-TAIL-DRY63`],
+        cwd: os.tmpdir(),
+        title: "dry63-supervisor-ring",
+      },
+      SMALL_RING,
+    );
+    await ended(id, SMALL_RING);
+    const { json } = await transcript(id, SMALL_RING);
+    const text = json.text ?? "";
+    check(
+      "the run's first line is gone",
+      text.length > 0 && !text.includes("SUPERVISOR-HEAD-DRY63"),
+      `${json.bytes} bytes`,
+    );
+    check(
+      "its last line is not",
+      text.trimEnd().endsWith("SUPERVISOR-TAIL-DRY63"),
+      JSON.stringify(text.slice(-28)),
+    );
+    check("the cap never fired", json.truncated === false, String(json.truncated));
+    // The claim. It rests on `SupervisorHello.dropped` reaching the daemon —
+    // the daemon's own ring cannot see this loss, because by the time it
+    // attaches the bytes were already gone and nothing afterwards makes it
+    // trim. Delete `dropped` from the greeting and this is the check that goes
+    // red, alone.
+    check("complete is false anyway", json.complete === false, String(json.complete));
   }
 }
 

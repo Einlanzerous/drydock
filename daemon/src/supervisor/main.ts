@@ -161,12 +161,24 @@ let rows = meta.rows;
  */
 let scrollback: Buffer[] = [];
 let scrollbackBytes = 0;
+/**
+ * What the ring has thrown away, cumulative (DRY-63).
+ *
+ * Counted here because here is the only place that can: this ring starts
+ * trimming the instant the PTY outruns it, which on a fast command is before
+ * the socket below has been bound and long before any daemon has attached. The
+ * daemon is told in `Hello` — see `SupervisorHello.dropped` — so that it can
+ * decline to promise a consumer a complete transcript it never received.
+ */
+let droppedBytes = 0;
 
 function remember(chunk: Buffer): void {
   scrollback.push(chunk);
   scrollbackBytes += chunk.byteLength;
   while (scrollbackBytes > CONFIG.scrollbackBytes && scrollback.length > 1) {
-    scrollbackBytes -= scrollback.shift()!.byteLength;
+    const dropped = scrollback.shift()!;
+    scrollbackBytes -= dropped.byteLength;
+    droppedBytes += dropped.byteLength;
   }
 }
 
@@ -276,6 +288,7 @@ function greet(socket: net.Socket): void {
     startedAt: meta.createdAt,
     cols,
     rows,
+    dropped: droppedBytes,
   };
   socket.write(encodeJsonFrame(Frame.Hello, hello));
 

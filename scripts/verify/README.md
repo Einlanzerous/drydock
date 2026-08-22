@@ -1058,8 +1058,8 @@ wrong.
 
 ## A run's output over HTTP (DRY-63)
 
-A throwaway daemon and nothing else — no browser, no database, no tracker.
-About a minute, most of it spent printing a megabyte through a PTY.
+Two throwaway daemons and nothing else — no browser, no database, no tracker.
+About a minute, most of it spent printing megabytes through a PTY.
 
 ```sh
 (cd daemon && env $(env | grep -o '^DRYDOCK_[A-Z_0-9]*' | sed 's/^/-u /' | tr '\n' ' ') \
@@ -1068,13 +1068,26 @@ About a minute, most of it spent printing a megabyte through a PTY.
    DRYDOCK_WORKTREES_ROOT=/tmp/dry63-wt DRYDOCK_RUNS_ROOT=/tmp/dry63-runs \
    DRYDOCK_SCROLLBACK_BYTES=4194304 node --import tsx src/index.ts &)
 
+(cd daemon && env $(env | grep -o '^DRYDOCK_[A-Z_0-9]*' | sed 's/^/-u /' | tr '\n' ' ') \
+   DRYDOCK_PORT=4364 DRYDOCK_HOST=127.0.0.1 DRYDOCK_TRACKER=fixture \
+   DRYDOCK_SESSIONS_DIR=/tmp/d63b DRYDOCK_STATE_FILE=/tmp/dry63b-state.json \
+   DRYDOCK_WORKTREES_ROOT=/tmp/dry63-wt DRYDOCK_RUNS_ROOT=/tmp/dry63-runs \
+   DRYDOCK_SCROLLBACK_BYTES=16384 node --import tsx src/index.ts &)
+
 (cd daemon && node --import tsx ../scripts/verify/run-result.mts)
 ```
 
-Two of those env vars are load-bearing rather than tidy:
+**Both, not one.** This block launched only `:4363` until review caught it,
+while the bullets below already said the second was required — and `skip()`
+does not touch the exit code, so a paste of the one-daemon version ended
+`all passed (2 skipped)` having silently dropped the only sections that can see
+either ring-loss defect. That is the failure mode this whole directory is
+against, in the documentation rather than the code.
+
+Three things about that rig are load-bearing rather than tidy:
 
 - **Two daemons, with rings on opposite sides of the cap.** :4363 at 4 MiB and
-  :4364 at 200 KB, on separate sessions dirs — shared, each would adopt the
+  :4364 at 16 KB, on separate sessions dirs — shared, each would adopt the
   other's agents at boot (CLAUDE.md: the sessions dir is per-port on purpose).
   Section 5 SKIPS rather than passing when :4364 is absent.
 - **`DRYDOCK_SCROLLBACK_BYTES=4194304`.** The route caps its response at 1 MiB
@@ -1126,13 +1139,20 @@ What it holds down:
   `session.ts` that records a ring drop turns that last check red and nothing
   else, which is what makes it worth its own daemon — section 2's version of the
   claim passes on `!truncated` alone.
+- **And the supervisor's ring counts too** (section 5b, the second review's
+  🔴). A supervisor spawns its PTY before it binds its socket, so a command that
+  prints fast has already overflowed *its* ring before any daemon can attach —
+  and if nothing is printed afterwards the daemon's own trim never fires, so a
+  session it spawned itself came back `complete: true` over a hole. Closed by an
+  optional `dropped` on `SupervisorHello`; **no PROTOCOL_VERSION bump**, per the
+  policy `wire.ts` already states for `SessionMeta.owner`.
 - **`/file` serves this session's own handoff and nothing else** — three
   negative probes beside the positive one.
 
 Discrimination (see [the section below](#making-sure-a-harness-still-discriminates)):
-against `main` it fails **24 of 30**. Six survive, and all six should — the
+against `main` it fails **28 of 35**. Seven survive, and all seven should — the
 unknown-id 404, the three negative handoff probes, the ordinary in-cwd read, and
-the harness's check that its own decoy file exists. They are answered by code
+the two checks on files the harness wrote itself (the decoy, and 5b's payload). They are answered by code
 this ticket did not touch, so they are green either way; a harness made only of
 those would look identical on a build with none of the feature in it.
 
