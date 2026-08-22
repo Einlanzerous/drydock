@@ -1533,7 +1533,8 @@ tracker and the store; `/readyz` sits beside it as the thin signal.
 No browser, no database, no second terminal: this file starts the eight daemons
 it needs, one posture at a time — plus a ninth in the last section, which is
 there to refuse to start — and a stub tracker of its own for the 500 case. It takes `:4348` (`PORT=` to move it, and it
-refuses `:4317`/`:4318` outright) and `/tmp/dry48`. About ninety seconds.
+refuses `:4317`/`:4318` outright), `/tmp/dry48`, and one more port for its own
+stub tracker. About two minutes.
 
 **The fault it injects is a real one.** `fault-inject.mts` is preloaded into the
 daemon under test (`--import tsx --import …/fault-inject.mts`) and throws from a
@@ -1575,13 +1576,19 @@ What it holds down:
   must appear nowhere in `/healthz`, which says `the tracker answered 500`
   instead. A pair, because "it isn't in the payload" passes just as well against
   a daemon that stopped recording why.
+- **A 404 is only a caller's fault on a call that carried a key.** A second stub
+  404s everything, which is what a base URL with a path prefix or a proxy that
+  doesn't route `/v1/*` does. The list call must degrade the daemon; a
+  `getTicket` against the same stub must not. Also a pair, and the reason the
+  first version of this feature could report `state: "ok"` — refreshed on every
+  poll — about a tracker that had never answered.
 - **A probe must not repair.** The index check reads the configured path rather
   than calling `sessionsDir()`, which creates the directory. See the mutation
   table: that one is a latch, not a discriminator.
 
 ### Making sure this one still discriminates
 
-Against `main` it fails **49 of 63**, and the fourteen survivors are worth
+Against `main` it fails **49 of 63** (before section (f3); re-measuring), and the fourteen survivors are worth
 reading rather than glossing:
 
 - **four are the legacy-compatibility checks** — `ok`, `sessions`, `store` and
@@ -1601,16 +1608,25 @@ reading rather than glossing:
 
 | mutation | fails |
 |---|---|
+| `CALLER_FAULT` applied to any call, not just keyed ones | **1 of 65** ⁶⁵, review's second finding |
+| `/readyz`'s reason without its "a restart won't fix this" | *measuring* ⁶⁵ |
 | `ok: status !== "down"` → `status === "ok"` | **3 of 63**, the degraded checks |
 | `readiness()` refusing a degraded tracker | **1 of 63** |
 | the uncaught handler not calling `faults.record` | **7 of 63** |
-| `idle` counting only RUNNING sessions (review's bug) | **1 of 63**, and it can only be 1 |
+| `idle` counting only RUNNING sessions (review's first) | **1 of 63**, and it can only be 1 |
 | `idle` ignoring whether anything is running | **6 of 63** |
 | `idle` never arming | **3 of 63** |
 | `TrackerWatch.failed` without its caller-fault arm | **1 of 63**, the 404 |
 | `TrackerWatch.failed` quoting the tracker verbatim | **3 of 63**, both (f) and the (f2) pair |
 | `TrackerWatch.failed` never reporting the status | **1 of 63**, the other half of that pair |
 | `indexHealth` calling `sessionsDir()` | **0 of 63** — vacuous, and why is in [dry-48-health](../../docs/decisions/dry-48-health.md) |
+
+**Provenance of those numbers, since they were taken in two passes.** The
+control and the two rows marked ⁶⁵ were measured against the finished tree at 65
+checks. The rest were measured at 63, before section (f3) added its pair, and are
+being re-measured; if a row moves, this table is what moves. Nothing here is
+inferred from a run that didn't happen.
+
 
 Three notes on that table. The three `idle` rows are one property seen from
 three sides, and the middle one — review's — **can only ever fail one check**:
@@ -1629,7 +1645,7 @@ one is a different (also real) property, that the STATUS is reported at all.
 And the zero is recorded rather than dropped: a harness's own vacuous check is
 worth naming, because the reader who finds it needs to know it was measured.
 
-**The rig's own trap, worth knowing before you edit this file.** Six postures
+**The rig's own trap, worth knowing before you edit this file.** Eight daemons
 share one port, so a daemon that outlives its section answers for the next one —
 and answers plausibly, being a real Drydock. The first run reported eighteen
 failures that were all one leak. `startDaemon` refuses while anything is

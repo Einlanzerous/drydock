@@ -213,7 +213,8 @@ class FaultLog {
 export const faults = new FaultLog();
 
 /**
- * Statuses that mean "the tracker answered, and the answer was no".
+ * Statuses that mean "the tracker answered, and the answer was no" — but only
+ * on a call that carried a key somebody supplied (`keyed` in `failed`).
  *
  * 429 and 408 are absent on purpose (rate-limited and timed out are both a
  * tracker this daemon can't currently use), and so is every 5xx.
@@ -246,7 +247,10 @@ export class TrackerWatch {
     this.lastError = undefined;
   }
 
-  failed(err: unknown): void {
+  /**
+   * @param keyed the call carried a key somebody supplied — see `CALLER_FAULT`.
+   */
+  failed(err: unknown, keyed = false): void {
     // A 404 for a ticket key somebody mistyped proves the tracker is reachable
     // — we asked it and it told us. Counting that as an outage would have a
     // health endpoint report a degraded daemon because of one bad key in the
@@ -254,7 +258,18 @@ export class TrackerWatch {
     // indefinitely. 401/403 deliberately do NOT get this treatment: a credential
     // the tracker rejects means every call will fail, which is precisely a
     // tracker this daemon cannot use.
-    if (err instanceof TrackerHttpError && CALLER_FAULT.has(err.status)) {
+    //
+    // And that reasoning applies to a 404 on a call nobody typed a key into,
+    // which is why `keyed` exists (review). `DRYDOCK_SWITCHYARD_URL` with a path
+    // prefix, or a proxy that doesn't route `/v1/*`, 404s EVERY request — so
+    // exempting on the status alone had each sidebar poll call `answered()` and
+    // /healthz report `state: "ok"` with a `lastOkAt` twenty seconds old, about
+    // a tracker that had never once answered. The same shape with 400: jira.ts
+    // matches `-> 400` on the message precisely because a deployment answers it
+    // to the wrong API's search endpoint. That is this ticket's own failure mode
+    // — a daemon looking healthier than it is — reached through the exemption
+    // written to prevent a different one.
+    if (keyed && err instanceof TrackerHttpError && CALLER_FAULT.has(err.status)) {
       this.answered();
       return;
     }
@@ -323,27 +338,34 @@ export const trackerWatch = new TrackerWatch();
  * the fixture provider can post to tickets.
  */
 export function watchTracker(inner: TrackerProvider, watch = trackerWatch): TrackerProvider {
-  const seen = async <T>(work: Promise<T>): Promise<T> => {
+  const seen = async <T>(work: Promise<T>, keyed = false): Promise<T> => {
     try {
       const out = await work;
       watch.answered();
       return out;
     } catch (err) {
-      watch.failed(err);
+      watch.failed(err, keyed);
       throw err;
     }
   };
+  // `keyed` marks the calls that carry a key a CALLER chose, which is the only
+  // place a 404 means "no such ticket" rather than "no such tracker". A search
+  // is not one: a term matching nothing comes back 200 with an empty list, so a
+  // 404 there is about the endpoint. `listTickets` is one only when it is
+  // DRY-83's parent query, which names an epic by key.
   return {
     id: inner.id,
     name: inner.name,
     capabilities: inner.capabilities,
     listProjects: () => seen(inner.listProjects()),
-    listTickets: (q) => seen(inner.listTickets(q)),
+    listTickets: (q) => seen(inner.listTickets(q), Boolean(q.parent)),
     searchTickets: (text, projects) => seen(inner.searchTickets(text, projects)),
-    getTicket: (key, opts) => seen(inner.getTicket(key, opts)),
-    ...(inner.comment ? { comment: (k: string, b: string) => seen(inner.comment!(k, b)) } : {}),
+    getTicket: (key, opts) => seen(inner.getTicket(key, opts), true),
+    ...(inner.comment
+      ? { comment: (k: string, b: string) => seen(inner.comment!(k, b), true) }
+      : {}),
     ...(inner.transition
-      ? { transition: (k: string, to: string) => seen(inner.transition!(k, to)) }
+      ? { transition: (k: string, to: string) => seen(inner.transition!(k, to), true) }
       : {}),
   };
 }
@@ -514,9 +536,18 @@ export class Health {
       ...(registry.ok
         ? {}
         : {
+            // The clause about restarting is the point of this string, not
+            // decoration (review). This is the one actionable signal the thin
+            // endpoint emits, its audience is a supervisor, and the reflex it
+            // triggers is exactly wrong here: the supervisors are still running
+            // and this index was the only handle on them, so starting again
+            // makes the loss permanent rather than fixing it. /healthz carries
+            // that nuance and always answers 200; this is where somebody acting
+            // on a status code is actually looking.
             reason:
-              registry.error ??
-              `the session index at ${registry.index.dir} can't be read or written: ${registry.index.error}`,
+              (registry.error ??
+                `the session index at ${registry.index.dir} can't be read or written: ${registry.index.error}`) +
+              " — a restart will NOT fix this and will abandon any running agents; a human is needed",
           }),
     };
   }

@@ -497,8 +497,9 @@ if (!(await startDaemon({ onUncaught: "0", faults: true }))) {
   const notReady = await readyz();
   check("/readyz answers 503", notReady.code === 503 && notReady.body?.ready === false, String(notReady.code));
   check(
-    "and names the directory",
-    (notReady.body?.reason ?? "").includes(SESSIONS_DIR),
+    "and names the directory, and says a restart won't fix it",
+    (notReady.body?.reason ?? "").includes(SESSIONS_DIR) &&
+      /restart will NOT fix/i.test(notReady.body?.reason ?? ""),
     notReady.body?.reason ?? "",
   );
   fs.chmodSync(SESSIONS_DIR, 0o700);
@@ -635,7 +636,59 @@ if (
   );
   await stopDaemon();
 }
+
+// --- (f3) a tracker that answers 404 to everything --------------------------
+//
+// Review's finding, and it is this ticket's own failure mode reached through the
+// exemption written to prevent a different one. `CALLER_FAULT` exists so a
+// mistyped ticket key in the palette doesn't read as an outage — but applied on
+// the status alone it covers `listTickets` too, where nobody typed anything. A
+// base URL with a path prefix, or a proxy that doesn't route `/v1/*`, 404s every
+// request: each sidebar poll then called `answered()`, and /healthz reported
+// `state: "ok"` with a `lastOkAt` twenty seconds old about a tracker that had
+// never once answered.
+//
+// The pair is the point: this must degrade, and section (b)'s mistyped KEY must
+// still not. One stub serves both here by 404ing whatever it is asked.
+
+console.log("\n(f3) a tracker that 404s every call");
 stub.close();
+const stub404 = http.createServer((_req, res) => {
+  res.writeHead(404, { "Content-Type": "application/json" });
+  res.end('{"error":"no such route"}');
+});
+await new Promise<void>((r) => stub404.listen(STUB_PORT, "127.0.0.1", () => r()));
+if (
+  !(await startDaemon({
+    tracker: {
+      DRYDOCK_TRACKER: "switchyard",
+      DRYDOCK_SWITCHYARD_URL: `http://127.0.0.1:${STUB_PORT}`,
+      DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS: "2000",
+    },
+  }))
+) {
+  check("daemon starts (404-ing tracker)", false, daemonLog.join("").slice(-400));
+} else {
+  const list = await call("/api/tracker/tickets?open=true");
+  const h = await hzSafe();
+  check(
+    "a list call nobody keyed is not a caller fault",
+    list === 502 && h?.tracker?.state === "degraded" && h?.status === "degraded",
+    `${list} ${JSON.stringify(h?.tracker)}`,
+  );
+  // The other half: a KEYED call against the same 404-ing tracker is still
+  // exempt, because that is what the exemption is for. Same daemon, so the only
+  // difference is which call was made.
+  const missing = await call("/api/tracker/ticket/NOPE-1");
+  const after = await hzSafe();
+  check(
+    "but a keyed one still is",
+    missing === 404 && after?.tracker?.state === "ok",
+    `${missing} ${JSON.stringify(after?.tracker)}`,
+  );
+  await stopDaemon();
+}
+stub404.close();
 
 // --- (g) fixture data served under a live provider's name -------------------
 //

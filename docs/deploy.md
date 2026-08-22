@@ -56,9 +56,11 @@ Two operational notes if you do point it at a database:
   `store.cooling` with `retryInMs`, answered immediately instead of holding your
   monitor for the connect timeout. `ok` is still an answer about the daemon,
   which serves sessions perfectly well with a dead store — it comes back
-  `status: "degraded"` while that lasts (DRY-48). Point a MONITOR at `/readyz`
-  rather than `/healthz`: it never waits on the store at all, which is the
-  probe you want when the store is the thing that is down.
+  `status: "degraded"` while that lasts (DRY-48). Poll `/readyz` and read
+  `/healthz`: the thin one never waits on the store, so it answers instantly
+  through a dead database — but it never REPORTS the store either, so it is the
+  probe for "is this daemon serving", not the one that will ever mention
+  `store.cooling`. When you want to know about the store, ask the report.
 - **Migrations are checksummed.** Editing an already-applied migration file is
   an error rather than a silent divergence, which matters here specifically:
   prod, dev and any throwaway instance can all be pointed at one database. Add a

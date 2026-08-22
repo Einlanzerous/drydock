@@ -52,6 +52,18 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:4399/readyz   # 200, or 503 w
    nothing. jira.ts's Cloud/DC probes still match `-> 404` on that string, and
    were left alone rather than converted — a probe that works against a real
    instance is not worth re-testing for tidiness.
+   - **And the exemption is about WHICH CALL, not which status — the first cut
+     got that wrong and it produced this ticket's own bug** (review, second
+     round). Applied on the status alone it covered `listTickets` too, where
+     nobody typed anything: a `DRYDOCK_SWITCHYARD_URL` with a path prefix, or a
+     proxy that doesn't route `/v1/*`, 404s EVERY request, so each sidebar poll
+     called `answered()` and `/healthz` reported `state: "ok"` with a `lastOkAt`
+     twenty seconds old about a tracker that had never once answered. The same
+     shape with 400, which is exactly what a Jira deployment returns to the
+     wrong API's search endpoint. The rule is `keyed`: `getTicket`, `comment`,
+     `transition` always, `listTickets` only for DRY-83's `parent` query, and
+     never `searchTickets` — a search matching nothing is a 200 with an empty
+     list, so a 404 there is about the endpoint rather than the term.
 5. **A live provider that fell back to fixture data is degraded on sight.**
    `createTracker` warns once at boot and serves five invented tickets forever
    after, which looks exactly like a working tracker — the same class of silence
@@ -120,7 +132,14 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:4399/readyz   # 200, or 503 w
      registry synchronously (DRY-60 trap 8), so a check built on it never
      produces the exited-but-listed state and passes against the bug. Section
      (i) spawns a `sleep 8` and waits it out.
-12. **The unauthenticated payload is a decision, not an inheritance.** On a
+12. **`/readyz`'s 503 fires in the one case its audience must not act on, so the
+   reason says so.** `ready` is false only when the index has gone — and trap 2
+   is that a restart makes that permanent. A supervisor reading status codes is
+   exactly who is looking at the moment the reflex is wrong, so the free-text
+   `reason` names the directory AND says a restart will not fix it. (Review's:
+   the alternative, wiring the endpoint never to 503, would leave the thin probe
+   with no signal at all.)
+13. **The unauthenticated payload is a decision, not an inheritance.** On a
    daemon with auth ON this is the only route besides `/api/auth/{info,login}`
    that answers a stranger, and it now serves two host paths, live/exited counts
    and `faults.last`. Those are kept — they are the answer to "what is this
@@ -137,12 +156,12 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:4399/readyz   # 200, or 503 w
    comment defending this route originally said it served "nothing a caller
    couldn't learn by watching the port", which stopped being true the moment the
    endpoint grew an opinion.)
-13. **An unrecognised value for the knob is a boot error**, which is `flag()`'s
+14. **An unrecognised value for the knob is a boot error**, which is `flag()`'s
    rule (DRY-27 trap 1) applied where it now has three values instead of two:
    `DRYDOCK_EXIT_ON_UNCAUGHT=Idle` reading as "exit immediately" is a crash
    policy quietly not being the one somebody configured. `0` still means what it
    always did.
-14. **The fault the harness injects is a REAL fault, and it is not a route.** The
+15. **The fault the harness injects is a REAL fault, and it is not a route.** The
    product must not grow a "crash yourself" endpoint — that would not widen what
    an attacker can do on a port that already spawns commands, but it would put a
    control whose only purpose is to break the daemon on the same unauthenticated
@@ -154,7 +173,7 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:4399/readyz   # 200, or 503 w
 Harness: `scripts/verify/health.mts` + `fault-inject.mts`, rig in its README — it
 starts the eight daemons it needs (plus a ninth that must refuse to start) and a
 stub tracker of its own, no browser, no database, about two minutes.
-Confirm it discriminates: against `main` it fails **49 of 63**, and the fourteen
+Confirm it discriminates: against `main` it fails **49 of 63** (before section (f3)), and the fourteen
 survivors are the useful part of that number rather than slack — four are the
 legacy-compatibility checks (which are supposed to pass), five are premises this
 ticket didn't change (`=0` stays up, the default exits, a broken store already
@@ -167,16 +186,24 @@ the finished tree:
 
 | mutation | fails |
 |---|---|
+| `CALLER_FAULT` applied to any call, not just keyed ones | 1 of 65 |
+| `/readyz`'s reason without its restart warning | *measuring* |
 | `ok: status !== "down"` → `status === "ok"` | 3 of 63 |
 | `readiness()` refusing a degraded tracker | 1 of 63 |
 | the uncaught handler not calling `faults.record` | 7 of 63 |
-| `idle` counting only RUNNING sessions (review's bug) | 1 of 63 |
+| `idle` counting only RUNNING sessions (review's) | 1 of 63 |
 | `idle` ignoring whether anything is running | 6 of 63 |
 | `idle` never arming (i.e. `stay` by another name) | 3 of 63 |
 | `TrackerWatch.failed` without its `CALLER_FAULT` arm | 1 of 63 |
 | `TrackerWatch.failed` quoting the tracker verbatim | 3 of 63 |
 | `TrackerWatch.failed` never reporting the status | 1 of 63 |
 | `indexHealth` calling `sessionsDir()` | **0 of 63** — see trap 9 |
+
+The first two rows were measured at 65 checks, against the finished tree; the
+rest at 63, before section (f3) added its pair, and are being re-measured. Split
+out rather than quietly restated, because a count carried across a change to the
+harness is a count nobody took.
+
 
 Three things about that table. The three `idle` rows are one property seen from
 three sides, and each covers the others' blind spot: a policy that exits
@@ -194,8 +221,8 @@ zero is
 recorded rather than dropped, because a harness's own vacuous check is worth
 naming: the reader who finds it needs to know it was measured, not assumed.
 
-**The rig's own trap, which cost eighteen false failures on the first run.** Six
-postures share one port, so a daemon that outlives its section answers for the
+**The rig's own trap, which cost eighteen false failures on the first run.** Eight
+daemons share one port, so one that outlives its section answers for the
 next one — plausibly, since it is a real Drydock. `startDaemon` now refuses to
 run while anything is listening, `stopDaemon` escalates to SIGKILL and says so
 rather than giving up quietly, and a `process.on("exit")` kills the child however
