@@ -36,31 +36,33 @@
 // starting eight throwaway daemons (a ninth is expected to refuse) and waiting
 // out the idle-exit polls.
 //
-// CONFIRM IT DISCRIMINATES. Against `main` it fails 49 of 63; the
+// CONFIRM IT DISCRIMINATES. Against `main` it fails 51 of 65; the fourteen
 // survivors are named one by one in this file's section in
 // scripts/verify/README.md — four are the legacy-compatibility checks (which are
 // meant to pass), the rest are premises this ticket didn't change, rig setup, or
 // checks that pass vacuously against a daemon with no health payload. Per
-// mutation, against the finished tree, all measured:
+// mutation, against the finished tree, all measured at 65:
 //
-//   `ok: status !== "down"` → `ok: status === "ok"`      3 of 63, the degraded
-//     checks — i.e. the ticket's own "not to be restarted for being suspect"
-//   `readiness()` refusing a degraded tracker            1 of 63
-//   the uncaught handler not calling `faults.record`     7 of 63
-//   `idle` counting only RUNNING sessions                1 of 63 ┐ one property,
-//   `idle` ignoring whether anything is running          6 of 63 │ three sides;
-//   `idle` never arming at all                           3 of 63 ┘ see below
-//   `TrackerWatch.failed` without its CALLER_FAULT arm   1 of 63, the 404 in (b)
-//   `TrackerWatch.failed` quoting the tracker verbatim   3 of 63, (f) and (f2)
-//   `TrackerWatch.failed` never reporting the status     1 of 63, (f2)'s first
-//   `indexHealth` calling `sessionsDir()`                0 of 63 — vacuous, and
+//   CALLER_FAULT applied to any call, not just keyed ones   1, review's second
+//   `/readyz` reason without its "a restart won't fix this" 1
+//   `ok: status !== "down"` → `ok: status === "ok"`         3, the degraded ones
+//   `readiness()` refusing a degraded tracker               1
+//   the uncaught handler not calling `faults.record`        7
+//   `idle` counting only RUNNING sessions                   1 ┐ one property,
+//   `idle` ignoring whether anything is running             6 │ three sides;
+//   `idle` never arming at all                              3 ┘ see below
+//   `TrackerWatch.failed` with no caller-fault arm at all   2, (b) and (f3)
+//   `TrackerWatch.failed` quoting the tracker verbatim      3, (f) and (f2)
+//   `TrackerWatch.failed` never reporting the status        1, (f2)'s first
+//   `indexHealth` calling `sessionsDir()`                   0 — vacuous, and
 //     recorded as such rather than dropped: `ensured` makes the two spellings
 //     agree in a running daemon, so that check is a latch, not a discriminator.
 //
-// Two of those rows are worth reading twice. The first `idle` one is review's
-// finding and can only ever fail ONE check: once the daemon has exited early,
-// every check after it in the section passes — which is why the check catching
-// it sits where the finished card still exists. And the verbatim-quoting
+// Three of those rows want reading twice. The first `idle` one and the
+// CALLER_FAULT one are both review findings, and both can only ever fail ONE
+// check: once the daemon has exited early, or once a keyed 404 is exempt either
+// way, everything else in the section passes — which is why each check sits
+// exactly where the difference is still visible. And the verbatim-quoting
 // mutation has to replace the WHOLE expression: neutering only its HTTP arm
 // leaves the else-branch, which is itself part of the fix, and measures 1
 // instead of 3.

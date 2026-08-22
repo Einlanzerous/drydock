@@ -1588,7 +1588,7 @@ What it holds down:
 
 ### Making sure this one still discriminates
 
-Against `main` it fails **49 of 63** (before section (f3); re-measuring), and the fourteen survivors are worth
+Against `main` it fails **51 of 65**, and the fourteen survivors are worth
 reading rather than glossing:
 
 - **four are the legacy-compatibility checks** — `ok`, `sessions`, `store` and
@@ -1608,24 +1608,23 @@ reading rather than glossing:
 
 | mutation | fails |
 |---|---|
-| `CALLER_FAULT` applied to any call, not just keyed ones | **1 of 65** ⁶⁵, review's second finding |
-| `/readyz`'s reason without its "a restart won't fix this" | *measuring* ⁶⁵ |
-| `ok: status !== "down"` → `status === "ok"` | **3 of 63**, the degraded checks |
-| `readiness()` refusing a degraded tracker | **1 of 63** |
-| the uncaught handler not calling `faults.record` | **7 of 63** |
-| `idle` counting only RUNNING sessions (review's first) | **1 of 63**, and it can only be 1 |
-| `idle` ignoring whether anything is running | **6 of 63** |
-| `idle` never arming | **3 of 63** |
-| `TrackerWatch.failed` without its caller-fault arm | **1 of 63**, the 404 |
-| `TrackerWatch.failed` quoting the tracker verbatim | **3 of 63**, both (f) and the (f2) pair |
-| `TrackerWatch.failed` never reporting the status | **1 of 63**, the other half of that pair |
-| `indexHealth` calling `sessionsDir()` | **0 of 63** — vacuous, and why is in [dry-48-health](../../docs/decisions/dry-48-health.md) |
+| `CALLER_FAULT` applied to any call, not just keyed ones | **1 of 65**, review's second finding |
+| `/readyz`'s reason without its "a restart won't fix this" | **1 of 65** |
+| `ok: status !== "down"` → `status === "ok"` | **3 of 65**, the degraded checks |
+| `readiness()` refusing a degraded tracker | **1 of 65** |
+| the uncaught handler not calling `faults.record` | **7 of 65** |
+| `idle` counting only RUNNING sessions (review's first) | **1 of 65**, and it can only be 1 |
+| `idle` ignoring whether anything is running | **6 of 65** |
+| `idle` never arming | **3 of 65** |
+| `TrackerWatch.failed` without its caller-fault arm at all | **2 of 65**, the 404s in (b) and (f3) |
+| `TrackerWatch.failed` quoting the tracker verbatim | **3 of 65**, (f) and the (f2) pair |
+| `TrackerWatch.failed` never reporting the status | **1 of 65**, the other half of that pair |
+| `indexHealth` calling `sessionsDir()` | **0 of 65** — vacuous, and why is in [dry-48-health](../../docs/decisions/dry-48-health.md) |
 
-**Provenance of those numbers, since they were taken in two passes.** The
-control and the two rows marked ⁶⁵ were measured against the finished tree at 65
-checks. The rest were measured at 63, before section (f3) added its pair, and are
-being re-measured; if a row moves, this table is what moves. Nothing here is
-inferred from a run that didn't happen.
+Every row measured against the finished tree at 65 checks — including the four
+that were re-run rather than carried over when section (f3) was added, one of
+which moved (`no caller-fault arm at all` was 1 of 63 and is 2 of 65). A count
+carried across a change to the harness is a count nobody took.
 
 
 Three notes on that table. The three `idle` rows are one property seen from

@@ -1759,7 +1759,7 @@ process.on("uncaughtException", (err) => {
   // construction (health.ts), which is the same constraint `describe` is
   // written to: a TypeError raised INSIDE this handler is fatal (Node exits 7),
   // and a crash handler with its own crash path is worse than no handler.
-  // faults.record("uncaughtException", err);
+  faults.record("uncaughtException", err);
   // describe() rather than err.message: `throw null` makes that dereference a
   // TypeError. Stack goes in as a field so the record stays one greppable line.
   log.error("UNCAUGHT EXCEPTION", {
