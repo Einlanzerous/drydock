@@ -289,9 +289,14 @@ export class TrackerWatch {
           // SyntaxError, so a tracker answering an HTML error page with a 200
           // would put upstream text here by a second door. The name IS the
           // diagnosis anyway — TypeError is a connection that never happened,
-          // TimeoutError is our own deadline, SyntaxError is a tracker
-          // answering something that isn't JSON — and the message is one
-          // (gated) route away.
+          // SyntaxError is a tracker answering something that isn't JSON, and
+          // the two timeouts are both OURS but have different fixes:
+          // TimeoutError is the per-request backstop
+          // (DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS, DRY-72) and
+          // TrackerTimeoutError is the whole-pull deadline
+          // (DRYDOCK_TRACKER_LIST_TIMEOUT_MS, DRY-61). Telling those two apart
+          // here is why that class sets `name` where TrackerHttpError
+          // deliberately doesn't. The message is one (gated) route away.
           `the tracker call failed (${errorName(err)})`;
   }
 

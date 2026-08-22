@@ -92,7 +92,20 @@ README. The traps:
     assertion is a TIMING or an upstream socket count. Never a status code — 502
     is the answer before and after on the cases that answer at all (CLAUDE.md
     trap 3).
-11. **Be accurate about how much accumulation was left.** DRY-72's single-flight
+11. **A new error class has to answer to `/healthz` too (DRY-48, merged while
+    this was in flight).** `TrackerWatch.failed` reports the error's NAME and
+    never its message — upstream text must not reach the one route that answers
+    an anonymous caller on a daemon with auth on — so an error that leaves
+    `name` alone makes the health endpoint say "the tracker call failed
+    (Error)". `TrackerTimeoutError` therefore SETS `name`, which is the opposite
+    of what its sibling `TrackerHttpError` does for a reason that is written
+    down in both places: nothing reads that one's name, and its `String(err)`
+    reaches a person. The two deadlines this daemon can blow also have different
+    fixes — one knob each — so the health endpoint has to tell them apart. And
+    the caller-fault exemption still works: a 404 on a keyed pull propagates
+    unconverted, because the deadline only rewrites an error when the budget is
+    actually gone.
+12. **Be accurate about how much accumulation was left.** DRY-72's single-flight
     means N polls of the SAME query already share one upstream fan-out, so the
     per-tab pile-up the ticket describes is bounded per cache KEY, not per poll.
     What still accumulated is one hung pull per distinct key — a second browser

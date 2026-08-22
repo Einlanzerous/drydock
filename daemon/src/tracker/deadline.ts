@@ -68,6 +68,16 @@ const operation = new AsyncLocalStorage<AbortSignal>();
  * to look in a way "signal timed out" — which is what the browser's own abort
  * produces — never will. Raised in place of the bare `AbortError`/`TimeoutError`
  * that `fetch` rejects with, which names nothing.
+ *
+ * **`name` IS set here, where `TrackerHttpError` deliberately leaves it alone**
+ * (see types.ts), and the two are not inconsistent. That class suppresses its
+ * name because nothing reads it and `String(err)` reaches a person, so the
+ * prefix was pure jargon. This one is read: `TrackerWatch.failed` in
+ * ../health.ts reports the NAME rather than the message on purpose, so upstream
+ * text cannot reach an endpoint that answers strangers — and the two deadlines
+ * this daemon can blow have different fixes (DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS
+ * vs DRYDOCK_TRACKER_LIST_TIMEOUT_MS). A plain `Error` here would have /healthz
+ * say "the tracker call failed (Error)".
  */
 export class TrackerTimeoutError extends Error {
   readonly timeoutMs: number;
