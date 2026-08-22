@@ -131,8 +131,8 @@ export async function withDeadline<T>(
  *    ever make a request tighter, and a decoration that outlived the operation
  *    it decorates would be exactly the accumulation DRY-61 is about.
  *
- * Returns undefined when nothing applies, so `fetch` sees no `signal` key at
- * all rather than an explicit undefined — same as before this existed.
+ * Returns undefined when nothing applies. `fetch` reads an undefined `signal`
+ * as no signal, which is what this path already did before it was a function.
  */
 export function requestSignal(
   own: AbortSignal | undefined | null,
