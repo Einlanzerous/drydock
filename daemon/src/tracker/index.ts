@@ -1,4 +1,5 @@
 import { CONFIG } from "../config.js";
+import { watchTracker } from "../health.js";
 import { log } from "../log.js";
 import { ChildStatsCache } from "./cache.js";
 import { FixtureProvider } from "./fixture.js";
@@ -15,6 +16,14 @@ export type { Ticket, TicketDetail, Project, TicketQuery, TrackerProvider } from
  * log loudly rather than crash the daemon — the shell stays usable.
  */
 export function createTracker(): TrackerProvider {
+  // Wrapped on the way out, every path, so what /healthz says about the tracker
+  // is the outcome of the calls the daemon actually made (DRY-48). Here rather
+  // than at the six call sites because the seventh would be added by somebody
+  // who had never read health.ts.
+  return watchTracker(buildTracker());
+}
+
+function buildTracker(): TrackerProvider {
   const kind = CONFIG.tracker.kind;
   // Built here and handed to whichever provider is selected (DRY-72). One
   // instance because what it caches — "what the tracker says about this epic" —

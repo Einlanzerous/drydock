@@ -23,6 +23,12 @@ with the second deploy, on the host where a deploy is least casual.
    one under a database outage, and the daemon serves sessions fine in both.
    `/api/auth/info` is thin and anonymous but answers before the session
    registry is meaningfully up, which is most of what the probe is for.
+   `/readyz` (DRY-48) is thin, anonymous AND doesn't wait on the store, so it
+   answers the first objection — and the probe stayed where it is anyway,
+   because the deploy's question is "is this daemon serving on this port" and
+   `/api/sessions` answers it with a route the shell actually uses. Moving it
+   would also retire the 401 case this whole section is about, which is a real
+   posture and worth keeping under test.
 2. **200 and 401, not "any HTTP response".** The overcorrection cures this
    ticket and then reports a healthy deploy while prod is down behind a proxy:
    502/503/504 is precisely what a reverse proxy with a dead upstream answers.

@@ -1,5 +1,6 @@
 import { ChildStatsCache } from "./cache.js";
 import { requestSignal, withDeadline } from "./deadline.js";
+import { TrackerHttpError } from "./types.js";
 import type {
   Project,
   Ticket,
@@ -259,7 +260,9 @@ export class JiraProvider implements TrackerProvider {
         ...init?.headers,
       },
     });
-    if (!res.ok) throw new Error(`jira ${path} -> ${res.status} ${await res.text()}`);
+    if (!res.ok) {
+      throw new TrackerHttpError(`jira ${path} -> ${res.status} ${await res.text()}`, res.status);
+    }
     return res.status === 204 ? {} : res.json();
   }
 

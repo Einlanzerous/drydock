@@ -55,7 +55,12 @@ Two operational notes if you do point it at a database:
 - **`/healthz` now tells a down store from one waiting to retry** —
   `store.cooling` with `retryInMs`, answered immediately instead of holding your
   monitor for the connect timeout. `ok` is still an answer about the daemon,
-  which serves sessions perfectly well with a dead store.
+  which serves sessions perfectly well with a dead store — it comes back
+  `status: "degraded"` while that lasts (DRY-48). Poll `/readyz` and read
+  `/healthz`: the thin one never waits on the store, so it answers instantly
+  through a dead database — but it never REPORTS the store either, so it is the
+  probe for "is this daemon serving", not the one that will ever mention
+  `store.cooling`. When you want to know about the store, ask the report.
 - **Migrations are checksummed.** Editing an already-applied migration file is
   an error rather than a silent divergence, which matters here specifically:
   prod, dev and any throwaway instance can all be pointed at one database. Add a
@@ -74,6 +79,32 @@ lifecycle plus crash traces, one line each, rotating one generation at 8 MiB.
 Prefer the file when working out why sessions died: it survives restarts of both
 the daemon and journald, and the last line before a gap names the sessions that
 went with it. Override with `DRYDOCK_LOG_FILE` in `~/.drydock/prod/.env`.
+
+### Is this daemon suspect? (DRY-48)
+
+```sh
+curl -s localhost:4318/healthz | jq '{status, faults, tracker: .tracker.state, store: .store.ok}'
+curl -s -o /dev/null -w '%{http_code}\n' localhost:4318/readyz
+```
+
+`faults.total` is the one to read after an incident: uncaught exceptions and
+unhandled rejections this process has taken and survived. A non-zero count with
+`status: "degraded"` is a daemon worth looking at in the log above — and worth
+NOT restarting on that basis alone, since it is still holding whoever's agents
+were running when it happened. `status` is `down` only when the daemon cannot
+enumerate its own sessions (typically the sessions directory has gone or lost
+its permissions), which is a case for a human rather than a bounce: restarting a
+daemon whose index has vanished abandons the supervisors it was tracking.
+
+The unit is `Restart=always` and an uncaught exception exits by default, so the
+usual prod story is a crash, an immediate restart, and every agent reattached
+(DRY-57). `DRYDOCK_EXIT_ON_UNCAUGHT=idle` in `~/.drydock/prod/.env` is the
+middle posture if even that reconnect is unwelcome: the daemon stays up while it
+still holds sessions and exits once it holds none. Note "holds" is the registry,
+so a finished run nobody has dismissed keeps it alive — deliberately, since that
+card and its scrollback are exactly what a restart would throw away. On a busy
+host that can mean it never exits, which is no worse than the `0` posture it
+replaces.
 
 ### A deploy does not kill the running agents (DRY-87)
 

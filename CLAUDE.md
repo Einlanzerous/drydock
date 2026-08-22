@@ -48,7 +48,10 @@ of its own sessions rather than their parent. A save under `daemon/src/` restart
 the `--watch` daemon and the agents keep running; on boot it reconciles them from
 a per-port index of small files (`daemon/src/sessions-dir.ts`,
 `~/.drydock/sessions-<port>/`) and reattaches, scrollback included.
-`DRYDOCK_EXIT_ON_UNCAUGHT` defaults ON because a restart is now cheap.
+`DRYDOCK_EXIT_ON_UNCAUGHT` defaults ON because a restart is now cheap — and
+since DRY-48 it takes a third value, `idle`, which stays up while the daemon
+still holds sessions and exits once it doesn't. What made that expressible is
+that `/healthz` now says whether this process has taken a fault.
 
 - **Never bump `PROTOCOL_VERSION` in `supervisor/wire.ts` casually.** A daemon
   refuses to drive a supervisor from a different build rather than misparse it,
@@ -129,7 +132,7 @@ done
 Smoke-test against it (`curl` from another terminal):
 
 ```sh
-curl -s localhost:4399/healthz                 # {ok:true, sessions:N}
+curl -s localhost:4399/healthz                 # {status, ok, sessions, faults, …}
 curl -s localhost:4399/api/sessions            # list; POST spawns (see server.ts)
 curl -s localhost:4399/api/tracker/info        # active tracker provider
 ```
@@ -272,6 +275,7 @@ Sessions, spawning and the supervisor:
 | [dry-60-clearing-finished](docs/decisions/dry-60-clearing-finished.md) | the sweep — why the clock measures time in front of somebody |
 | [dry-64-exit-events](docs/decisions/dry-64-exit-events.md) | `session-exit` on the event stream, and why it isn't wired to `onRunEnd` |
 | [dry-90-worktree-reaper](docs/decisions/dry-90-worktree-reaper.md) | when a worktree may be deleted; liveness is read from every daemon's index, not this one's |
+| [dry-48-health](docs/decisions/dry-48-health.md) | `/healthz` and `/readyz` — what makes a daemon suspect, and why `degraded` must never read as `down` |
 
 Identity, state and deploy:
 

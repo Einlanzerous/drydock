@@ -1602,6 +1602,141 @@ and read `paintedAfterMs` / `waitedMs` off the daemon's `typing initial prompt`
 line against the table in `docs/decisions/dry-88-initial-prompt.md`. A stub whose numbers have drifted from the
 CLI's is a harness asserting against last year's terminal.
 
+## Is the daemon suspect? (DRY-48)
+
+`/healthz` was `{ok:true, sessions:N}` from a handler that could not fail, so a
+daemon that had taken an uncaught exception and stayed up looked exactly as
+healthy as one that hadn't. It now reports a `status` over the faults this
+process has taken, the session registry and its on-disk index, the log sink, the
+tracker and the store; `/readyz` sits beside it as the thin signal.
+
+```sh
+(cd daemon && node --import tsx ../scripts/verify/health.mts)
+```
+
+No browser, no database, no second terminal: this file starts the eight daemons
+it needs, one posture at a time — plus a ninth in the last section, which is
+there to refuse to start — and a stub tracker of its own for the 500 case. It takes `:4348` (`PORT=` to move it, and it
+refuses `:4317`/`:4318` outright), `/tmp/dry48`, and one more port for its own
+stub tracker. About two minutes.
+
+**The fault it injects is a real one.** `fault-inject.mts` is preloaded into the
+daemon under test (`--import tsx --import …/fault-inject.mts`) and throws from a
+timer callback when the process gets SIGUSR2 — writing `exception` or `rejection`
+into `$DRYDOCK_FAULT_FILE` picks which. Two things that rules out, both of them
+deliberate: the product does not grow a "crash yourself" endpoint on the same
+unauthenticated surface prod serves, and the throw does not happen inside an HTTP
+handler, where `server.ts`'s catch-all would turn it into a 500 and no
+`uncaughtException` would fire at all.
+
+What it holds down:
+
+- **`degraded` must never read as `down`.** A broken store, an unreachable
+  tracker, an unwritable log file and a fault the process survived all leave
+  `ok:true` and `/readyz` at 200. That is DRY-45's trade restated: the daemon is
+  holding somebody's live agents, and restarting it for being suspect costs
+  exactly the thing staying up was protecting. `ok:false` has one cause, and the
+  file proves it by chmodding the sessions directory to 000 and then deleting it.
+- **The legacy shape survives.** `ok`, `sessions` and `store` (with DRY-56's
+  capabilities) are asserted where they always were — half a dozen files in this
+  directory read them, and this ticket had every opportunity to move them.
+- **The tracker is observed, not probed.** `unknown` before anything asks, `ok`
+  after a call succeeds, and — the one worth having — still `ok` after a 404 for
+  a key that doesn't exist. A health endpoint that called a mistyped ticket key
+  an outage would accuse a perfectly reachable Jira and, with nothing else
+  polling, go on accusing it.
+- **The three postures of `DRYDOCK_EXIT_ON_UNCAUGHT`.** The default exits, and
+  the section proves that costs a reattach and nothing else: a fresh daemon comes
+  up and adopts the session the crash didn't kill (DRY-57). `0` stays up. `idle`
+  is a TRIPLE — still there a poll interval after the fault while a session runs;
+  still there once that session has FINISHED and its card is undismissed; gone
+  within three polls once the card is dismissed. The middle one is review's, and
+  it is why the session is left to end on its own rather than killed: `/kill`
+  leaves the registry synchronously (DRY-60 trap 8), so a check built on it never
+  produces the exited-but-listed state and passes against a daemon that discards
+  finished runs.
+- **The tracker's own words stay off the anonymous endpoint.** A stub answering
+  500 with a marker in its body: the marker must appear in the route's 502 and
+  must appear nowhere in `/healthz`, which says `the tracker answered 500`
+  instead. A pair, because "it isn't in the payload" passes just as well against
+  a daemon that stopped recording why.
+- **A 404 is only a caller's fault on a call that carried a key.** A second stub
+  404s everything, which is what a base URL with a path prefix or a proxy that
+  doesn't route `/v1/*` does. The list call must degrade the daemon; a
+  `getTicket` against the same stub must not. Also a pair, and the reason the
+  first version of this feature could report `state: "ok"` — refreshed on every
+  poll — about a tracker that had never answered.
+- **A probe must not repair.** The index check reads the configured path rather
+  than calling `sessionsDir()`, which creates the directory. See the mutation
+  table: that one is a latch, not a discriminator.
+
+### Making sure this one still discriminates
+
+Against `main` it fails **51 of 65**, and the fourteen survivors are worth
+reading rather than glossing:
+
+- **four are the legacy-compatibility checks** — `ok`, `sessions`, `store` and
+  DRY-56's capabilities. They are supposed to pass; that is the point of them.
+- **five are premises this ticket didn't change**: `=0` stays up, the default
+  exits and nothing answers afterwards, a store with no read permission already
+  reported `ok:false` (DRY-28), and the route's 502 already carried the
+  tracker's own words (DRY-72).
+- **one is rig setup** (a desk was saved, so there is a store file to break).
+- **four pass vacuously**, and they are the interesting ones. `main`'s `ok` is
+  always true, so "stays TRUE while degraded" cannot fail. `main` has no index
+  probe, so "did not quietly recreate it" holds for want of a probe. `main` has
+  no `tracker` field, so "the body appears nowhere in the payload" is true of a
+  payload with nothing in it. And "exits once the desk is empty" is satisfied by
+  a daemon that exited a minute earlier under a posture it read as `exit` —
+  which is precisely why `idle` is checked from three sides rather than one.
+
+| mutation | fails |
+|---|---|
+| `CALLER_FAULT` applied to any call, not just keyed ones | **1 of 65**, review's second finding |
+| `/readyz`'s reason without its "a restart won't fix this" | **1 of 65** |
+| `ok: status !== "down"` → `status === "ok"` | **3 of 65**, the degraded checks |
+| `readiness()` refusing a degraded tracker | **1 of 65** |
+| the uncaught handler not calling `faults.record` | **7 of 65** |
+| `idle` counting only RUNNING sessions (review's first) | **1 of 65**, and it can only be 1 |
+| `idle` ignoring whether anything is running | **6 of 65** |
+| `idle` never arming | **3 of 65** |
+| `TrackerWatch.failed` without its caller-fault arm at all | **2 of 65**, the 404s in (b) and (f3) |
+| `TrackerWatch.failed` quoting the tracker verbatim | **3 of 65**, (f) and the (f2) pair |
+| `TrackerWatch.failed` never reporting the status | **1 of 65**, the other half of that pair |
+| `indexHealth` calling `sessionsDir()` | **0 of 65** — vacuous, and why is in [dry-48-health](../../docs/decisions/dry-48-health.md) |
+
+Every row measured against the finished tree at 65 checks — including the four
+that were re-run rather than carried over when section (f3) was added, one of
+which moved (`no caller-fault arm at all` was 1 of 63 and is 2 of 65). A count
+carried across a change to the harness is a count nobody took.
+
+
+Three notes on that table. The three `idle` rows are one property seen from
+three sides, and the middle one — review's — **can only ever fail one check**:
+once the daemon has exited early, everything after it in the section passes,
+which is exactly why the check that catches it is placed where the finished card
+still exists.
+
+The three `TrackerWatch` rows are disjoint, and the last two exist because the
+first attempt at that mutation was wrong in a way worth recording. Neutering only
+the ternary's HTTP arm leaves the else-branch — which is itself part of the fix —
+so it measured 1, not 3, and would have gone into this table as evidence for a
+property it never tested. The mutation that tests "does it quote the tracker" is
+`this.lastError = oneLine(err)`, replacing the whole expression; the 1-failure
+one is a different (also real) property, that the STATUS is reported at all.
+
+And the zero is recorded rather than dropped: a harness's own vacuous check is
+worth naming, because the reader who finds it needs to know it was measured.
+
+**The rig's own trap, worth knowing before you edit this file.** Eight daemons
+share one port, so a daemon that outlives its section answers for the next one —
+and answers plausibly, being a real Drydock. The first run reported eighteen
+failures that were all one leak. `startDaemon` refuses while anything is
+listening, `stopDaemon` escalates to SIGKILL rather than giving up quietly, and
+`process.on("exit")` kills the child however the file ends: a harness that
+crashes halfway otherwise leaves a daemon holding the port and breaks the *next*
+run instead of the one that made the mess.
+
 ## Workspace store: why a proxy and not `docker stop`
 
 `docker stop` frees the port, so every connect fails instantly with
@@ -1667,6 +1802,7 @@ tiers** — the file store is what a fresh clone runs.
 | `timings.mts` | Postgres only. Timings, not status codes: one request per window pays the timeout, the rest return in ms, the window widens 10 → 20 → 30 and stops, `/healthz` answers instantly while cooling and resets after a heal. |
 | `drift.sh` | Postgres only. An edited applied migration 503s naming the file while the live PTY keeps running; reverting clears it; a null checksum is adopted and backfilled. |
 | `epic-children.mts` | DRY-83. An epic with nothing under it in the pull expands to its open children, without widening the pull, without fanning out under a filter, and without the rows blinking out when Refresh re-pulls them. |
+| `health.mts` | DRY-48. `/healthz` has an opinion: a real uncaught exception is counted and reported as `degraded` without ever reading as `down`, a broken store or tracker or log sink never un-readies the daemon, and the three postures of `DRYDOCK_EXIT_ON_UNCAUGHT` do what they say — including `idle`, which must stay up while a session runs and exit once none does. |
 | `desk-chrome.mts` | DRY-82. One spawn control on the header and a palette that carries what the two removed buttons did; a layout switcher centred on the window rather than on the slack its siblings leave; `key=value` filter pills that cost the tracker nothing and say when they name something this pull cannot contain; and a term the pull cannot contain found through `/api/tracker/search`, debounced. |
 
 Each exits non-zero on failure and prints one line per check.
