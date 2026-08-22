@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.7.0](https://github.com/Einlanzerous/drydock/compare/v1.6.0...v1.7.0) (2026-08-22)
+
+
+### Features
+
+* **daemon:** /healthz reports internal state, plus /readyz (DRY-48) ([c2e3ba5](https://github.com/Einlanzerous/drydock/commit/c2e3ba5614b8dbd37d34027245bc6c429edba1bf))
+* **daemon:** /healthz reports internal state, plus /readyz (DRY-48) ([db2557a](https://github.com/Einlanzerous/drydock/commit/db2557a7a4081690905d669e27d240e7b631b26b))
+
+
+### Bug Fixes
+
+* **daemon:** `idle` counts the whole registry, not just running PTYs (DRY-48) ([c67e28a](https://github.com/Einlanzerous/drydock/commit/c67e28a901ead3042db4a603a5f4552b61007a59))
+* **daemon:** a 404 only exempts the tracker on a call that carried a key (DRY-48) ([23da037](https://github.com/Einlanzerous/drydock/commit/23da0376c9ff9b24d8f3ae3aced9ac669b9b3a53))
+* **daemon:** restore faults.record, and publish the measured table (DRY-48) ([ae5a889](https://github.com/Einlanzerous/drydock/commit/ae5a88975d290000aeb5a12366b0a35ca0076547))
+
+
+### Documentation
+
+* point the repo's inbound references at docs/decisions/ (DRY-95) ([76971ab](https://github.com/Einlanzerous/drydock/commit/76971ab26b34c55c1da3dea018fe84810c08378d))
+* split CLAUDE.md into per-ticket decision docs (DRY-95) ([9fba0ef](https://github.com/Einlanzerous/drydock/commit/9fba0efcf8e4ef0b020c864cc3b3610f9698955b))
+* split CLAUDE.md into per-ticket decision docs (DRY-95) ([6347024](https://github.com/Einlanzerous/drydock/commit/6347024197e8da8f89f0ade91a7d312d3b354d62))
+
 ## [1.6.0](https://github.com/Einlanzerous/drydock/compare/v1.5.0...v1.6.0) (2026-08-21)
 
 
