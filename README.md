@@ -384,6 +384,13 @@ withheld is said out loud ("showing the 3 most recent of 11 comments") rather
 than silently dropped. The prompt is pre-filled with your instruction and left
 for you to send (no auto-submit) — the daemon types it once the CLI has actually
 started listening, which is a second or two after the pane appears (DRY-88).
+
+What it is pre-filled WITH is host config (`DRYDOCK_AGENT_PROMPT`, DRY-94), with
+`{key}`/`{repo}` for the ticket — so the instruction every agent on a host starts
+from is an env var rather than something baked into the shell image. The shipped
+default tells the agent to see the change through review: open a PR, attach it to
+the ticket, and address the CI reviewer's comments, in a loop bounded at three
+rounds so an unattended run can't sit forever on a PR that never gets reviewed.
 The hooks are injected by the daemon (`claude --settings`), so they work
 regardless of cwd — no per-repo `.claude/settings.json` needed.
 

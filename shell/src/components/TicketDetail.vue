@@ -11,6 +11,7 @@ import { removeWorktree, resolveRepoCwd, WorktreeNotSafe } from "../lib/daemon.j
 import type { PermissionMode, SessionVisibility } from "../lib/protocol.js";
 import { isMultiUser } from "../lib/auth.js";
 import { renderMarkdown } from "../lib/markdown.js";
+import { expandAgentPrompt, LEGACY_AGENT_PROMPT } from "../lib/agent-prompt.js";
 
 // Ticket detail panel (DRY-9 ticket-spawn). Opened when a ticket is picked from
 // the sidebar or Ctrl+K palette: shows the full description for *you* to read,
@@ -29,6 +30,12 @@ const props = defineProps<{
   z: number;
   /** The host's autonomous policy, so the picker can name what "default" means. */
   hostMode?: PermissionMode;
+  /**
+   * The host's prompt template (DRY-94), `{key}`/`{repo}` unexpanded. Optional
+   * so the panel still works standalone; App passes what /api/config served,
+   * falling back to the pre-DRY-94 sentence for an older daemon.
+   */
+  agentPrompt?: string;
 }>();
 // DRY-15: a ticket spawn can isolate into a git worktree. `worktree` is the path
 // to use, or `false` to run directly in `cwd`; `branch` overrides the branch name.
@@ -157,9 +164,34 @@ const resetting = ref(false);
 // asking about.
 const resetRefused = ref<string | null>(null);
 
+/**
+ * The pre-filled prompt for a ticket — the host's template, expanded (DRY-94).
+ *
+ * It was a literal here until then, which put every edit to it behind a shell
+ * rebuild and a production promote, and gave every install whatever sentence
+ * was baked into the image. Only the ticket's identity is substituted: the
+ * description, thread and epic already reach the agent through DRY-53's brief,
+ * against a budget this must not spend.
+ */
 function defaultPrompt(t: Ticket): string {
-  return `Work ticket ${t.key}. Its full description is attached as context — implement it.`;
+  return expandAgentPrompt(props.agentPrompt || LEGACY_AGENT_PROMPT, {
+    key: t.key,
+    repo: t.repo ?? "",
+  });
 }
+
+/**
+ * The last prompt this panel filled in by itself.
+ *
+ * /api/config is fetched asynchronously at startup, so a ticket opened in the
+ * first moments of a page load can be composed from the fallback template and
+ * then have the host's arrive a beat later. Re-applying it blindly would eat
+ * whatever the human had started typing; re-applying it only when the box still
+ * holds exactly what we put there cannot. The case is narrow and the failure is
+ * not: the whole point of the host template is what an UNATTENDED run is told
+ * to do, and that run is launched from this same box.
+ */
+const filledPrompt = ref("");
 
 // Preview the spawn target (cwd + planned worktree/branch) for the current
 // ticket. Also re-run after a Reset to refresh the reuse flag.
@@ -183,7 +215,7 @@ watch(
     detail.value = null;
     loading.value = true;
     loadError.value = null;
-    prompt.value = defaultPrompt(t);
+    prompt.value = filledPrompt.value = defaultPrompt(t);
     cwd.value = "";
     cwdMatched.value = true;
     isGit.value = false;
@@ -209,6 +241,16 @@ watch(
     }
   },
   { immediate: true },
+);
+
+// The host template landing after this panel opened (see `filledPrompt`).
+// Untouched box only — never over an edit in progress.
+watch(
+  () => props.agentPrompt,
+  () => {
+    if (prompt.value !== filledPrompt.value) return;
+    prompt.value = filledPrompt.value = defaultPrompt(props.ticket);
+  },
 );
 
 const winStyle = computed(() => {

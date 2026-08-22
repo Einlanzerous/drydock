@@ -233,7 +233,16 @@ export interface DaemonConfig {
    * doesn't send it, and the desk falls back to its own default rather than
    * treating a missing field as "off".
    */
-  desk?: { clearFinishedAfterMs: number };
+  desk?: {
+    clearFinishedAfterMs: number;
+    /**
+     * The ticket panel's prompt template, `{key}`/`{repo}` unexpanded (DRY-94).
+     * Optional for the same reason as the field above — a daemon older than the
+     * ticket doesn't send it — and the panel then falls back to the sentence
+     * that shipped with that daemon (`LEGACY_AGENT_PROMPT`).
+     */
+    agentPrompt?: string;
+  };
 }
 
 /**

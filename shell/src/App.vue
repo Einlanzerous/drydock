@@ -20,6 +20,7 @@ import {
   signedIn,
 } from "./lib/auth.js";
 import { chordLetter } from "./lib/keys.js";
+import { LEGACY_AGENT_PROMPT } from "./lib/agent-prompt.js";
 import { openGates, startGateStream, stopGateStream } from "./composables/gateStore.js";
 import { askToNotify, notifyGate, useAttention } from "./composables/attention.js";
 import { isFinished, runState } from "./composables/runState.js";
@@ -82,6 +83,16 @@ const hostRunMode = ref<PermissionMode | undefined>(undefined);
  * the feature silently absent on exactly the hosts nobody thought to look at.
  */
 const clearFinishedAfterMs = ref(300_000);
+
+/**
+ * The prompt a ticket spawn pre-fills, as a template (DRY-94).
+ *
+ * Host config like the delay above, and read the same way. The fallback is
+ * NOT the daemon's current default but the sentence that shipped before this
+ * was configurable — a daemon that doesn't serve the field is one built before
+ * it existed, and that is the prompt it expects. See lib/agent-prompt.ts.
+ */
+const agentPrompt = ref(LEGACY_AGENT_PROMPT);
 
 // Tracker pull scope (DRY-30). Host defaults come from /api/tracker/info
 // (DRYDOCK_TRACKER_PROJECTS — fixed chips); user-added keys and the backlog
@@ -1723,6 +1734,9 @@ async function startDesk() {
     // Absent on a daemon older than DRY-60; the desk keeps its own default
     // rather than reading a missing field as "never sweep".
     if (c?.desk) clearFinishedAfterMs.value = c.desk.clearFinishedAfterMs;
+    // Absent on a daemon older than DRY-94; the panel keeps the pre-DRY-94
+    // sentence rather than this build's idea of a good default.
+    if (c?.desk?.agentPrompt) agentPrompt.value = c.desk.agentPrompt;
   });
   await runTicketPull();
   // Restore the saved arrangement before the first poll. reconcile() then keeps
@@ -2070,6 +2084,7 @@ onBeforeUnmount(stopDesk);
       :ticket="selectedTicket"
       :z="ticketZ"
       :host-mode="hostRunMode"
+      :agent-prompt="agentPrompt"
       @focus="ticketZ = wm.allocZ()"
       @send="onSendTicket"
       @close="selectedTicket = null"

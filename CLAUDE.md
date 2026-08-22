@@ -265,6 +265,7 @@ Sessions, spawning and the supervisor:
 | [dry-57-session-durability](docs/decisions/dry-57-session-durability.md) | how "killing this doesn't kill that" is tested, and the resource cost per session |
 | [dry-79-first-output](docs/decisions/dry-79-first-output.md) | the window between a PTY starting and its pane attaching, and the exit code that went missing in it |
 | [dry-88-initial-prompt](docs/decisions/dry-88-initial-prompt.md) | who types a spawned agent's first prompt, and why a fixed delay can't be the rule |
+| [dry-94-agent-prompt](docs/decisions/dry-94-agent-prompt.md) | what that prompt SAYS — host config, and the bound that stops a run waiting on a review forever |
 | [dry-49-autonomous-runs](docs/decisions/dry-49-autonomous-runs.md) | unattended runs: the three permission postures, handoffs, and why a stop is not a failure |
 | [dry-66-spawn-env](docs/decisions/dry-66-spawn-env.md) | per-spawn env vars — what's refused and where the line actually is |
 | [dry-59-inherited-markers](docs/decisions/dry-59-inherited-markers.md) | what a spawned agent inherits from the session that launched the daemon |
