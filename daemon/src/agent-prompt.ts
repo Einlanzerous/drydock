@@ -50,15 +50,21 @@ export type AgentPromptKey = (typeof AGENT_PROMPT_KEYS)[number];
  * This is typed into a supervised composer too, where a human reads it before
  * pressing return (DRY-88 trap 3: the paths differ by the RETURN, not by the
  * text), so it stays two sentences a person can scan rather than a wall.
+ *
+ * **One line, deliberately.** A `.env` is parsed line by line (`env.ts` skips
+ * any line without an `=`), so a two-line default is one an operator copies in
+ * to reword and silently loses the second half of — and the second half is the
+ * BOUND. Losing it restores the unbounded loop this ticket exists to prevent,
+ * on the surface where nobody is reading the composer. A prompt that wants real
+ * newlines writes `\n`; see `normalizeAgentPrompt`.
  */
 export const DEFAULT_AGENT_PROMPT =
   "Work ticket {key}. Its full description is attached as context — implement it, " +
   "then see it through review: open a PR, attach it to the ticket, and address the " +
-  "CI reviewer's comments until it reports nothing blocking.\n" +
-  "Bound that loop: at most 3 review rounds, and stop waiting if none has landed " +
-  "20 minutes after a push — the reviewer is advisory and declines most re-reviews, " +
-  'so comment "@claude review" on the PR if you want another. Then hand back with ' +
-  "whatever is still outstanding.";
+  "CI reviewer's comments until it reports nothing blocking. Bound that loop: at most " +
+  "3 review rounds, and stop waiting if none has landed 20 minutes after a push — the " +
+  "reviewer is advisory and declines most re-reviews, so comment \"@claude review\" on " +
+  "the PR if you want another. Then hand back with whatever is still outstanding.";
 
 /**
  * `{{name}}` — a literal `{name}` — or `{name}`, a placeholder.
@@ -76,8 +82,12 @@ export const DEFAULT_AGENT_PROMPT =
  * (verbatim copy + a CI drift check) — that is a WIRE format, where a
  * disagreement is a parse error. Here the two halves share a shape and a key
  * list, and the failure mode of a drift is a token left standing in a prompt.
+ *
+ * Module-private, deliberately: a shared `/g` regex whose `lastIndex` a caller
+ * can advance with `.test()` is a classic alternating-result bug, and the
+ * `matchAll` below (which works off a clone) is the only thing that needs it.
  */
-export const AGENT_PROMPT_TOKEN = /\{\{([A-Za-z][A-Za-z0-9_]*)\}\}|\{([A-Za-z][A-Za-z0-9_]*)\}/g;
+const AGENT_PROMPT_TOKEN = /\{\{([A-Za-z][A-Za-z0-9_]*)\}\}|\{([A-Za-z][A-Za-z0-9_]*)\}/g;
 
 /**
  * The placeholders in `template` that nothing will ever expand.
@@ -100,18 +110,29 @@ export function unknownAgentPromptKeys(template: string): string[] {
 }
 
 /**
- * A carriage return is dropped, and only a carriage return.
+ * Turn a two-character `\n` into a real newline, and drop carriage returns.
  *
- * The daemon TYPES this at a CLI (DRY-88). A `\r` in it is Enter pressed
- * mid-prompt: the composer submits a fragment and the rest is typed at whatever
- * the agent does next. A `\r` reaching an env var means a .env with CRLF line
- * endings and never an intent, which is why this one control character is
- * normalised away instead of being refused — a host whose editor writes CRLF
- * would otherwise have a daemon that won't boot and no readable reason why.
+ * **The escape is the only way a multi-line prompt can be configured at all.**
+ * Host config is documented as a `.env` and on prod that is the only surface
+ * (`install-prod.sh` seeds `$PROD_DIR/.env`), and `env.ts` reads it line by
+ * line: a value's second line has no `=` and is skipped, so a prompt written
+ * across two lines arrives as its first line alone — silently, and with no
+ * placeholder missing for the boot check to catch. Multi-line payloads are
+ * safe once they get here; `flushInitialInput` wraps one in bracketed paste so
+ * it lands as a block rather than submitting a fragment per newline.
  *
- * `\n` is fine and is passed through: `flushInitialInput` wraps a multi-line
- * payload in bracketed paste so it lands as one block.
+ * The cost, said out loud: a prompt that wants a literal backslash-n in its
+ * text can't have one. Prose about an escape sequence is a stranger thing to
+ * put in a prompt than a paragraph break, so this is the right way round.
+ *
+ * The `\r` strip is separate and is about the CLI rather than the parse: the
+ * daemon TYPES this (DRY-88), so a carriage return is Enter pressed mid-prompt
+ * — the composer submits a fragment and the rest is typed at whatever the agent
+ * does next. Note this can only ever fire for a value set DIRECTLY in the
+ * environment (a systemd `Environment=`, a shell heredoc): `env.ts` trims each
+ * line before splitting it, so a CRLF `.env` never delivers one. It is
+ * normalised rather than refused because a stray CR is never an intent.
  */
 export function normalizeAgentPrompt(raw: string): string {
-  return raw.replace(/\r/g, "");
+  return raw.replace(/\\n/g, "\n").replace(/\r/g, "");
 }

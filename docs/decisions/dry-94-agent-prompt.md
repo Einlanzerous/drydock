@@ -64,11 +64,26 @@ Measured rather than read: a daemon at `DRYDOCK_AUTONOMOUS_PERMISSION_TIMEOUT_MS
 with an autonomous run that raises no gate still reports `status: running`,
 `failure: null` and no handoff 40 seconds later.
 
-**What WOULD break it is the posture, not the wait.** Under `manual` every Bash
-call raises a gate, so an agent that polls CI raises one per poll and dies at the
-first that outlives the hour — but so does an agent doing anything else at all,
-which is why this host runs `acceptEdits`. Worth re-checking if the default ever
-moves back to `manual`: the fix is the posture, not a bigger number.
+**What WOULD break it is the posture, and `acceptEdits` is not the escape hatch
+it looks like.** `server.ts` waves a tool through for `HANDS_OFF_MODES`
+(`bypassPermissions` / `auto` / `dontAsk`), and under `acceptEdits` only for
+`EDIT_TOOLS` (`Edit`, `MultiEdit`, `Write`, `NotebookEdit`). **`Bash` is in
+neither set** — `config.ts` says so in as many words: *"acceptEdits — file edits
+pass silently; Bash and WebFetch still gate."* So under `manual` (the shipped
+default) or `acceptEdits`, every `gh pr view`, every `sleep`, every `git push`
+raises a Drydock gate; on a run nobody is watching one of them eventually goes
+unanswered, and an hour later `failUnanswered` records a run that was doing
+exactly what it was told as **failed**, with a handoff and a tracker comment
+saying nobody was watching.
+
+That is not new with this prompt — such a run was already gate-bound at its
+first Bash call, which is why an unattended run is only really unattended under
+a hands-off posture — but this prompt does LENGTHEN the exposure, deliberately,
+by 20 minutes and up to three rounds. So, plainly: **the review wait is safe
+under `auto` / `bypassPermissions` / `dontAsk`, or with `Bash` on "Always allow"
+for the run. Under `manual` or `acceptEdits` it is not, and the fix is the
+posture, not a bigger number.** (Found in review; the first version of this
+section claimed `acceptEdits` covered it, which was simply false.)
 
 ## The agent can actually do what it is told
 
@@ -115,14 +130,32 @@ deliver all of it twice and spend that budget on the copy.
    half-commented out, which is exactly the case `msOrOff` was written for
    (DRY-60 trap 9). Read as a deliberate value it would spawn agents with an
    empty composer.
-5. **A `\r` is dropped and a `\n` is not.** The daemon TYPES this at a CLI, so a
-   carriage return is Enter pressed mid-prompt: the composer submits a fragment
-   and the rest lands wherever the agent goes next. A `\r` in an env var means a
-   CRLF `.env` and never an intent, so it is normalised rather than refused —
-   refusing would be a daemon that won't boot with no readable reason. Newlines
-   are fine: `flushInitialInput` sends a multi-line payload as a bracketed
-   paste, which round 6 of the harness now exercises, the shipped default being
-   two lines.
+5. **A `.env` value is ONE LINE, and that is why the default is one line and
+   `\n` is an escape.** `env.ts` reads that file line by line and skips any line
+   without an `=`, so a prompt written across two lines arrives as its first
+   line alone — no placeholder missing, nothing for the boot check to catch, the
+   daemon boots, and the agent is told to address the reviewer's comments *with
+   the bound gone*: the unbounded loop this ticket exists to prevent, restored
+   in silence, on the surface where nobody reads the composer. Since `.env` is
+   the documented surface and on prod the only one (`install-prod.sh` seeds
+   `$PROD_DIR/.env`), the fix is both halves: the shipped default is a single
+   line so copying it to reword can't lose anything, and `normalizeAgentPrompt`
+   turns a two-character `\n` into a real newline so a multi-line prompt is
+   expressible at all. Multi-line payloads themselves are safe —
+   `flushInitialInput` sends one as a bracketed paste — which round 5 of the
+   harness now exercises through that escape. The cost, said out loud: a prompt
+   cannot contain a literal backslash-n in its text. (Found in review, along
+   with the fact that the ticket's own refuse-don't-drop rule was being applied
+   to placeholders and not to this.)
+6. **A `\r` is dropped, and the reason is the CLI rather than the parse.** The
+   daemon TYPES this, so a carriage return is Enter pressed mid-prompt: the
+   composer submits a fragment and the rest lands wherever the agent goes next.
+   Note where one can actually come from — a value set DIRECTLY in the
+   environment (a systemd `Environment=`, a shell heredoc), never a CRLF `.env`,
+   because `env.ts` trims each line before splitting it. (The first version of
+   this note named the `.env` path, which review caught: CLAUDE.md trap 7, a
+   justification that describes the wrong file.) Normalised rather than refused,
+   because a stray CR is never an intent.
 
 ## The shell's fallback is the OLD sentence on purpose
 
@@ -158,11 +191,12 @@ with a hole in it.
 `scripts/verify/prefill.mts` rounds 5 and 6, rig in
 [the README](../../scripts/verify/README.md). Round 5 is the whole chain with
 nothing stubbed — env var → `/api/config` → desk → the daemon types it → the
-stub CLI echoes it back. Round 6 starts a SECOND daemon with the variable empty
+stub CLI echoes it back — and it is the multi-line case too, its template
+carrying the `\n` escape so what arrives has a real newline in it. Round 6 starts a SECOND daemon with the variable empty
 and relays its real config body into the page, because a desk's daemon URL is
 baked in by Vite and cannot be re-pointed from inside a running browser.
 
-Four things that cost time, all of them in the harness rather than the feature:
+Five things that cost time, all of them in the harness rather than the feature:
 
 1. **A round that doesn't `reset()` reads the PREVIOUS round's session.** The
    desk restores its saved arrangement, so round 6 opened onto round 5's
@@ -176,7 +210,12 @@ Four things that cost time, all of them in the harness rather than the feature:
    lost — but a test daemon that deletes anything on the way up is not a thing
    to leave on. `DRYDOCK_WORKTREE_REAP_MS=0` in the rig and in the harness's own
    child.
-4. **The second daemon gets `DRYDOCK_AGENT_PROMPT=""`, not an absent key.**
+4. **The second daemon is killed in a `finally`.** Two selector waits sit
+   between the spawn and the kill, and a throw in either would leave a daemon
+   listening on a kernel-assigned port nobody can guess afterwards. It holds no
+   PTY, so there is no supervisor to strand — but a stray daemon on this host is
+   its own problem. (Found in review.)
+5. **The second daemon gets `DRYDOCK_AGENT_PROMPT=""`, not an absent key.**
    `env.ts` skips any key already present in the environment, so an empty value
    is what stops a `.env` above the checkout from quietly supplying one. Absent,
    round 6 would report whatever the developer's host is configured with and
@@ -184,7 +223,7 @@ Four things that cost time, all of them in the harness rather than the feature:
    reason CLAUDE.md gives at length.
 
 Discrimination: `perl -0pi -e 's/props\.agentPrompt \|\| LEGACY_AGENT_PROMPT/LEGACY_AGENT_PROMPT/'`
-on `TicketDetail.vue` — the pre-DRY-94 behaviour exactly — fails **3 of 32**.
+on `TicketDetail.vue` — the pre-DRY-94 behaviour exactly — fails **3 of 33**.
 Dropping `agentPrompt` from `/api/config` makes the harness REFUSE (exit 2)
 rather than fall back to asserting the default, which is the one thing rounds 5
 and 6 exist to find out.

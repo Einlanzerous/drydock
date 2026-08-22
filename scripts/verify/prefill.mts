@@ -30,6 +30,12 @@ const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5388";
 const DAEMON = process.env.DAEMON ?? "http://127.0.0.1:4388";
 /** The fixture ticket the rounds spawn from — flat, so no epic to expand. */
 const TICKET = process.env.TICKET ?? "SWY-12";
+/**
+ * Its repo, which is what `{repo}` expands to (DRY-94) and what the rig maps to
+ * a non-git directory. Overriding TICKET means overriding this too — hence a
+ * name rather than the literal it was worth being for one use.
+ */
+const REPO = process.env.TICKET_REPO ?? "switchyard";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;
@@ -82,10 +88,22 @@ const PROMPT = `Workticket${TICKET}.`; // the head of the prompt template, despa
  *   - `{{esc}}` is the doubled-brace escape, and the round asserts a literal
  *     `{esc}` comes out — a prompt is prose and is entitled to contain braces,
  *     and the boot check refuses anything that looks like a placeholder it
- *     cannot fill.
+ *     cannot fill;
+ *   - the `\n` is the OTHER escape, and it is the only way a multi-line prompt
+ *     can be configured at all: `env.ts` reads a `.env` line by line, so a
+ *     value written across two lines arrives as its first line alone.
  */
-const CONFIGURED = `Work ticket {key}. See {repo} through, and leave {{esc}} alone.`;
-const CONFIGURED_SEEN = `Workticket${TICKET}.Seeswitchyardthrough,andleave{esc}alone.`;
+const CONFIGURED_RAW = String.raw`Work ticket {key}. See {repo} through.\nLeave {{esc}} alone.`;
+/** …and what the daemon must therefore SERVE: that escape decoded. */
+const CONFIGURED = CONFIGURED_RAW.replace(String.raw`\n`, "\n");
+/**
+ * The above as the pane renders it — despaced, so the newline is invisible here
+ * and what is asserted is that the text either side of it arrived as ONE block.
+ * That is the multi-line coverage: `flushInitialInput` sends a payload with a
+ * newline in it as a bracketed paste, and one that submitted a fragment per
+ * line instead would leave the second half missing.
+ */
+const CONFIGURED_SEEN = `Workticket${TICKET}.See${REPO}through.Leave{esc}alone.`;
 
 /** `desk` as of DRY-94. `agentPrompt` is absent on an older daemon. */
 type ConfigBody = {
@@ -101,10 +119,15 @@ type ConfigBody = {
  * 5 exists to find out.
  */
 const hostConfig = (await (await fetch(`${DAEMON}/api/config`)).json()) as ConfigBody;
-if (hostConfig.desk?.agentPrompt !== CONFIGURED) {
+const SERVED = hostConfig.desk?.agentPrompt;
+// Either form satisfies the RIG check. A daemon serving the escape undecoded is
+// a broken daemon rather than a broken rig, so round 5 fails a CHECK on it; what
+// refuses is a daemon that was never given the variable, since asserting the
+// built-in default there would be a pass bought by not testing.
+if (SERVED !== CONFIGURED && SERVED !== CONFIGURED_RAW) {
   console.log(
-    `this daemon serves desk.agentPrompt = ${JSON.stringify(hostConfig.desk?.agentPrompt)}.\n` +
-      `Start it with DRYDOCK_AGENT_PROMPT set to exactly:\n  ${CONFIGURED}\n` +
+    `this daemon serves desk.agentPrompt = ${JSON.stringify(SERVED)}.\n` +
+      `Start it with DRYDOCK_AGENT_PROMPT set to exactly:\n  ${CONFIGURED_RAW}\n` +
       `(see the README rig) — rounds 5 and 6 measure nothing without it.`,
   );
   process.exit(2);
@@ -268,6 +291,7 @@ console.log("\n3. the bare workspace spawn has no prompt to pre-fill");
   check("no ticket drawer", (await page.locator(".drawerbar").count()) === 0);
   await ctx.close();
 }
+
 console.log("\n4. the RETURN is what separates a run from a pre-fill");
 {
   await reset();
@@ -303,7 +327,6 @@ console.log("\n4. the RETURN is what separates a run from a pre-fill");
   check("neither dropped anything", !`${supervised}${unattended}`.includes("[dropped"));
 }
 
-
 console.log("\n5. the HOST's configured prompt is what arrives (DRY-94)");
 {
   await reset();
@@ -317,6 +340,7 @@ console.log("\n5. the HOST's configured prompt is what arrives (DRY-94)");
   // answering with the template proves the daemon read the variable and
   // nothing more. The prompt this ticket is about is the one that reaches an
   // agent, and the two were a whole shell bundle apart.
+  check("the \\n escape decoded to a real newline", SERVED === CONFIGURED, JSON.stringify(SERVED));
   check("the configured prompt arrived", times(seen, CONFIGURED_SEEN) === 1, seen.slice(-140));
   check("{key} was expanded", !seen.includes("{key}"));
   check("{repo} was expanded", !seen.includes("{repo}"));
@@ -384,47 +408,55 @@ console.log("\n6. …and with none set, the built-in default arrives");
       /* not up yet */
     }
   }
-  const builtIn = config?.desk?.agentPrompt ?? "";
-  check("a daemon with none set still serves a template", !!builtIn, builtIn.slice(0, 60));
-  // The strip above actually worked. Without this the round would happily
-  // "confirm the default" while reading the rig's own variable back.
-  check("it is not the rig's configured one", builtIn !== CONFIGURED);
-  check("it is a template, unexpanded", builtIn.includes("{key}"));
-  // Three tripwires on the SHIPPED default, because they are this ticket's
-  // claim about it rather than incidental wording: an autonomous run has to be
-  // told to open a PR, to see the review through, and to stop. A default that
-  // stops saying one of them should fail here and be re-argued, not sail past.
-  check("it says to open a PR", /\bPR\b/.test(builtIn), builtIn.slice(0, 60));
-  check("it says to see the review through", /review/i.test(builtIn));
-  check("it bounds the loop", /at most|stop waiting|give up/i.test(builtIn));
+  try {
+    const builtIn = config?.desk?.agentPrompt ?? "";
+    check("a daemon with none set still serves a template", !!builtIn, builtIn.slice(0, 60));
+    // The strip above actually worked. Without this the round would happily
+    // "confirm the default" while reading the rig's own variable back.
+    check("it is not the rig's configured one", builtIn !== CONFIGURED);
+    check("it is a template, unexpanded", builtIn.includes("{key}"));
+    // Three tripwires on the SHIPPED default, because they are this ticket's
+    // claim about it rather than incidental wording: an autonomous run has to be
+    // told to open a PR, to see the review through, and to stop. A default that
+    // stops saying one of them should fail here and be re-argued, not sail past.
+    check("it says to open a PR", /\bPR\b/.test(builtIn), builtIn.slice(0, 60));
+    check("it says to see the review through", /review/i.test(builtIn));
+    check("it bounds the loop", /at most|stop waiting|give up/i.test(builtIn));
 
-  if (config) {
-    // As every other round does, and for a reason this round found the hard
-    // way: the desk RESTORES the saved arrangement, so without this the page
-    // comes up holding round 5's workspace and `rows()` reads that pane —
-    // which shows the configured prompt, and the check below fails against
-    // correct code. The three that follow it would have passed vacuously.
-    await reset();
-    const { ctx, page } = await open(browser, config);
-    await openTicket(page);
-    await page.locator("button.send").click();
-    await page.waitForSelector(".agent .xterm", { timeout: 15000 });
-    await sleep(6000);
-    const seen = await rows(page);
-    // Whitespace-insensitive because `rows()` is, which also makes this the
-    // round that proves a MULTI-LINE default survives: `flushInitialInput`
-    // sends one of those as a bracketed paste, and a newline that submitted a
-    // fragment instead would leave the tail of this string missing.
-    const want = builtIn
-      .replace("{key}", TICKET)
-      .replace("{repo}", "switchyard")
-      .replace(/\s+/g, "");
-    check("the built-in default reached the CLI, whole", seen.includes(want), seen.slice(-140));
-    check("nothing was dropped", !seen.includes("[dropped"), seen.slice(-90));
-    check("still a pre-fill, not a run", !seen.includes("[CR]"));
-    await ctx.close();
+    if (config) {
+      // As every other round does, and for a reason this round found the hard
+      // way: the desk RESTORES the saved arrangement, so without this the page
+      // comes up holding round 5's workspace and `rows()` reads that pane —
+      // which shows the configured prompt, and the check below fails against
+      // correct code. The three that follow it would have passed vacuously.
+      await reset();
+      const { ctx, page } = await open(browser, config);
+      await openTicket(page);
+      await page.locator("button.send").click();
+      await page.waitForSelector(".agent .xterm", { timeout: 15000 });
+      await sleep(6000);
+      const seen = await rows(page);
+      // Whitespace-insensitive because `rows()` is — which is also what makes
+      // it a check on the WHOLE default rather than its opening clause: the
+      // shipped one is a long single line and the pane wraps it. (Multi-line
+      // delivery is round 5's job now; the default is one line deliberately,
+      // because a `.env` cannot carry two.)
+      const want = builtIn
+        .replace("{key}", TICKET)
+        .replace("{repo}", REPO)
+        .replace(/\s+/g, "");
+      check("the built-in default reached the CLI, whole", seen.includes(want), seen.slice(-140));
+      check("nothing was dropped", !seen.includes("[dropped"), seen.slice(-90));
+      check("still a pre-fill, not a run", !seen.includes("[CR]"));
+      await ctx.close();
+    }
+  } finally {
+    // In a `finally` because the block above waits on two selectors, and a
+    // throw in either would otherwise leave a daemon listening on a
+    // kernel-assigned port nobody can guess afterwards. It holds no PTY, so
+    // this is the whole cleanup.
+    child.kill();
   }
-  child.kill();
 }
 
 await browser.close();

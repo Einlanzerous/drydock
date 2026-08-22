@@ -1465,7 +1465,7 @@ mkdir -p /tmp/dry88-repos/switchyard        # a NON-git dir, so the panel offers
    DRYDOCK_STATE_FILE=/tmp/dry88-state.json DRYDOCK_TRACKER=fixture \
    DRYDOCK_REPO_PATHS=switchyard=/tmp/dry88-repos/switchyard \
    DRYDOCK_WORKTREE_REAP_MS=0 \
-   DRYDOCK_AGENT_PROMPT='Work ticket {key}. See {repo} through, and leave {{esc}} alone.' \
+   DRYDOCK_AGENT_PROMPT='Work ticket {key}. See {repo} through.\nLeave {{esc}} alone.' \
    node --import tsx src/index.ts &)
 (cd shell && VITE_DAEMON_URL=http://127.0.0.1:4388 bunx vite --port 5388 --strictPort &)
 
@@ -1480,13 +1480,16 @@ this ticket's bug.
 
 Two of those lines arrived with DRY-94 and are not optional either:
 
-- `DRYDOCK_AGENT_PROMPT` must be **exactly** that string. Rounds 5 and 6 are
-  about which prompt reaches the CLI, and the harness reads `/api/config` before
-  round 1 and REFUSES (exit 2) if the daemon serves anything else — asserting the
+- `DRYDOCK_AGENT_PROMPT` must be **exactly** that string, `\n` and all — note
+  the single quotes, which are what keep the shell from eating the backslash.
+  Rounds 5 and 6 are about which prompt reaches the CLI, and the harness reads
+  `/api/config` before round 1 and REFUSES (exit 2) if the daemon serves
+  something that is neither that string nor its decoded form — asserting the
   built-in default against a rig that never set the variable would be a pass
-  bought by not testing. The `{key}`, `{repo}` and `{{esc}}` in it each carry a
-  check: expansion of both placeholders, and the doubled-brace escape coming out
-  as a literal `{esc}`.
+  bought by not testing. Every piece of the template carries a check: both
+  placeholders expanding, the doubled-brace escape coming out as a literal
+  `{esc}`, and the `\n` arriving as a real newline whose two halves reach the
+  CLI as one block (which is the bracketed-paste path).
 - `DRYDOCK_WORKTREE_REAP_MS=0` because a throwaway daemon otherwise runs DRY-90's
   boot sweep over the worktrees of whoever is running the harness. It only ever
   removes work that is clean and merged, so nothing is lost — but a test daemon
@@ -1529,9 +1532,8 @@ What it holds down:
   than absent because `env.ts` skips keys already in the environment, which is
   what stops a `.env` above the checkout from quietly supplying one; the rest of
   `DRYDOCK_*` is stripped from that child for the reason CLAUDE.md gives.
-  It is also the round that proves a MULTI-LINE prompt survives, the shipped
-  default being two lines and `flushInitialInput` sending those as a bracketed
-  paste.
+  (Multi-line delivery is round 5's job: the shipped default is a single line
+  on purpose, because a `.env` cannot carry two.)
 
 Discrimination (see [the section below](#making-sure-a-harness-still-discriminates),
 which carries the recipe). Two eras, and they are separate numbers:
@@ -1539,7 +1541,7 @@ which carries the recipe). Two eras, and they are separate numbers:
 - **DRY-94's half**: `perl -0pi -e 's/props\.agentPrompt \|\| LEGACY_AGENT_PROMPT/LEGACY_AGENT_PROMPT/'`
   on `shell/src/components/TicketDetail.vue` restores the pre-DRY-94 behaviour
   exactly — a hardcoded sentence, the served template ignored — and fails
-  **3 of 32**: round 5's `the configured prompt arrived` and `{{esc}} survived`,
+  **3 of 33**: round 5's `the configured prompt arrived` and `{{esc}} survived`,
   and round 6's `the built-in default reached the CLI, whole`. Restore it with
   `cp`/`git checkout` and note that `git checkout HEAD -- <path>` will take any
   uncommitted work on that file with it. Dropping `agentPrompt` from
@@ -1691,7 +1693,7 @@ git checkout HEAD -- daemon/src/session.ts shell/src/App.vue \
 cp shell/src/components/TicketDetail.vue /tmp/TicketDetail.bak
 perl -0pi -e 's/props\.agentPrompt \|\| LEGACY_AGENT_PROMPT/LEGACY_AGENT_PROMPT/' \
   shell/src/components/TicketDetail.vue
-(cd daemon && node --import tsx ../scripts/verify/prefill.mts)     # expect 3 failures of 32
+(cd daemon && node --import tsx ../scripts/verify/prefill.mts)     # expect 3 failures of 33
 cp /tmp/TicketDetail.bak shell/src/components/TicketDetail.vue
 
 # DRY-82 the desk chrome. Its merge is deliberately not written down either —
