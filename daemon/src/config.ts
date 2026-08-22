@@ -596,6 +596,37 @@ export const CONFIG = {
      * failure — see `staleAfterMs` in tracker/cache.ts.
      */
     requestTimeoutMs: msOrOff(process.env.DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS, 20_000),
+    /**
+     * Deadline on a whole ticket PULL — every request it makes, together
+     * (DRY-61). The sibling above bounds one request and says so; this is the
+     * bound on the operation, which is what a caller actually waits for.
+     *
+     * A pull is a cursor chain for the list, a second for the epic exemption,
+     * then the child-stats pass — one chain per epic on Switchyard. Against a
+     * tracker that ACCEPTS connections and then goes silent, each of those dies
+     * at `requestTimeoutMs` and the next one starts, so the pull runs for
+     * roughly requests × 20s while `/api/tracker/tickets` holds its response
+     * open; meanwhile the sidebar's 20s poll — per browser tab — has started
+     * another one. That accumulation is invisible from the desk, which is being
+     * served last-good from the cache the whole time.
+     *
+     * 10s, and the number is chosen against the SHELL's budget rather than in
+     * isolation: `LIST_TIMEOUT_MS` (15s, shell/src/lib/tracker.ts) must be the
+     * outer one, or the browser gives up first and renders "signal timed out"
+     * where the daemon was about to name the tracker and the deadline it blew.
+     * Ordering to preserve, all three ways:
+     *
+     *     listTimeoutMs (10s) < LIST_TIMEOUT_MS (15s) < TICKET_POLL_MS (20s)
+     *
+     * Comfortably above an honest pull, which measured 5.7-6s against a
+     * corporate Jira (DRY-72), and blowing it costs a background refresh rather
+     * than a sidebar — the cache keeps last-good and marks it stale.
+     *
+     * `msOrOff` for the usual reason (DRY-60's trap 9): 0 means "no operation
+     * deadline", the pre-DRY-61 behaviour, and through `num()` a deliberate 0
+     * would silently restore the default and the off switch would do nothing.
+     */
+    listTimeoutMs: msOrOff(process.env.DRYDOCK_TRACKER_LIST_TIMEOUT_MS, 10_000),
     switchyard: {
       url: process.env.DRYDOCK_SWITCHYARD_URL,
       token: process.env.DRYDOCK_SWITCHYARD_TOKEN,

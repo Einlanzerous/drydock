@@ -25,6 +25,10 @@ export function createTracker(): TrackerProvider {
   const childStats = new ChildStatsCache(CONFIG.tracker.cache.childStatsMs);
   // 0 means "no deadline" (see config.ts); the providers read absent that way.
   const requestTimeoutMs = CONFIG.tracker.requestTimeoutMs || undefined;
+  // The bound on a whole pull rather than on one request (DRY-61). Same 0-means-
+  // off reading, and passed to both providers so neither can drift into being
+  // the one a partitioned tracker hangs.
+  const listTimeoutMs = CONFIG.tracker.listTimeoutMs || undefined;
 
   if (kind === "switchyard") {
     const { url, token } = CONFIG.tracker.switchyard;
@@ -34,7 +38,13 @@ export function createTracker(): TrackerProvider {
       );
       return new FixtureProvider();
     }
-    return new SwitchyardProvider({ baseUrl: url, token, requestTimeoutMs, childStats });
+    return new SwitchyardProvider({
+      baseUrl: url,
+      token,
+      requestTimeoutMs,
+      listTimeoutMs,
+      childStats,
+    });
   }
 
   if (kind === "jira") {
@@ -53,6 +63,7 @@ export function createTracker(): TrackerProvider {
       // explicit repo path for (DRY-31).
       repoOverrides: Object.keys(CONFIG.repos.overrides),
       requestTimeoutMs,
+      listTimeoutMs,
       childStats,
     });
   }

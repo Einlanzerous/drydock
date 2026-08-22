@@ -18,7 +18,13 @@ healthy tracker with nothing in scope says. Harness:
    collapsed, so a full sidebar and an empty one both report zero rows — a
    check built on it passes against the bug. Assert on `.grp` or the header
    count.
-3. The line above the desk is DRY-58's notice, so its rules hold: raised once
+3. **`LIST_TIMEOUT_MS` has a floor as well as a ceiling since DRY-61.** It was
+   12s here because it only had to clear the 20s poll interval; the daemon now
+   bounds its own pull at 10s, so this must sit ABOVE that (it's 15s) or the
+   browser gives up first and the sidebar renders "signal timed out" instead of
+   the daemon's 502 naming the tracker. Moving either number without the other
+   silently picks which of the two errors a user reads.
+4. The line above the desk is DRY-58's notice, so its rules hold: raised once
    however many polls fail, cleared by whoever raised it, never dismissible.
    A tracker outage must NOT reach the red banner — that one belongs to the
    session poll, and the daemon is fine.

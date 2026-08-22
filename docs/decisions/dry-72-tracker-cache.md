@@ -45,7 +45,11 @@ outage. The traps:
    to trip the browser's 12s budget and report. Now the browser is answered
    instantly and nothing fails, so without an age test the sidebar presents an
    arbitrarily old list as live. The per-request deadline does not help: it
-   bounds one request, so N pages cost N × it.
+   bounds one request, so N pages cost N × it. (DRY-61 later bounded the whole
+   pull as well, which puts a ceiling on that N × it — but the age test is still
+   what reports a tracker that is slow rather than broken, since a pull ending
+   at its deadline leaves the last-good list in place and says only that a
+   refresh failed.)
 3b. **Overlapping pulls in the SHELL are how the epoch guard becomes a silence.**
    A poll, a visibility wake and Refresh can all want one; two in flight means
    the older one's outcome is discarded on arrival, so if it was the one that
@@ -76,7 +80,11 @@ outage. The traps:
    "no cache" for reproducing a tracker bug the cache would mask, and through
    `num()` a deliberate 0 silently restores the default.
 7. **A caller's own deadline wins.** The brief's `extrasDeadline` is 6s and
-   tighter for a reason; the new one is a backstop, not an override.
+   tighter for a reason; the new one is a backstop, not an override. (DRY-61's
+   operation deadline is the one exception, and only in the tightening
+   direction: it composes on top of whichever of the two applies, because a
+   decoration that outlived the operation it decorates is the accumulation that
+   ticket exists to stop.)
 8. **Backoff may only ever LENGTHEN the poll interval**, or it breaks the
    `LIST_TIMEOUT_MS < TICKET_POLL_MS` pairing — which is load-bearing and fails
    invisibly (see the comment on the budget).

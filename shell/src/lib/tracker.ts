@@ -141,9 +141,8 @@ export const TICKET_POLL_MAX_MS = 120_000;
  * the daemon 502s; a tracker that accepts and then goes silent — the partition
  * shape CLAUDE.md insists is the realistic one — hangs, and when this was
  * written neither provider's `req()` carried a deadline, so the daemon's route
- * never answered. Without a ceiling here that becomes the shell's deadline
- * too: the pull never settles,
- * so it neither resolves nor throws, `loadTickets`'s catch never runs, and the
+ * never answered. Without a ceiling here that becomes the shell's deadline too:
+ * the pull never settles, so it neither resolves nor throws, `loadTickets`'s catch never runs, and the
  * sidebar sits on the "No tickets match." this whole feature exists to remove —
  * with its spinner latched, because `finally` never runs either.
  *
@@ -156,20 +155,38 @@ export const TICKET_POLL_MAX_MS = 120_000;
  * from the bug this constant exists to fix. Measured, not reasoned about: at
  * 20s/20s the harness's hang case failed exactly this way.
  *
- * 12s leaves ~8s for a failure to land and render before the next tick. Still
- * far above any honest pull (a corporate Jira sidebar query with pagination and
- * child stats runs 1–3s), and a pull that legitimately takes longer degrades
- * softly — the last-good list stays, wearing the stale marker.
+ * **And meaningfully LONGER than the daemon's own pull deadline** (DRY-61),
+ * which is the other half of the same pairing and was missing until then. Three
+ * clocks, and the order between them decides which message a user reads:
+ *
+ *     DRYDOCK_TRACKER_LIST_TIMEOUT_MS (10s) < this (15s) < TICKET_POLL_MS (20s)
+ *
+ * Inverted — the browser giving up first — the daemon's deadline is never
+ * observed by anyone and the sidebar renders "signal timed out", which names
+ * neither the tracker nor anything actionable. This way round the daemon 502s
+ * first with a sentence saying which tracker stopped answering and after how
+ * long, and this budget goes back to being what it should always have been: the
+ * guard for a DAEMON that isn't answering, not a tracker.
+ *
+ * 15s is that ordering with real margin on both sides — 5s for the daemon's 502
+ * to be produced and rendered, 5s more before the next tick supersedes it —
+ * rather than the tightest number that satisfies it. It was 12s when this
+ * constant only had the poll interval to clear; DRY-61 gave it a floor as well
+ * as a ceiling, and squeezing the daemon's deadline down to fit 12s instead
+ * would cut honest pulls (a corporate Jira sidebar query with pagination and
+ * child stats measured 5.7-6s in DRY-72).
+ *
+ * A pull that legitimately takes longer than any of this still degrades softly:
+ * the last-good list stays, wearing the stale marker.
  *
  * The asymmetry with the daemon USED to be the sharp edge here: it had no
  * deadline of its own, so this aborted a request it went on serving, and the
- * next tick's fan-out piled on top. DRY-72 fixed both ends — the daemon now
- * caps every tracker request and answers this route from cache — so an ordinary
- * poll no longer waits on a tracker at all. This still guards the three paths
- * that do: a cold daemon cache, a forced refresh, and a daemon that isn't
- * answering.
+ * next tick's fan-out piled on top. DRY-72 capped every tracker REQUEST and
+ * DRY-61 capped the whole pull, so an ordinary poll no longer waits on a
+ * tracker at all. This still guards the three paths that do: a cold daemon
+ * cache, a forced refresh, and a daemon that isn't answering.
  */
-const LIST_TIMEOUT_MS = 12_000;
+const LIST_TIMEOUT_MS = 15_000;
 
 /**
  * What a pull came back with (DRY-72).
