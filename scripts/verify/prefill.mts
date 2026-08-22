@@ -93,9 +93,18 @@ const PROMPT = `Workticket${TICKET}.`; // the head of the prompt template, despa
  *     can be configured at all: `env.ts` reads a `.env` line by line, so a
  *     value written across two lines arrives as its first line alone.
  */
-const CONFIGURED_RAW = String.raw`Work ticket {key}. See {repo} through.\nLeave {{esc}} alone.`;
-/** …and what the daemon must therefore SERVE: that escape decoded. */
-const CONFIGURED = CONFIGURED_RAW.replace(String.raw`\n`, "\n");
+const CONFIGURED_RAW = String.raw`Work ticket {key}. See {repo} through.\nLeave {{esc}} alone.\nAnd this line too.`;
+/**
+ * …and what the daemon must therefore SERVE: every escape decoded.
+ *
+ * `replaceAll`, mirroring `normalizeAgentPrompt`'s `/g`. With `replace` and a
+ * string pattern only the FIRST is decoded, so a template with two of them
+ * leaves `CONFIGURED` holding a literal `\n` the daemon expanded — matching
+ * neither form, which makes the rig check refuse and send whoever ran it to fix
+ * a rig that was already right. (Two of them here for that reason: one is a
+ * template where the difference cannot show.)
+ */
+const CONFIGURED = CONFIGURED_RAW.replaceAll(String.raw`\n`, "\n");
 /**
  * The above as the pane renders it — despaced, so the newline is invisible here
  * and what is asserted is that the text either side of it arrived as ONE block.
@@ -103,7 +112,7 @@ const CONFIGURED = CONFIGURED_RAW.replace(String.raw`\n`, "\n");
  * newline in it as a bracketed paste, and one that submitted a fragment per
  * line instead would leave the second half missing.
  */
-const CONFIGURED_SEEN = `Workticket${TICKET}.See${REPO}through.Leave{esc}alone.`;
+const CONFIGURED_SEEN = `Workticket${TICKET}.See${REPO}through.Leave{esc}alone.Andthislinetoo.`;
 
 /** `desk` as of DRY-94. `agentPrompt` is absent on an older daemon. */
 type ConfigBody = {
@@ -126,9 +135,14 @@ const SERVED = hostConfig.desk?.agentPrompt;
 // built-in default there would be a pass bought by not testing.
 if (SERVED !== CONFIGURED && SERVED !== CONFIGURED_RAW) {
   console.log(
-    `this daemon serves desk.agentPrompt = ${JSON.stringify(SERVED)}.\n` +
-      `Start it with DRYDOCK_AGENT_PROMPT set to exactly:\n  ${CONFIGURED_RAW}\n` +
-      `(see the README rig) — rounds 5 and 6 measure nothing without it.`,
+    `this daemon serves desk.agentPrompt = ${JSON.stringify(SERVED)}\n` +
+      `                          it needs = ${JSON.stringify(CONFIGURED)}\n` +
+      // Both escaped above so a difference is VISIBLE — an undecoded `\n` and a
+      // real one print identically otherwise, which reads as "set it to the
+      // thing it already is". Then the raw form, unescaped, to paste into the rig.
+      `\nStart it with DRYDOCK_AGENT_PROMPT set to exactly (see the README rig):\n` +
+      `  ${CONFIGURED_RAW}\n\n` +
+      `Rounds 5 and 6 measure nothing without it.`,
   );
   process.exit(2);
 }

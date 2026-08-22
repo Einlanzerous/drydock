@@ -49,7 +49,9 @@ export type AgentPromptKey = (typeof AGENT_PROMPT_KEYS)[number];
  *
  * This is typed into a supervised composer too, where a human reads it before
  * pressing return (DRY-88 trap 3: the paths differ by the RETURN, not by the
- * text), so it stays two sentences a person can scan rather than a wall.
+ * text), so it stays four sentences and ~485 characters — something a person
+ * can scan before sending rather than a wall. If you reword it, keep it that
+ * order of size; a prompt nobody reads is one nobody edits before launching.
  *
  * **One line, deliberately.** A `.env` is parsed line by line (`env.ts` skips
  * any line without an `=`), so a two-line default is one an operator copies in

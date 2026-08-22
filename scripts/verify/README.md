@@ -1465,7 +1465,7 @@ mkdir -p /tmp/dry88-repos/switchyard        # a NON-git dir, so the panel offers
    DRYDOCK_STATE_FILE=/tmp/dry88-state.json DRYDOCK_TRACKER=fixture \
    DRYDOCK_REPO_PATHS=switchyard=/tmp/dry88-repos/switchyard \
    DRYDOCK_WORKTREE_REAP_MS=0 \
-   DRYDOCK_AGENT_PROMPT='Work ticket {key}. See {repo} through.\nLeave {{esc}} alone.' \
+   DRYDOCK_AGENT_PROMPT='Work ticket {key}. See {repo} through.\nLeave {{esc}} alone.\nAnd this line too.' \
    node --import tsx src/index.ts &)
 (cd shell && VITE_DAEMON_URL=http://127.0.0.1:4388 bunx vite --port 5388 --strictPort &)
 
@@ -1488,8 +1488,10 @@ Two of those lines arrived with DRY-94 and are not optional either:
   built-in default against a rig that never set the variable would be a pass
   bought by not testing. Every piece of the template carries a check: both
   placeholders expanding, the doubled-brace escape coming out as a literal
-  `{esc}`, and the `\n` arriving as a real newline whose two halves reach the
-  CLI as one block (which is the bracketed-paste path).
+  `{esc}`, and BOTH `\n`s arriving as real newlines whose three lines reach the
+  CLI as one block (which is the bracketed-paste path). Two rather than one
+  because a single escape is a template where `replace` and `replaceAll` cannot
+  be told apart, and the harness has to decode the way the daemon does.
 - `DRYDOCK_WORKTREE_REAP_MS=0` because a throwaway daemon otherwise runs DRY-90's
   boot sweep over the worktrees of whoever is running the harness. It only ever
   removes work that is clean and merged, so nothing is lost — but a test daemon

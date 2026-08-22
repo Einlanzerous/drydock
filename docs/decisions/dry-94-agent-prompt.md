@@ -196,7 +196,7 @@ carrying the `\n` escape so what arrives has a real newline in it. Round 6 start
 and relays its real config body into the page, because a desk's daemon URL is
 baked in by Vite and cannot be re-pointed from inside a running browser.
 
-Five things that cost time, all of them in the harness rather than the feature:
+Six things that cost time, all of them in the harness rather than the feature:
 
 1. **A round that doesn't `reset()` reads the PREVIOUS round's session.** The
    desk restores its saved arrangement, so round 6 opened onto round 5's
@@ -222,8 +222,27 @@ Five things that cost time, all of them in the harness rather than the feature:
    call it the built-in default. Every other `DRYDOCK_*` is stripped for the
    reason CLAUDE.md gives at length.
 
+6. **The harness must decode the way the daemon does.** `CONFIGURED` was built
+   with `String.prototype.replace` and a string pattern, which replaces the
+   FIRST occurrence, against a `normalizeAgentPrompt` that uses `/g`. One `\n`
+   in the rig template is a template where those cannot be told apart; a second
+   makes the harness refuse (exit 2) and send whoever ran it to fix a rig that
+   was already right. `replaceAll`, and the template carries two escapes now so
+   the difference is testable. (Found in review, and confirmed by putting
+   `replace` back.) Its refusal message prints both strings JSON-escaped for the
+   same reason: an undecoded `\n` and a real one print identically otherwise,
+   which reads as "set it to the thing it already is".
+
 Discrimination: `perl -0pi -e 's/props\.agentPrompt \|\| LEGACY_AGENT_PROMPT/LEGACY_AGENT_PROMPT/'`
 on `TicketDetail.vue` — the pre-DRY-94 behaviour exactly — fails **3 of 33**.
 Dropping `agentPrompt` from `/api/config` makes the harness REFUSE (exit 2)
 rather than fall back to asserting the default, which is the one thing rounds 5
 and 6 exist to find out.
+
+One thing this ticket measured about the OLD half, since a doc that states a
+count is a doc somebody runs: DRY-88's recipe (revert `App.vue` to before it,
+expect 8 of 17) can no longer reach that number — round 3 clicks the DRY-82
+palette that checkout never had, so the run aborts there having failed 4 of the
+10 checks it gets to. Said in `dry-88-initial-prompt.md` and in the README's
+discrimination section rather than left for the next person to rediscover as a
+mystery abort.
