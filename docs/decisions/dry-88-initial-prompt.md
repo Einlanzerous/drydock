@@ -73,7 +73,12 @@ essentially t=0 of the process.
 
 Harness: `scripts/verify/prefill.mts` + `stub-cli.mts`, rig in its README — a
 browser, about a minute. Confirm it discriminates: against the unpatched tree it
-fails 8 of 17. The stub is a MODEL of a measured CLI, so when Claude Code is
+fails 8 of 17 — **which that recipe can no longer reach**: it reverts `App.vue`
+to before DRY-88, and round 3 now clicks the DRY-82 palette that checkout has
+never had, so the run aborts there having failed 4 of the 10 checks it gets to
+(measured under DRY-94, which added rounds 5-6). The README's discrimination
+section carries the current numbers and a mutation-based recipe that does still
+run. The stub is a MODEL of a measured CLI, so when Claude Code is
 upgraded, re-measure rather than trusting it — spawn a real one through
 `POST /api/sessions` with `input`, and read `typing initial prompt`'s
 `paintedAfterMs` and `waitedMs` against the table above.
