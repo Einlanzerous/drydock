@@ -107,11 +107,28 @@ manager.useHistory(history);
 /**
  * The conditional arm of DRYDOCK_EXIT_ON_UNCAUGHT (DRY-48).
  *
- * Armed by the uncaught-exception handler under `when-idle`, and it exits as
- * soon as no session is still running. `running`, not "attached": an autonomous
- * run with nobody watching is the thing this policy exists to protect, and it
- * has no client at all. An exited session left on the desk is a card, and a
- * fresh daemon rebuilds those (see `adoptExited`).
+ * Armed by the uncaught-exception handler under `when-idle`, and it exits once
+ * the registry is EMPTY — not once nothing is running. The first cut said
+ * `!some(running)` under a comment claiming a fresh daemon would rebuild the
+ * finished cards from `adoptExited`, and review caught that being false twice
+ * over: a session that ends while this daemon is up has its index files
+ * `forget`ten on the spot (session.ts), and on the path where `adoptExited` IS
+ * reached it deliberately does not put the session back in the registry. So an
+ * exited session is not recoverable by restarting — it is a card on somebody's
+ * desk with readable scrollback, and DRY-60 spent a whole ticket making sure a
+ * finished run survives until somebody has actually SEEN it (five minutes of
+ * VISIBLE time, by default). Exiting the moment the last PTY stops would
+ * discard exactly that, on the host most likely to choose this posture, and
+ * would do it after deliberately waiting for the moment those cards were the
+ * only thing left.
+ *
+ * The daemon cannot tell a read card from an unread one — that clock is the
+ * shell's, because only the browser knows what is on screen — so "nothing left
+ * to lose" is the honest reading: no sessions at all. A ✕, DRY-60's sweep and
+ * `Clear finished` all kill, and a kill leaves the registry synchronously, so a
+ * desk somebody is watching empties on its own. A desk nobody is watching does
+ * not, and this stays up: that is the conservative direction, and never worse
+ * than the `0` posture such a host would otherwise be running.
  *
  * The exit is deliberately bare — no `detachAll()`, unlike the signal handlers.
  * That call exists to say "let go without signalling", and letting the process
@@ -120,7 +137,7 @@ manager.useHistory(history);
  * decided is suspect is the wrong direction.
  */
 const idleExit = new IdleExit({
-  idle: () => !manager.list().some((session) => session.running),
+  idle: () => manager.list().length === 0,
   exit: () => {
     log.error("suspect and idle — exiting so a fresh daemon takes over", {
       ...inventory(),
@@ -401,7 +418,21 @@ const server = http.createServer(async (req, res) => {
     // --- Liveness (DRY-48) ---------------------------------------------------
     // Both unauthenticated, like the /healthz this replaces: whatever is asking
     // whether the daemon is alive is the thing least able to hold a credential,
-    // and neither says anything a caller couldn't learn by watching the port.
+    // and a liveness probe that needs a login is a probe nobody can point at a
+    // daemon that has stopped answering.
+    //
+    // What that costs is a deliberate decision rather than an inherited one
+    // (review). On a daemon with auth ON this is the only route besides
+    // /api/auth/{info,login} that answers a stranger, and it now serves more
+    // than `ok` and the store: two host paths (the sessions dir and the log
+    // file), live/exited session counts, and `faults.last` — the message of an
+    // exception this daemon took. Those are kept, because they are the answer to
+    // "what is this daemon and what happened to it", which is the whole ticket,
+    // and because the store's error has carried a path here since DRY-28. What
+    // is NOT kept is somebody ELSE's text: `TrackerWatch` reports "the tracker
+    // answered 500" rather than the 500's body, which on a tracker behind a
+    // proxy is that proxy's error page. The body still goes to the sidebar and
+    // the 502, both behind the gate.
     //
     // Two endpoints because they answer to two audiences. /healthz is the
     // report — everything probed, including the store, whose probe is allowed

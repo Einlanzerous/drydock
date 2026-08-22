@@ -32,27 +32,36 @@
 //
 //   (cd daemon && node --import tsx ../scripts/verify/health.mts)
 //
-// No browser, no database, no systemd. About ninety seconds — most of it spent
-// starting six throwaway daemons and waiting out one idle-exit poll.
+// No browser, no database, no systemd. About two minutes — most of it spent
+// starting eight throwaway daemons (a ninth is expected to refuse) and waiting
+// out the idle-exit polls.
 //
-// CONFIRM IT DISCRIMINATES. Against `main` it fails 45 of 57; of the twelve
-// survivors, four are the legacy-compatibility checks (which are meant to pass),
-// four are premises this ticket didn't change, one is rig setup, and three pass
-// vacuously — see this file's section in scripts/verify/README.md, which names
-// them. Per mutation, against the finished tree, all measured:
+// CONFIRM IT DISCRIMINATES. Against `main` it fails 48 of 62; the
+// survivors are named one by one in this file's section in
+// scripts/verify/README.md — four are the legacy-compatibility checks (which are
+// meant to pass), the rest are premises this ticket didn't change, rig setup, or
+// checks that pass vacuously against a daemon with no health payload. Per
+// mutation, against the finished tree, all measured:
 //
-//   `ok: status !== "down"` → `ok: status === "ok"`      3 of 57, the degraded
+//   `ok: status !== "down"` → `ok: status === "ok"`      3 of 62, the degraded
 //     checks — i.e. the ticket's own "not to be restarted for being suspect"
-//   `readiness()` refusing a degraded tracker            1 of 57
-//   the uncaught handler not calling `faults.record`     7 of 57
-//   `when-idle` ignoring whether anything is running     4 of 57 ┐ the pair, and
-//   `when-idle` never arming at all                      3 of 57 ┘ why it is one
-//   `TrackerWatch.failed` without its CALLER_FAULT arm   1 of 57, the 404
-//   `indexHealth` calling `sessionsDir()`                0 of 57 — vacuous, and
+//   `readiness()` refusing a degraded tracker            1 of 62
+//   the uncaught handler not calling `faults.record`     7 of 62
+//   `idle` counting only RUNNING sessions                1 of 62 ┐ one property,
+//   `idle` ignoring whether anything is running          6 of 62 │ three sides;
+//   `idle` never arming at all                           3 of 62 ┘ see below
+//   `TrackerWatch.failed` without its CALLER_FAULT arm   1 of 62, the 404 in (b)
+//   `TrackerWatch.failed` quoting the tracker's body     2 of 62, the pair in (f2)
+//   `indexHealth` calling `sessionsDir()`                0 of 62 — vacuous, and
 //     recorded as such rather than dropped: `ensured` makes the two spellings
 //     agree in a running daemon, so that check is a latch, not a discriminator.
+//
+// The first `idle` row is review's finding and can only ever fail ONE check:
+// once the daemon has exited early, every check after it in the section passes.
+// That is why the check catching it sits where the finished card still exists.
 import { spawn, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
+import * as http from "node:http";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Detail, HealthResponse, ReadyResponse, SpawnResponse } from "./api.mjs";
@@ -65,6 +74,8 @@ const SESSIONS_DIR = path.join(SCRATCH, "sessions");
 const STATE_FILE = path.join(SCRATCH, "state.json");
 const LOG_FILE = path.join(SCRATCH, "daemon.log");
 const FAULT_FILE = path.join(SCRATCH, "fault");
+/** Where section (f2)'s stub tracker listens. */
+const STUB_PORT = PORT + 2;
 /** The daemon re-asks "is anything running?" every 5s under `when-idle`. */
 const IDLE_POLL_MS = 5_000;
 
@@ -222,8 +233,8 @@ async function hz(): Promise<HealthResponse | null> {
  * Never null, and every field below is read through `?.`, because a harness has
  * to FAIL against the tree it is discriminating from rather than crash on it:
  * pre-DRY-48 there is no such route and no such field, and the first cut of this
- * file died on `h.faults.total` at check 6 of 57, reporting nothing about the
- * other fifty-one.
+ * file died on `h.faults.total` at check 6 of 62, reporting nothing about the
+ * other fifty-six.
  */
 async function readyz(): Promise<{ code: number; body: Partial<ReadyResponse> }> {
   try {
@@ -509,7 +520,7 @@ if (!(await startDaemon({ onUncaught: "0", faults: true }))) {
   // on `ensured`, which reconcile sets before the port binds, so today it would
   // not recreate the directory either and the mutation fails nothing. Kept
   // because the property is worth holding down if that latch ever moves, and
-  // recorded as 0 of 57 in the table above rather than quietly counted as cover.
+  // recorded as 0 of 62 in the table above rather than quietly counted as cover.
   check(
     "and the probe did not quietly recreate it",
     !fs.existsSync(SESSIONS_DIR),
@@ -550,6 +561,67 @@ if (
   check("/readyz is blind to the tracker too", r.code === 200 && r.body?.suspect === false, String(r.code));
   await stopDaemon();
 }
+
+// --- (f2) a tracker that answers, badly -------------------------------------
+//
+// The other shape of a tracker failure, and the one that carries somebody
+// else's text: both providers build their message as `${status} ${res.text()}`,
+// so a tracker behind a proxy puts that proxy's error page in it. /healthz is
+// the one route that answers an anonymous caller on a daemon with auth ON, so it
+// reports the STATUS and not the body — a claim worth asserting rather than
+// commenting, since the endpoint is where it would leak (review).
+//
+// Asserted as a PAIR: the body must still reach the route's 502, or this would
+// pass equally well against a daemon that had simply stopped recording why.
+
+console.log("\n(f2) a tracker that answers badly");
+const MARKER = "dry48-upstream-body-marker";
+const stub = http.createServer((_req, res) => {
+  res.writeHead(500, { "Content-Type": "text/html" });
+  res.end(`<html><body>${MARKER}</body></html>`);
+});
+await new Promise<void>((r) => stub.listen(STUB_PORT, "127.0.0.1", () => r()));
+if (
+  !(await startDaemon({
+    tracker: {
+      DRYDOCK_TRACKER: "switchyard",
+      DRYDOCK_SWITCHYARD_URL: `http://127.0.0.1:${STUB_PORT}`,
+      DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS: "2000",
+    },
+  }))
+) {
+  check("daemon starts (500-ing tracker)", false, daemonLog.join("").slice(-400));
+} else {
+  let body = "";
+  let status = 0;
+  try {
+    const res = await fetch(`${DAEMON}/api/tracker/tickets?open=true`, {
+      signal: AbortSignal.timeout(8_000),
+    });
+    status = res.status;
+    body = await res.text();
+  } catch {
+    /* reported by the checks below */
+  }
+  check(
+    "the route's 502 still carries the tracker's own words",
+    status === 502 && body.includes(MARKER),
+    `${status} ${body.slice(0, 120)}`,
+  );
+  const h = await hzSafe();
+  check(
+    "but /healthz reports the status, not the body",
+    h?.tracker?.error === "the tracker answered 500",
+    JSON.stringify(h?.tracker),
+  );
+  check(
+    "and the body appears nowhere in the payload",
+    !JSON.stringify(h).includes(MARKER),
+    "the upstream response body reached an unauthenticated endpoint",
+  );
+  await stopDaemon();
+}
+stub.close();
 
 // --- (g) fixture data served under a live provider's name -------------------
 //
@@ -599,17 +671,22 @@ if (!(await startDaemon({ faults: true }))) {
 
 // --- (i) when-idle: the posture the boolean could not express ---------------
 //
-// The pair matters. A policy that exited immediately would pass the second half
-// on its own, and one that never exited would pass the first.
+// Three states, not two, and the middle one is review's. A policy that exited
+// immediately would pass the last check on its own; one that never exited would
+// pass the first; and one that asked `!some(running)` — which is what the first
+// cut of this feature asked — would pass BOTH while discarding a finished run's
+// card at the moment it was the only thing left on the desk. So the session
+// here is left to end ON ITS OWN rather than killed: a kill leaves the registry
+// synchronously (DRY-60 trap 8), which is exactly the state that hides the bug.
 
 console.log("\n(i) when-idle");
 if (!(await startDaemon({ onUncaught: "idle", faults: true }))) {
   check("daemon starts (idle posture)", false, daemonLog.join("").slice(-400));
 } else {
-  const id = await spawnSession();
+  const id = await spawnSession(8);
   await injectFault("exception");
-  const armed = await hz();
-  check("it stayed up while a session is running", armed !== null);
+  const armed = await hzSafe();
+  check("it stayed up while a session is running", !state.daemonExited && armed?.status !== undefined);
   check(
     "and says it is only staying for now",
     armed?.faults?.exitWhenIdle === true && armed?.faults?.onUncaught === "when-idle",
@@ -618,14 +695,42 @@ if (!(await startDaemon({ onUncaught: "idle", faults: true }))) {
   check("degraded, with the session still listed", armed?.status === "degraded" && armed?.registry?.live === 1);
   // Past the poll interval, so "still here" means the policy is holding rather
   // than that the timer hasn't fired yet.
-  await sleep(IDLE_POLL_MS * 1.5);
+  await sleep(IDLE_POLL_MS * 1.2);
   check("still up a poll interval later", (await hz()) !== null && !state.daemonExited);
 
+  // Let it FINISH. `sleep 8` ends by itself, so the session stays in the
+  // registry as a card — which is what a restart cannot bring back: the index
+  // files are forgotten as it exits, and the boot path that reads them
+  // deliberately doesn't re-register a dead session either.
+  const ended = Date.now() + 20_000;
+  let finished = await hzSafe();
+  while (!state.daemonExited && finished?.registry?.live !== 0 && Date.now() < ended) {
+    await sleep(500);
+    finished = await hzSafe();
+  }
+  check(
+    "the session ended on its own and stayed on the desk",
+    finished?.registry?.sessions === 1 && finished?.registry?.live === 0,
+    JSON.stringify(finished?.registry),
+  );
+  // The finding this check exists for. DRY-60 spent a ticket keeping a finished
+  // run visible until somebody has SEEN it; a policy that exits the moment the
+  // last PTY stops throws that away, having first waited for the moment it was
+  // all that was left.
+  await sleep(IDLE_POLL_MS * 1.5);
+  check(
+    "a finished card is still something to lose",
+    !state.daemonExited && (await hz()) !== null,
+    "exited while an undismissed finished session was on the desk",
+  );
+
+  // Dismissing it is what empties the registry — the ✕, DRY-60's sweep and
+  // `Clear finished` all go through /kill, which drops it synchronously.
   await call(`/api/sessions/${id}/kill`, { method: "POST" });
   const deadline = Date.now() + IDLE_POLL_MS * 3;
   while (!state.daemonExited && Date.now() < deadline) await sleep(250);
   check(
-    "and exits once nothing is running",
+    "and exits once the desk is empty",
     state.daemonExited === true,
     state.daemonExited ? "" : "still up after 3 poll intervals",
   );

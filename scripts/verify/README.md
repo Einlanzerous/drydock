@@ -1530,8 +1530,9 @@ tracker and the store; `/readyz` sits beside it as the thin signal.
 (cd daemon && node --import tsx ../scripts/verify/health.mts)
 ```
 
-No browser, no database, no second terminal: this file starts the six daemons it
-needs, one posture at a time. It takes `:4348` (`PORT=` to move it, and it
+No browser, no database, no second terminal: this file starts the eight daemons
+it needs, one posture at a time — plus a ninth in the last section, which is
+there to refuse to start — and a stub tracker of its own for the 500 case. It takes `:4348` (`PORT=` to move it, and it
 refuses `:4317`/`:4318` outright) and `/tmp/dry48`. About ninety seconds.
 
 **The fault it injects is a real one.** `fault-inject.mts` is preloaded into the
@@ -1562,33 +1563,63 @@ What it holds down:
 - **The three postures of `DRYDOCK_EXIT_ON_UNCAUGHT`.** The default exits, and
   the section proves that costs a reattach and nothing else: a fresh daemon comes
   up and adopts the session the crash didn't kill (DRY-57). `0` stays up. `idle`
-  is a PAIR — it must still be there a poll interval after the fault while a
-  session runs, and gone within three once that session is killed. Either half
-  alone passes against a policy that is simply wrong in one direction.
+  is a TRIPLE — still there a poll interval after the fault while a session runs;
+  still there once that session has FINISHED and its card is undismissed; gone
+  within three polls once the card is dismissed. The middle one is review's, and
+  it is why the session is left to end on its own rather than killed: `/kill`
+  leaves the registry synchronously (DRY-60 trap 8), so a check built on it never
+  produces the exited-but-listed state and passes against a daemon that discards
+  finished runs.
+- **The tracker's own words stay off the anonymous endpoint.** A stub answering
+  500 with a marker in its body: the marker must appear in the route's 502 and
+  must appear nowhere in `/healthz`, which says `the tracker answered 500`
+  instead. A pair, because "it isn't in the payload" passes just as well against
+  a daemon that stopped recording why.
 - **A probe must not repair.** The index check reads the configured path rather
   than calling `sessionsDir()`, which creates the directory. See the mutation
   table: that one is a latch, not a discriminator.
 
 ### Making sure this one still discriminates
 
-Against `main` it fails **45 of 57**, and the twelve survivors are worth reading
-rather than glossing. Four are the legacy-compatibility checks, which are
-supposed to pass. Four are premises this ticket didn't change: `=0` stays up, the
-default exits, and a store with no read permission already reported `ok:false`
-(DRY-28). One is rig setup. The last three pass **vacuously** — including "and
-exits once nothing is running", which `main` satisfies by having exited a minute
-earlier, under a posture it read as `exit`. That one is exactly why `when-idle`
-is checked as a pair.
+Against `main` it fails **48 of 62**, and the fourteen survivors are worth
+reading rather than glossing:
+
+- **four are the legacy-compatibility checks** — `ok`, `sessions`, `store` and
+  DRY-56's capabilities. They are supposed to pass; that is the point of them.
+- **five are premises this ticket didn't change**: `=0` stays up, the default
+  exits and nothing answers afterwards, a store with no read permission already
+  reported `ok:false` (DRY-28), and the route's 502 already carried the
+  tracker's own words (DRY-72).
+- **one is rig setup** (a desk was saved, so there is a store file to break).
+- **four pass vacuously**, and they are the interesting ones. `main`'s `ok` is
+  always true, so "stays TRUE while degraded" cannot fail. `main` has no index
+  probe, so "did not quietly recreate it" holds for want of a probe. `main` has
+  no `tracker` field, so "the body appears nowhere in the payload" is true of a
+  payload with nothing in it. And "exits once the desk is empty" is satisfied by
+  a daemon that exited a minute earlier under a posture it read as `exit` —
+  which is precisely why `idle` is checked from three sides rather than one.
 
 | mutation | fails |
 |---|---|
-| `ok: status !== "down"` → `status === "ok"` | **3 of 57**, the degraded checks |
-| `readiness()` refusing a degraded tracker | **1 of 57** |
-| the uncaught handler not calling `faults.record` | **7 of 57** |
-| `when-idle` ignoring whether anything is running | **4 of 57**, the first half of the pair |
-| `when-idle` never arming | **3 of 57**, the second half |
-| `TrackerWatch.failed` without its caller-fault arm | **1 of 57**, the 404 |
-| `indexHealth` calling `sessionsDir()` | **0 of 57** — vacuous, and why is in [dry-48-health](../../docs/decisions/dry-48-health.md) |
+| `ok: status !== "down"` → `status === "ok"` | **3 of 62**, the degraded checks |
+| `readiness()` refusing a degraded tracker | **1 of 62** |
+| the uncaught handler not calling `faults.record` | **7 of 62** |
+| `idle` counting only RUNNING sessions (review's bug) | **1 of 62**, and it can only be 1 |
+| `idle` ignoring whether anything is running | **6 of 62** |
+| `idle` never arming | **3 of 62** |
+| `TrackerWatch.failed` without its caller-fault arm | **1 of 62**, the 404 |
+| `TrackerWatch.failed` quoting the tracker's body | **2 of 62**, the (f2) pair |
+| `indexHealth` calling `sessionsDir()` | **0 of 62** — vacuous, and why is in [dry-48-health](../../docs/decisions/dry-48-health.md) |
+
+Three notes on that table. The three `idle` rows are one property seen from
+three sides, and the middle one — review's — **can only ever fail one check**:
+once the daemon has exited early, everything after it in the section passes,
+which is exactly why the check that catches it is placed where the finished card
+still exists. The two `TrackerWatch` rows are disjoint (one is the 404 in section
+(b), the other the 500 body in (f2)), so naming the wrong one sends the next
+person looking for a bug that isn't there. And the zero is recorded rather than
+dropped: a harness's own vacuous check is worth naming, because the reader who
+finds it needs to know it was measured.
 
 **The rig's own trap, worth knowing before you edit this file.** Six postures
 share one port, so a daemon that outlives its section answers for the next one —

@@ -137,6 +137,15 @@ export interface Readiness {
 /** Cap on anything derived from an error message put on the wire. */
 const ERROR_MAX = 300;
 
+/** An error's class, for a message that must not quote anything upstream. */
+function errorName(err: unknown): string {
+  try {
+    return err instanceof Error ? err.name || "Error" : typeof err;
+  } catch {
+    return "unknown";
+  }
+}
+
 /** Squash to one capped line, and never throw doing it. */
 function oneLine(err: unknown): string {
   let text: string;
@@ -250,7 +259,25 @@ export class TrackerWatch {
       return;
     }
     this.failures += 1;
-    this.lastError = oneLine(err);
+    // OUR description of the failure, never the tracker's own words. Both
+    // providers build their message as `${status} ${await res.text()}`, so a
+    // tracker behind a proxy puts that proxy's HTML in it — and this endpoint is
+    // the one route that answers an anonymous caller on a daemon with auth ON
+    // (review). The full text still reaches the two places it is useful and
+    // already gated: the route's 502, and `stale.error` on every sidebar poll
+    // (DRY-72).
+    this.lastError =
+      err instanceof TrackerHttpError
+        ? `the tracker answered ${err.status}`
+        : // The name and not the message, for the same reason one door over:
+          // `JSON.parse` puts the first characters of what it was given into its
+          // SyntaxError, so a tracker answering an HTML error page with a 200
+          // would put upstream text here by a second door. The name IS the
+          // diagnosis anyway — TypeError is a connection that never happened,
+          // TimeoutError is our own deadline, SyntaxError is a tracker
+          // answering something that isn't JSON — and the message is one
+          // (gated) route away.
+          `the tracker call failed (${errorName(err)})`;
   }
 
   report(id: string): TrackerReport {
@@ -334,6 +361,11 @@ const IDLE_POLL_MS = 5_000;
  * both suspect AND idle, so a fresh daemon takes over at the moment that costs
  * nothing.
  *
+ * What counts as "something to lose" is the caller's to define and is not
+ * obvious: see `idleExit` in server.ts, where it is every session in the
+ * registry rather than every RUNNING one, because a finished session is a card
+ * a restart does not bring back.
+ *
  * A POLL rather than a subscription to session ends, deliberately. This arms
  * inside a crash handler, in a process whose state is by definition suspect;
  * hanging the exit off a listener means that if the thing that broke is what
@@ -346,7 +378,7 @@ export class IdleExit {
 
   constructor(
     private readonly deps: {
-      /** Nothing left to lose: no session is still running. */
+      /** Nothing left to lose — see `idleExit` in server.ts for what that means. */
       idle: () => boolean;
       exit: () => void;
       everyMs?: number;

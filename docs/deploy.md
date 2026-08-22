@@ -97,8 +97,12 @@ daemon whose index has vanished abandons the supervisors it was tracking.
 The unit is `Restart=always` and an uncaught exception exits by default, so the
 usual prod story is a crash, an immediate restart, and every agent reattached
 (DRY-57). `DRYDOCK_EXIT_ON_UNCAUGHT=idle` in `~/.drydock/prod/.env` is the
-middle posture if even that reconnect is unwelcome: the daemon stays up while
-sessions are running and exits once none is.
+middle posture if even that reconnect is unwelcome: the daemon stays up while it
+still holds sessions and exits once it holds none. Note "holds" is the registry,
+so a finished run nobody has dismissed keeps it alive — deliberately, since that
+card and its scrollback are exactly what a restart would throw away. On a busy
+host that can mean it never exits, which is no worse than the `0` posture it
+replaces.
 
 ### A deploy does not kill the running agents (DRY-87)
 

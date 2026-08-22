@@ -316,10 +316,16 @@ export const CONFIG = {
      * The third value is DRY-48's, and it is the one this knob could not express
      * before there was any way to say "suspect": `idle` stays up while there is
      * something to lose and exits once the process is BOTH suspect and holding
-     * no running session — the reattach a restart costs is paid at the moment it
+     * no sessions at all — the reattach a restart costs is paid at the moment it
      * costs nothing. It is the honest home for a host that set `0` because a
      * reconnect mid-run is disruptive (an in-flight gate is re-raised, but the
      * rail's action line resets), since `0` buys that by wedging forever.
+     *
+     * "No sessions at all" and not "nothing running": a session that has ENDED
+     * is a card with readable scrollback that a restart does not bring back
+     * (session.ts forgets its index files as it exits), and DRY-60 exists to
+     * keep a finished run on screen until somebody has seen it. See `idleExit`
+     * in server.ts.
      *
      * The vocabulary is `flag()`'s, plus `idle`, and an unrecognised value is a
      * boot error for the same reason: `DRYDOCK_EXIT_ON_UNCAUGHT=Idle` reading as

@@ -145,9 +145,11 @@ nobody a session, while `/healthz` may block for the store's connect timeout.
 It reports `suspect` so a supervisor can see a fault without acting on one.
 
 Once "suspect" is expressible, the crash policy stops being a boolean:
-`DRYDOCK_EXIT_ON_UNCAUGHT=idle` stays up while a session is still running and
-exits as soon as none is, so the reattach a restart costs is paid at the moment
-it costs nothing.
+`DRYDOCK_EXIT_ON_UNCAUGHT=idle` stays up while the daemon still holds sessions
+and exits once it holds none, so the reattach a restart costs is paid at the
+moment it costs nothing. "Holds" includes a run that has *finished* and not been
+dismissed — that card and its scrollback don't survive a restart, and DRY-60
+exists to keep it on screen until somebody has seen it.
 
 ### Bun + node-pty caveat (why the daemon runs on Node)
 
@@ -350,7 +352,8 @@ one.
 `/healthz` reports the store alongside the daemon, and distinguishes a store
 that's down from one inside its retry window (`store.cooling` + `retryInMs`) —
 `ok` there is still an answer about the daemon, which is up either way. That
-endpoint has an opinion about the daemon itself now, too; see below.
+endpoint has an opinion about the daemon itself now, too — see
+[Is it healthy, and is it suspect?](#is-it-healthy-and-is-it-suspect) above.
 
 State is keyed by an `owner`: the constant `local` (`DRYDOCK_OWNER`) with auth
 off or a single account, and the signed-in account's id under

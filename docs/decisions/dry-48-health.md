@@ -89,15 +89,60 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:4399/readyz   # 200, or 503 w
    in a process that is by definition suspect, so hanging the exit off a session-
    end listener means that if the thing that broke is what would have fired it,
    the daemon stays up forever and the policy is silently off. The timer is
-   `unref`'d so it is never itself a reason to be alive, and "nothing left to
-   lose" is `running`, not "attached": an autonomous run with nobody watching is
+   `unref`'d so it is never itself a reason to be alive. Note "nothing left to
+   lose" is not about clients either: an autonomous run with nobody watching is
    the case the policy exists for and it has no client at all.
-11. **An unrecognised value for the knob is a boot error**, which is `flag()`'s
+11. **"Nothing left to lose" is the WHOLE registry, not the running sessions —
+   and the first cut got this wrong under a comment asserting it didn't.** That
+   comment said an exited session was a card "a fresh daemon rebuilds (see
+   `adoptExited`)", which is false by two independent routes review found:
+   `session.ts` calls `forget(this.id)` as a session ends while this daemon is
+   up, so there are no index files for the next boot to read; and on the path
+   where `adoptExited` IS reached (it ended while the daemon was down) it
+   deliberately does not put the session back in the registry. So the sequence
+   was: two autonomous runs finish, one of them failed, an uncaught exception
+   lands, `arm()`'s immediate check sees nothing running, and the daemon exits —
+   discarding both cards, their scrollback, and (on the file tier) raising
+   DRY-56's "a window that closes can't be resumed" for windows the daemon threw
+   away on purpose. DRY-60 spent an entire ticket keeping a finished run on
+   screen until somebody has SEEN it, measured in VISIBLE time; this posture
+   waited for the moment those cards were the only thing left and then deleted
+   them. The predicate is `manager.list().length === 0`.
+   - **The daemon cannot tell a read card from an unread one**, because that
+     clock is the shell's — only the browser knows what is on screen. So the
+     honest reading of "nothing to lose" is "no sessions at all", and the cost
+     is that a desk nobody is watching keeps the daemon alive indefinitely.
+     That is the conservative direction and never worse than the `0` posture
+     such a host would otherwise be running. A desk somebody IS watching empties
+     itself: the ✕, DRY-60's sweep and `Clear finished` all go through `/kill`,
+     which drops the session synchronously.
+   - **The harness has to let a session END, not kill one.** `/kill` leaves the
+     registry synchronously (DRY-60 trap 8), so a check built on it never
+     produces the exited-but-listed state and passes against the bug. Section
+     (i) spawns a `sleep 8` and waits it out.
+12. **The unauthenticated payload is a decision, not an inheritance.** On a
+   daemon with auth ON this is the only route besides `/api/auth/{info,login}`
+   that answers a stranger, and it now serves two host paths, live/exited counts
+   and `faults.last`. Those are kept — they are the answer to "what is this
+   daemon and what happened to it", which is the ticket, and the store's error
+   has carried a path here since DRY-28. What is NOT kept is somebody ELSE's
+   text: both providers build a message as `${status} ${await res.text()}`, so a
+   tracker behind a proxy puts that proxy's error page in it, and `TrackerWatch`
+   reports `the tracker answered 500` instead. A non-HTTP failure reports its
+   CLASS for the same reason and not for tidiness: `JSON.parse` embeds the first
+   characters of what it was handed in its `SyntaxError`, so a tracker answering
+   an HTML page with a 200 would put upstream text here by a second door. The body still reaches the two
+   places it is useful and already gated — the route's 502 and `stale.error`
+   (DRY-72) — which is why the harness asserts it as a PAIR. (Review's: the
+   comment defending this route originally said it served "nothing a caller
+   couldn't learn by watching the port", which stopped being true the moment the
+   endpoint grew an opinion.)
+13. **An unrecognised value for the knob is a boot error**, which is `flag()`'s
    rule (DRY-27 trap 1) applied where it now has three values instead of two:
    `DRYDOCK_EXIT_ON_UNCAUGHT=Idle` reading as "exit immediately" is a crash
    policy quietly not being the one somebody configured. `0` still means what it
    always did.
-12. **The fault the harness injects is a REAL fault, and it is not a route.** The
+14. **The fault the harness injects is a REAL fault, and it is not a route.** The
    product must not grow a "crash yourself" endpoint — that would not widen what
    an attacker can do on a port that already spawns commands, but it would put a
    control whose only purpose is to break the daemon on the same unauthenticated
@@ -107,32 +152,43 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:4399/readyz   # 200, or 503 w
    and no `uncaughtException` ever fires.
 
 Harness: `scripts/verify/health.mts` + `fault-inject.mts`, rig in its README — it
-starts the six daemons it needs, no browser, no database, about ninety seconds.
-Confirm it discriminates: against `main` it fails **45 of 57**, and the twelve
+starts the eight daemons it needs (plus a ninth that must refuse to start) and a
+stub tracker of its own, no browser, no database, about two minutes.
+Confirm it discriminates: against `main` it fails **48 of 62**, and the fourteen
 survivors are the useful part of that number rather than slack — four are the
-legacy-compatibility checks (which are supposed to pass), four are premises this
+legacy-compatibility checks (which are supposed to pass), five are premises this
 ticket didn't change (`=0` stays up, the default exits, a broken store already
-reported `ok:false`), one is rig setup, and three pass VACUOUSLY against a daemon
-with no health payload at all — including "and exits once nothing is running",
-which `main` satisfies by having exited a minute earlier. That last one is the
-argument for the `when-idle` pair below. Per mutation against the finished tree:
+reported `ok:false`, the route's 502 already quoted the tracker), one is rig
+setup, and four pass VACUOUSLY against a daemon with no health payload at all —
+including "exits once the desk is empty", which `main` satisfies by having
+exited a minute earlier. That last one is the argument for checking `idle` from
+three sides. `scripts/verify/README.md` names all fourteen. Per mutation against
+the finished tree:
 
 | mutation | fails |
 |---|---|
-| `ok: status !== "down"` → `status === "ok"` | 3 of 57 |
-| `readiness()` refusing a degraded tracker | 1 of 57 |
-| the uncaught handler not calling `faults.record` | 7 of 57 |
-| `when-idle` ignoring whether anything is running | 4 of 57 |
-| `when-idle` never arming (i.e. `stay` by another name) | 3 of 57 |
-| `TrackerWatch.failed` without its `CALLER_FAULT` arm | 1 of 57 |
-| `indexHealth` calling `sessionsDir()` | **0 of 57** — see trap 9 |
+| `ok: status !== "down"` → `status === "ok"` | 3 of 62 |
+| `readiness()` refusing a degraded tracker | 1 of 62 |
+| the uncaught handler not calling `faults.record` | 7 of 62 |
+| `idle` counting only RUNNING sessions (review's bug) | 1 of 62 |
+| `idle` ignoring whether anything is running | 6 of 62 |
+| `idle` never arming (i.e. `stay` by another name) | 3 of 62 |
+| `TrackerWatch.failed` without its `CALLER_FAULT` arm | 1 of 62 |
+| `TrackerWatch.failed` quoting the tracker's own body | 2 of 62 |
+| `indexHealth` calling `sessionsDir()` | **0 of 62** — see trap 9 |
 
-Two things about that table. The `when-idle` rows are a PAIR and each covers the
-other's blind spot — a policy that exits immediately passes "it exits once
-nothing is running" on its own, and one that never exits passes "it stayed up
-while a session was running". And the last row is recorded as zero rather than
-dropped, because a harness's own vacuous check is worth naming: the reader who
-finds it needs to know it was measured, not assumed.
+Three things about that table. The three `idle` rows are one property seen from
+three sides, and each covers the others' blind spot: a policy that exits
+immediately passes "it exits once the desk is empty" on its own, one that never
+exits passes "it stayed up while a session was running", and the one review found
+passes BOTH. That middle row can only ever fail a single check — once the daemon
+has exited early everything after it in the section passes — which is the whole
+reason the check that catches it is placed while the finished card is still on
+the desk rather than after it is dismissed. The two `TrackerWatch` rows are
+disjoint (the 404 in section (b), the 500 body in (f2)), so naming the wrong one
+sends the next person looking for a bug that isn't there. And the zero is
+recorded rather than dropped, because a harness's own vacuous check is worth
+naming: the reader who finds it needs to know it was measured, not assumed.
 
 **The rig's own trap, which cost eighteen false failures on the first run.** Six
 postures share one port, so a daemon that outlives its section answers for the
