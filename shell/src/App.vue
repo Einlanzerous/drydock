@@ -1206,8 +1206,20 @@ function spawnFromPalette(kind: "shell" | "claude" | "workspace"): void {
   else void spawnFresh(kind);
 }
 
+/**
+ * Neither this nor `spawnWorkspace` below touches the layout mode (DRY-93).
+ *
+ * Both used to force "float" first, "to make sure the new window is visible" —
+ * which re-scattered every window on a Tile or Focus desk, and, because a real
+ * mode change sets `arranged`, latched the flag that means a HUMAN shaped this
+ * desk in the one path that had just unshaped it (DRY-28 property 7). A session
+ * appearing is not a desk being arranged.
+ *
+ * Visibility belongs to whoever adds the window: tile re-grids on the count,
+ * focus promotes whatever `wm.add` focused, and float is where the call was a
+ * no-op anyway. `focusWindow` below is what makes the new one the one you're in.
+ */
 async function spawnFresh(kind: "claude" | "shell") {
-  wm.setLayout("float");
   try {
     const s = await createSession({ command: kind, title: kind === "claude" ? "claude-code" : "shell" });
     await refresh();
@@ -1233,7 +1245,6 @@ async function spawnWorkspace(
     auto?: boolean;
   } = {},
 ) {
-  wm.setLayout("float");
   try {
     const agent = await createSession({
       command: "claude",
@@ -1457,11 +1468,15 @@ const sweepAt = computed<Record<string, number>>(() => {
   return out;
 });
 
-/** Watch: a window, while the run stays autonomous and keeps its rail card. */
+/**
+ * Watch: a window, while the run stays autonomous and keeps its rail card.
+ *
+ * Adds to whatever layout is current — the third of the three spawn paths that
+ * forced "float" until DRY-93; see the note above `spawnFresh`.
+ */
 function watchRun(sessionId: string): void {
   const s = sessionsById[sessionId];
   if (!s) return;
-  wm.setLayout("float");
   wm.add({
     id: s.id,
     type: s.command === "claude" ? "agent" : "bash",

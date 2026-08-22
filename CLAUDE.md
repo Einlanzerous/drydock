@@ -293,6 +293,7 @@ Desk and shell:
 | doc | what it holds |
 |---|---|
 | [dry-82-desk-chrome](docs/decisions/dry-82-desk-chrome.md) | one spawn button, a centre that is a centre, `key=value` pills, daemon-side search |
+| [dry-93-spawn-layout](docs/decisions/dry-93-spawn-layout.md) | which layout a spawn lands in, and why a spawn must not count as arranging the desk |
 | [dry-83-epic-children](docs/decisions/dry-83-epic-children.md) | expanding an epic that has nothing under it |
 | [dry-71-clipboard-keys](docs/decisions/dry-71-clipboard-keys.md) | `Ctrl+Shift+C/V`; `navigator.clipboard` is unavailable where this runs |
 

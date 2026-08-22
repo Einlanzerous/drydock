@@ -33,6 +33,7 @@
     "verify/race.mts",
     "verify/roam.mts",
     "verify/sidebar.mts",
+    "verify/spawn-layout.mts",
     "verify/surface.mts",
     "verify/sweep.mts",
     "verify/tombstone.mts",
