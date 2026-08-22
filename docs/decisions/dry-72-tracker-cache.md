@@ -4,8 +4,9 @@ Until this, nothing in the tracker path cached anything: `/api/tracker/tickets`
 went straight at the provider, and the sidebar polls it every 20s **per browser
 tab**. Measured against a corporate Jira (3 projects, ~225 open) one pull runs
 **5.7-6s** — three cursor pages plus a `parent in (…)` child query — so the
-browser's own 12s budget was tripping on ordinary load, and every abort left the
-daemon still walking pages for a client that had stopped listening.
+browser's own budget (12s then, 15s since DRY-61) was tripping on ordinary
+load, and every abort left the daemon still walking pages for a client that had
+stopped listening.
 
 Now the daemon answers from memory and refreshes behind the response
 (`daemon/src/tracker/cache.ts`), child stats sit on a much longer TTL, every
@@ -42,10 +43,15 @@ outage. The traps:
 3a. **Staleness is reported by AGE as well as by failure**, because the cache
    removed a signal that used to be free. A tracker that is slow rather than
    broken — every request succeeding, the whole page-walk taking minutes — used
-   to trip the browser's 12s budget and report. Now the browser is answered
-   instantly and nothing fails, so without an age test the sidebar presents an
+   to trip the browser's budget (12s then) and report. Now the browser is
+   answered instantly and nothing fails, so without an age test the sidebar
+   presents an
    arbitrarily old list as live. The per-request deadline does not help: it
-   bounds one request, so N pages cost N × it.
+   bounds one request, so N pages cost N × it. (DRY-61 later bounded the whole
+   pull as well, which puts a ceiling on that N × it — but the age test is still
+   what reports a tracker that is slow rather than broken, since a pull ending
+   at its deadline leaves the last-good list in place and says only that a
+   refresh failed.)
 3b. **Overlapping pulls in the SHELL are how the epoch guard becomes a silence.**
    A poll, a visibility wake and Refresh can all want one; two in flight means
    the older one's outcome is discarded on arrival, so if it was the one that
@@ -76,7 +82,11 @@ outage. The traps:
    "no cache" for reproducing a tracker bug the cache would mask, and through
    `num()` a deliberate 0 silently restores the default.
 7. **A caller's own deadline wins.** The brief's `extrasDeadline` is 6s and
-   tighter for a reason; the new one is a backstop, not an override.
+   tighter for a reason; the new one is a backstop, not an override. (DRY-61's
+   operation deadline is the one exception, and only in the tightening
+   direction: it composes on top of whichever of the two applies, because a
+   decoration that outlived the operation it decorates is the accumulation that
+   ticket exists to stop.)
 8. **Backoff may only ever LENGTHEN the poll interval**, or it breaks the
    `LIST_TIMEOUT_MS < TICKET_POLL_MS` pairing — which is load-bearing and fails
    invisibly (see the comment on the budget).

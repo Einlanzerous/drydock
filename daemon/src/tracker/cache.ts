@@ -7,10 +7,10 @@ import type { Ticket, TicketQuery } from "./types.js";
  * `/api/tracker/tickets` went straight at the provider, and the sidebar polls
  * that route every 20s **per browser tab**. Against a corporate Jira one pull
  * measured 5.7-6s — three cursor pages for the list plus a `parent in (…)` child
- * query spanning every status — so the browser's own 12s budget
- * (`LIST_TIMEOUT_MS`) was being tripped by ordinary load rather than by an
- * outage, and each abort left the daemon still walking pages for a client that
- * had stopped listening.
+ * query spanning every status — so the browser's own budget (`LIST_TIMEOUT_MS`,
+ * 12s at the time and 15s since DRY-61) was being tripped by ordinary load
+ * rather than by an outage, and each abort left the daemon still walking pages
+ * for a client that had stopped listening.
  *
  * Two caches, at two layers, because the two costs behave differently:
  *
@@ -131,9 +131,10 @@ export class TicketListCache {
     //
     // It exists because the cache REMOVED a signal that used to be free. A
     // tracker that is slow rather than broken — a page-walk where every request
-    // succeeds but the whole pull takes minutes — used to hit the browser's 12s
-    // budget and report. Now the browser is answered instantly from cache and
-    // nothing fails, so without an age test the sidebar would present an
+    // succeeds but the whole pull takes minutes — used to hit the browser's
+    // budget (12s at the time) and report. Now the browser is answered instantly
+    // from cache and nothing fails, so without an age test the sidebar would
+    // present an
     // arbitrarily old list as live, which is the exact dishonesty DRY-55 exists
     // to prevent.
     this.staleAfterMs = staleAfterMs || Math.max(ttlMs * 3, 60_000);

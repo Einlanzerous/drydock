@@ -1,4 +1,5 @@
 import { ChildStatsCache } from "./cache.js";
+import { requestSignal, withDeadline } from "./deadline.js";
 import { TrackerHttpError } from "./types.js";
 import type {
   Project,
@@ -46,6 +47,16 @@ export interface JiraConfig {
    * and what the fixture-shaped callers want.
    */
   requestTimeoutMs?: number;
+  /**
+   * Deadline on a whole ticket pull, ms (DRY-61) — every request it makes,
+   * together. The knob above bounds ONE request, and a pull is many: up to
+   * twenty cursor pages for the list, then the `parent in (…)` child-stats walk,
+   * which spans every status and can page twenty more. Against a tracker that
+   * accepts and goes silent each dies at its own deadline and the next begins,
+   * so nothing bounds the operation the route is holding a response open for.
+   * Omitted = no operation deadline, which is what shipped before.
+   */
+  listTimeoutMs?: number;
   /**
    * Where epic child counts are remembered between pulls (DRY-72). Injected, and
    * shared with whatever other provider a host might construct, because it caches
@@ -180,6 +191,7 @@ export class JiraProvider implements TrackerProvider {
   private readonly auth: string;
   private readonly repoOverrides: Set<string>;
   private readonly requestTimeoutMs?: number;
+  private readonly listTimeoutMs?: number;
   /** DRY-72. A disabled instance when the host injected none, so no `?.` below. */
   private readonly childStats: ChildStatsCache;
   /**
@@ -206,6 +218,7 @@ export class JiraProvider implements TrackerProvider {
       : `Bearer ${cfg.token}`;
     this.repoOverrides = new Set(cfg.repoOverrides ?? []);
     this.requestTimeoutMs = cfg.requestTimeoutMs;
+    this.listTimeoutMs = cfg.listTimeoutMs;
     this.childStats = cfg.childStats ?? new ChildStatsCache(0);
   }
 
@@ -230,13 +243,16 @@ export class JiraProvider implements TrackerProvider {
       ...init,
       // Every request gets a deadline (DRY-72). Nothing propagates a client's
       // abort into here, so before this a page-walk begun for a browser that
-      // gave up at 12s ran on to completion — and the next poll's fan-out piled
-      // on top of it. A caller carrying its own, tighter budget (extrasDeadline,
+      // gave up (at 12s, as it then was) ran on to completion — and the next
+      // poll's fan-out piled on top of it. A caller carrying its own, tighter budget (extrasDeadline,
       // where a blown deadline costs one line of a brief rather than the brief)
       // keeps it: this is a backstop, not an override.
-      signal:
-        init?.signal ??
-        (this.requestTimeoutMs ? AbortSignal.timeout(this.requestTimeoutMs) : undefined),
+      //
+      // Composed with whatever operation deadline is in scope (DRY-61), because
+      // a per-request bound is not a bound on a pull: twenty pages of list plus
+      // twenty of child stats is forty times this one. See deadline.ts for why
+      // that budget is ambient rather than threaded through every signature.
+      signal: requestSignal(init?.signal, this.requestTimeoutMs),
       headers: {
         Accept: "application/json",
         Authorization: this.auth,
@@ -400,7 +416,20 @@ export class JiraProvider implements TrackerProvider {
     return raw.map((p: any) => ({ key: p.key, name: p.name ?? p.key, repo: null, color: null }));
   }
 
+  /**
+   * The sidebar's pull, under one deadline for the whole thing (DRY-61).
+   *
+   * Wrapped HERE rather than at the route, so a refresh the cache runs behind a
+   * response is bounded too — that one has nobody waiting on it, which is what
+   * makes it the pull that piles up. `withDeadline` is a passthrough when one is
+   * already running, so `searchTickets` delegating into this doesn't mint a
+   * second budget.
+   */
   async listTickets(q: TicketQuery): Promise<Ticket[]> {
+    return withDeadline(this.listTimeoutMs, "jira ticket list", () => this.pull(q));
+  }
+
+  private async pull(q: TicketQuery): Promise<Ticket[]> {
     // Same contract as the Switchyard provider: no limit (the sidebar) means
     // "everything matching", paginated to the MAX_TICKETS backstop; an explicit
     // limit (the palette) is a single page.
@@ -533,7 +562,24 @@ export class JiraProvider implements TrackerProvider {
     }
   }
 
+  /**
+   * The Ctrl+K palette's search, under its own deadline (DRY-61).
+   *
+   * Wrapped rather than left to inherit `listTickets`' deadline, even though it
+   * delegates straight into it: `withDeadline` nests as a passthrough, so the OUTER label
+   * is the one a blown budget reports — and this route is uncached, so unlike
+   * the sidebar's pull there is no last-good list to fall back on and the
+   * message goes straight to the palette. "jira ticket list exceeded its
+   * 10000ms deadline" would name an operation the user never asked for. Same
+   * budget, because it is the same tracker doing the same kind of work.
+   */
   async searchTickets(text: string, projects?: string[]): Promise<Ticket[]> {
+    return withDeadline(this.listTimeoutMs, "jira ticket search", () =>
+      this.searchWithin(text, projects),
+    );
+  }
+
+  private async searchWithin(text: string, projects?: string[]): Promise<Ticket[]> {
     // Search spans all statuses (incl. backlog/done) — you're looking for a
     // specific ticket — but stays inside the project scope (DRY-30).
     return this.listTickets({ text, projects, limit: 50 });

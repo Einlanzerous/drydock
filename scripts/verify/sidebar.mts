@@ -229,8 +229,11 @@ try {
   await page.click(".sidebar .refresh");
   const held = await waitFor(async () => (await state()).held > 0, 10_000);
   check("the request is parked, not answered", held !== null, held === null ? "never arrived" : `after ${held}s`);
-  // Budget is 20s (LIST_TIMEOUT_MS); allow a margin, and fail loudly rather
-  // than hanging the whole run if it never fires.
+  // Budget is 15s (LIST_TIMEOUT_MS, raised from 12s in DRY-61 to sit clear of
+  // the daemon's own pull deadline); allow a margin, and fail loudly rather
+  // than hanging the whole run if it never fires. The daemon's deadline can't
+  // rescue this case — the proxy holds the BROWSER's request, so the daemon
+  // never sees one to give up on.
   const gaveUp = await waitFor(async () => (await snap(page)).stale, 40_000);
   check("the pull gives up and reports", gaveUp !== null, gaveUp === null ? "still hanging after 40s" : `after ${gaveUp}s`);
   s = await snap(page);

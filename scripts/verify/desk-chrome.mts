@@ -90,18 +90,22 @@ const stubHeal = (): Promise<unknown> =>
   fetch(`${STUB}/__heal`, { method: "POST" }).then((r) => r.json());
 
 /**
- * The shell's own budget on a tracker call (`LIST_TIMEOUT_MS`), plus room for it
- * to land and render.
+ * The shell's own budget on a tracker call (`LIST_TIMEOUT_MS`, 15s since
+ * DRY-61), plus room for it to land and render.
  *
- * **The rig's `DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS` has to be far longer than
- * this whole round, and that is load-bearing in both directions.** Shorter than
- * the shell's budget (the daemon's default is) and a silent stub reaches the
- * browser as a prompt 502, so the shell's own deadline is never exercised at
- * all. Longer, but still inside the round, and the daemon gives up on its own
- * partway through — which UNWEDGES the shell for free and makes the wedge check
- * below pass against the bug it exists for. Measured both ways: at 30s it did.
+ * **Both of the rig's daemon-side deadlines have to be far longer than this
+ * whole round, and that is load-bearing in both directions.**
+ * `DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS` bounds one request and
+ * `DRYDOCK_TRACKER_LIST_TIMEOUT_MS` bounds the whole pull (DRY-61); the rig
+ * pushes both to 120s, and the second one is easy to miss because it takes a
+ * 10s default that is well inside this round. Shorter than the shell's budget —
+ * as both daemon defaults are — and a silent stub reaches the browser as a
+ * prompt 502, so the shell's own deadline is never exercised at all. Longer,
+ * but still inside the round, and the daemon gives up on its own partway
+ * through — which UNWEDGES the shell for free and makes the wedge check below
+ * pass against the bug it exists for. Measured both ways: at 30s it did.
  */
-const SHELL_BUDGET_MS = 16_000;
+const SHELL_BUDGET_MS = 19_000;
 /**
  * How long the wedge probe waits for the next search to report.
  *
