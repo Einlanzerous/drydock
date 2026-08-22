@@ -257,8 +257,10 @@ no per-repo setup.
   terminal pane and it opens rendered (sanitized `marked` + DOMPurify) in a
   floating window; relative links inside a doc navigate in place, and a refresh
   button re-reads files agents rewrite mid-session. The daemon serves the file
-  confined to that session's working tree (`/api/sessions/:id/file`). Ticket
-  descriptions render through the same pipeline.
+  confined to that session's working tree (`/api/sessions/:id/file`) — with one
+  exception, its own handoff document, matched by exact equality against the
+  path the API advertised (DRY-63). Ticket descriptions render through the same
+  pipeline.
 - **In-place approval loop.** A `PreToolUse` gate lights the pane (border turns
   red) and Approve/Deny in the UI pre-empts the CLI's own prompt. Ticket spawns
   default to the **Auto** toggle (DRY-22), starting the agent in hands-off
@@ -281,6 +283,13 @@ no per-repo setup.
   the tracker supports comments, posts a line on the ticket pointing at it.
   Clicking a card offers **Watch** (a window, still autonomous) or **Take over**
   (an ordinary session; one-way).
+- **A run's output over HTTP (DRY-63).** `GET /api/sessions/:id/transcript`
+  returns what a session printed, ANSI stripped and capped at 1 MiB (the tail —
+  a run's last words are the ones worth keeping). It exists because stdout is
+  the one stream nothing but Drydock captures: Claude Code's print mode writes
+  its end-of-run `{"type":"result",…}` event — `total_cost_usd`, `num_turns`,
+  `usage` — to stdout and to no file it keeps, so the PTY holds the only copy.
+  Readable until the sweep clears the session, so read it on `session-exit`.
 - **"Your turn" indicator (DRY-18).** The injected `Stop` hook flags a session
   idle when the agent yields; the window badge and dock light up. A turn ending
   means "done *or* waiting on your reply" — the UI never claims "complete".

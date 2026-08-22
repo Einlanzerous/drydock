@@ -32,6 +32,29 @@ import { runEndHandler } from "./runs.js";
 import { SessionHistoryRecorder } from "./history.js";
 import { knownTranscripts } from "./transcripts.js";
 
+/**
+ * What a single read of somebody's files or output may cost this daemon.
+ *
+ * One number, two routes, because they are the same promise: the daemon holds
+ * a PTY and a browser asked it for a page of text. `/file` refuses above it
+ * (413 — go read the file another way), `/transcript` truncates to it (there is
+ * no other way). Deliberately NOT tied to DRYDOCK_SCROLLBACK_BYTES: raising the
+ * ring is a decision about how much history a reattach gets, and it must not
+ * silently become a decision about how large an HTTP response can be.
+ */
+const READ_CAP_BYTES = 1_048_576;
+/**
+ * How far past a truncation point `/transcript` will look for a line break.
+ *
+ * A bound, not a tuning knob. Snapping to the next newline is what stops a
+ * consumer being handed half a JSON record, but the search has to give up
+ * somewhere: output that is one enormous line keeps its newline at the very
+ * end, and an unbounded search would throw away everything the cap kept in
+ * order to return the last few bytes. 64 KiB is far past any line a terminal
+ * produces and far short of the megabyte being protected.
+ */
+const LINE_SNAP_BYTES = 65_536;
+
 const manager = new SessionManager();
 const tracker = createTracker();
 const store = createStore();
@@ -1273,6 +1296,9 @@ const server = http.createServer(async (req, res) => {
     // so this must not become an arbitrary-file-read primitive: realpath both
     // ends (no symlink escapes), confine to the session's cwd subtree, allow
     // only renderable text extensions, cap the size. Revisit with daemon auth.
+    // The one path served from outside that subtree is the session's own
+    // handoff document (DRY-63) — see the equality test below for why that adds
+    // nothing to reach for.
     const fileMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/file$/);
     if (fileMatch && req.method === "GET") {
       // "own", and the comment that used to be here was wrong in a way worth
@@ -1290,6 +1316,38 @@ const server = http.createServer(async (req, res) => {
       if (!/\.(md|markdown|txt)$/i.test(rel)) {
         return send(res, 403, { error: "only .md/.markdown/.txt files can be viewed" });
       }
+      // The run's own handoff document (DRY-63), which is the one file this
+      // route is asked for that deliberately lives OUTSIDE the session's cwd.
+      // `runs.ts` writes it under CONFIG.autonomous.runsRoot and the daemon
+      // then advertises the absolute path as `SessionInfo.handoff` — so before
+      // this, the API published a link and 403'd every client that followed it.
+      //
+      // No traversal surface is added, and the reason is the exact equality
+      // rather than the extension check above it: the only path that gets past
+      // here is a string the daemon itself produced and handed to this caller.
+      // There is no arithmetic to abuse — no join, no realpath, no prefix test
+      // that a symlink could be pointed through. Which also means a client must
+      // send back what the API gave it verbatim; a caller that expands or
+      // normalises the path first falls through to the cwd-confined arm below
+      // and gets the 403 it would have got yesterday.
+      const handoff = session.info().handoff;
+      if (handoff && rel === handoff) {
+        try {
+          const st = await fs.promises.stat(handoff);
+          if (!st.isFile()) return send(res, 404, { error: "not a file" });
+          if (st.size > READ_CAP_BYTES) {
+            return send(res, 413, { error: "file exceeds the 1 MiB view cap" });
+          }
+          const content = await fs.promises.readFile(handoff, "utf8");
+          return send(res, 200, { path: handoff, content });
+        } catch {
+          // The run ended, the document was written, and somebody deleted it.
+          // Nothing cleans runsRoot, so this is a human — and it is a 404 about
+          // that file, not the "unknown session" 404 above.
+          return send(res, 404, { error: `no readable file at ${rel}` });
+        }
+      }
+
       try {
         const base = await fs.promises.realpath(expandHome(session.cwd));
         // realpath also fails on nonexistence, so a traversal probe and a
@@ -1300,12 +1358,111 @@ const server = http.createServer(async (req, res) => {
         }
         const st = await fs.promises.stat(real);
         if (!st.isFile()) return send(res, 404, { error: "not a file" });
-        if (st.size > 1_048_576) return send(res, 413, { error: "file exceeds the 1 MiB view cap" });
+        if (st.size > READ_CAP_BYTES) {
+          return send(res, 413, { error: "file exceeds the 1 MiB view cap" });
+        }
         const content = await fs.promises.readFile(real, "utf8");
         return send(res, 200, { path: real, content });
       } catch {
         return send(res, 404, { error: `no readable file at ${rel}` });
       }
+    }
+
+    // --- The run's own output (DRY-63) ---
+    //
+    // Stdout is the one stream nothing but Drydock captures, and that is the
+    // whole of this route's argument.
+    //
+    // Claude Code's print mode ends a run with a `{"type":"result",...}` event
+    // carrying `total_cost_usd`, `num_turns` and `usage`, and writes it to
+    // STDOUT alone. Its own JSONL transcript under `<config dir>/projects/` is
+    // NOT a second copy: measured on `claude -p --output-format stream-json`
+    // (v2.1.240, `entrypoint: sdk-cli`), the persisted file held ten records,
+    // zero of type `result`, and no occurrence of `total_cost_usd` — while the
+    // same run's stdout held exactly one. Token counts are recoverable from
+    // that file, per assistant record and in more detail than the event gives;
+    // the CLI's own cost arithmetic is not recoverable from it at all. It exists
+    // in the bytes the PTY printed, and the daemon holds the only copy.
+    //
+    // A route rather than "the bytes are already on disk", because on disk they
+    // are transient: the supervisor flushes its ring to
+    // `<sessions dir>/<id>.scrollback` and `forget()` unlinks it as soon as the
+    // daemon has the session in memory (sessions-dir.ts), which in the normal
+    // case — daemon up, adopts immediately — is a window of milliseconds. A
+    // consumer reading it is racing our cleanup for an undocumented private
+    // format in a 0700 directory. This is the difference between a race and an
+    // API, and it is a smaller claim than "unreachable": the consumer is on
+    // this host and could always read SOMETHING. It just could not rely on it.
+    //
+    // What bounds the answer is the session registry, not the ring: a session
+    // stays here until the DRY-60 sweep clears it (five minutes past its ending
+    // by default, DRYDOCK_CLEAR_FINISHED_AFTER_MS), and `/kill` drops it at
+    // once. So the read belongs on the `session-exit` frame (DRY-64), not on a
+    // poll — the same reasoning that put `endReason` on the frame.
+    const transcriptMatch = pathname.match(/^\/api\/sessions\/([^/]+)\/transcript$/);
+    if (transcriptMatch && req.method === "GET") {
+      // "see", where `/file` above needs "own". Not an oversight and not a
+      // relaxation: this hands back what the session PRINTED, which the
+      // WebSocket already replays in full to anyone who may watch it —
+      // `visibleTo`, decided identically at the upgrade. `/file` is stricter
+      // because it reads an arbitrary path under the worktree that the agent
+      // need never have opened, which is a different thing entirely.
+      const session = sessionFor(transcriptMatch[1], me().id, "see", res);
+      if (!session) return;
+      // ANSI-stripped, like the handoff document's transcript section — but
+      // here the legibility being bought is a machine's. A consumer greps these
+      // lines for a JSON object, and a cursor move or a colour code landing
+      // inside one makes it unparseable. `transcript()` also folds CR to LF,
+      // which cannot corrupt a record: the CLI's own encoder escapes any
+      // carriage return in the content as `\r`, so the only ones in the byte
+      // stream are the pty's ONLCR, between records.
+      const full = Buffer.from(session.transcript(), "utf8");
+      // Keep the TAIL, and say which. `/file` answers 413 above its cap because
+      // its caller can go read the file another way; nobody can read this
+      // another way, so refusing the long runs the route exists for would be
+      // protecting the wrong half. The tail is also the half worth keeping —
+      // the result event is emitted when the run ENDS, which makes it the
+      // payload most likely to survive this cap and the ring above it.
+      const truncated = full.byteLength > READ_CAP_BYTES;
+      let from = truncated ? full.byteLength - READ_CAP_BYTES : 0;
+      if (truncated) {
+        // Cut at a line boundary rather than mid-byte. Two things go wrong
+        // otherwise, and only one of them is visible: an arbitrary offset can
+        // land inside a UTF-8 sequence (one replacement character, cosmetic),
+        // and it can hand the consumer half a JSON object, which parses as
+        // nothing while looking like a record. `\n` cannot occur inside a
+        // multi-byte character, so a newline boundary settles both at once.
+        //
+        // But snap only within a WINDOW, which is the half that is not
+        // obvious. Scanning forward to the next newline unconditionally is
+        // correct while lines are short and catastrophic when they are not: a
+        // run whose whole output is one long line — `--output-format json`
+        // emits a single object for the entire session — has its next newline
+        // at the very END, so an unbounded snap discards the megabyte it just
+        // decided to keep and returns the last few characters. Past the window
+        // there is no whole line to be had at any price, and half a line of
+        // real bytes beats none.
+        const nl = full.indexOf(0x0a, from);
+        if (nl !== -1 && nl - from <= LINE_SNAP_BYTES) {
+          from = nl + 1;
+        } else {
+          // Then at least land on a character: step off any UTF-8 continuation
+          // byte, at most three times. Cosmetic on its own — one replacement
+          // character — but it is what keeps the claim above honest for the
+          // case that does not get a line boundary.
+          while (from < full.byteLength && (full[from] & 0xc0) === 0x80) from++;
+        }
+      }
+      const text = full.subarray(from).toString("utf8");
+      return send(res, 200, {
+        id: session.id,
+        text,
+        // Of what is RETURNED, not of what was captured — `truncated` is the
+        // field that says bytes were dropped, and a length that disagreed with
+        // its own payload would be worse than no length.
+        bytes: Buffer.byteLength(text, "utf8"),
+        truncated,
+      });
     }
 
     // --- Tracker API (DRY-10) ---

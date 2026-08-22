@@ -48,6 +48,20 @@ export interface SpawnResponse {
 }
 
 /**
+ * `GET /api/sessions/{id}/file`.
+ *
+ * Read by two harnesses since DRY-63 gave the route a second arm (a session's
+ * own handoff document, which lives outside its cwd), which is what moved this
+ * up here from a local declaration in spawn-env.mts — see the note at the top
+ * about what re-declaring an envelope costs.
+ */
+export interface FileResponse {
+  path?: string;
+  content?: string;
+  error?: string;
+}
+
+/**
  * `GET /healthz` and `GET /readyz` (DRY-48).
  *
  * Imported rather than declared, now that there is something to import: this
