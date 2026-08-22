@@ -227,14 +227,16 @@ bunx playwright install chromium             # once per machine; see "Running th
 | `sidebar.mts` | A tracker outage names itself. Before DRY-55 a first load with the tracker down rendered "No tickets match." — true of a healthy tracker with nothing in scope, and with the scope chips (DRY-30) in the same panel it reads as a filter you got wrong rather than an outage. Asserts the empty case, the **stale** case, the **hang** case and a shell newer than its daemon separately, plus that all of them end without a reload. |
 
 The hang case is the one worth explaining. A tracker that refuses connections
-fails fast; a tracker that accepts and then goes silent doesn't fail at all —
-and neither provider's `req()` carries a deadline, so the daemon's route never
-answers either. Nothing rejects, so the catch that powers every other assertion
-here never runs: the pull just never settles, the sidebar keeps saying "No
-tickets match.", and its spinner stays latched because `finally` never runs
-either. The pull's own budget (`LIST_TIMEOUT_MS`, `shell/src/lib/tracker.ts`) is
-the only thing that ends it. Same lesson as the workspace store's, one surface
-over — see the section below.
+fails fast; a tracker that accepts and then goes silent doesn't fail at all, so
+nothing rejects and the catch that powers every other assertion here never runs:
+the pull just never settles, the sidebar keeps saying "No tickets match.", and
+its spinner stays latched because `finally` never runs either. The pull's own
+budget (`LIST_TIMEOUT_MS`, `shell/src/lib/tracker.ts` — 15s since DRY-61) is the
+only thing that ends it. **And the daemon's own deadlines cannot rescue this
+one**, which is why the case still belongs to the browser after DRY-72 and
+DRY-61 gave the daemon two of them: the proxy holds the BROWSER's request, so
+the daemon never sees a request to give up on. Same lesson as the workspace
+store's, one surface over — see the section below.
 
 Why a browser and not curl: `curl /api/tracker/tickets` returns a 502 with a
 perfectly clear error body, which is the exact state in which this shipped. The
@@ -358,8 +360,16 @@ caches off and the deadline out of reach:
 
 ```sh
 DRYDOCK_TRACKER_CACHE_MS=0 DRYDOCK_TRACKER_CHILD_STATS_CACHE_MS=0 \
-  DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS=600000   # …rest of the env as above
+  DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS=600000 \
+  DRYDOCK_TRACKER_LIST_TIMEOUT_MS=0           # …rest of the env as above
 ```
+
+The last line was added by DRY-61 and is not optional: that ticket gave the
+daemon a SECOND deadline, on the whole pull, which the rig above doesn't set and
+therefore gets at its 10s default. Leave it in and the hang case ends at 10s
+instead of never — the pre-DRY-72 daemon this recipe is supposed to reproduce
+would still be waiting, and (h) would report a different number than the one
+below.
 
 Expect **15 failures**, and expect the numbers to be the diagnosis: six pulls
 becoming `18 upstream requests`, one pull taking `7509ms against a 2500ms
@@ -509,12 +519,15 @@ harness and deliberate: the claim is that a view filter costs the tracker
 nothing, so the 20s poll must be answered from the daemon's memory or every
 count is noise.
 
-`DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS=120000` is load-bearing in **both**
-directions, and section (f) is wrong without it. Shorter than the shell's own
-12s budget (the daemon's default is) and a silent stub reaches the browser as a
-prompt 502, so the shell's deadline is never exercised at all. Longer, but still
-inside the round, and the daemon gives up partway through — which unwedges the
-shell for free and makes the wedge check pass against the bug it exists for.
+**The daemon must not give up before the round is over**, and section (f) is
+wrong if it does — so BOTH of its deadlines are pushed out of reach here
+(`DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS=120000`, and since DRY-61
+`DRYDOCK_TRACKER_LIST_TIMEOUT_MS=120000`, which otherwise takes its 10s
+default). Load-bearing in both directions. Shorter than the shell's own 15s
+budget — as both daemon defaults are — and a silent stub reaches the browser as
+a prompt 502, so the shell's deadline is never exercised at all. Longer, but
+still inside the round, and the daemon gives up partway through, which unwedges
+the shell for free and makes the wedge check pass against the bug it exists for.
 Measured at 30s: it did.
 
 ```sh
@@ -525,7 +538,7 @@ bunx playwright install chromium             # once per machine; see "Running th
    DRYDOCK_TRACKER=switchyard DRYDOCK_SWITCHYARD_URL=http://127.0.0.1:4383 \
    DRYDOCK_TRACKER_PROJECTS=DRY \
    DRYDOCK_TRACKER_CACHE_MS=60000 DRYDOCK_TRACKER_CHILD_STATS_CACHE_MS=60000 \
-   DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS=120000 \
+   DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS=120000 DRYDOCK_TRACKER_LIST_TIMEOUT_MS=120000 \
    DRYDOCK_DATABASE_URL= DRYDOCK_MULTI_USER= \
    DRYDOCK_AUTH_PASSWORD=dry82-throwaway DRYDOCK_AUTH_USER=alexandra.dodson-admin \
    DRYDOCK_STATE_FILE=/tmp/dry82-state.json \
@@ -1782,7 +1795,13 @@ what puts the index back, so nothing is left staged.
 `SHELL_URL`, `DAEMON`, `PROXY` for the browser harnesses; `PROXY_PORT` /
 `TARGET_PORT` for `proxy-http.mts` and `proxy-tracker.mts` (`BREAK_PATH` too, if
 some other route ever needs the same treatment); `PG_PROXY_PORT` / `PG_PORT` /
-`CONTROL_PORT` for `proxy-tcp.mts`; `PG_URL` / `PG_CONTAINER` for `drift.sh`.
+`CONTROL_PORT` for `proxy-tcp.mts`; `PG_URL` / `PG_CONTAINER` for `drift.sh`;
+`DAEMON_URL` / `STUB_URL` for `tracker-cache.mts` and `tracker-deadline.mts`,
+plus `LIST_TIMEOUT_MS` / `REQUEST_TIMEOUT_MS` for the latter — those two are the
+harness being TOLD the daemon's two deadlines, not setting them, so they must
+match the `DRYDOCK_TRACKER_*` values the daemon actually booted with. The whole
+file is an argument about which of the two ended a pull; told the wrong numbers
+it makes that argument confidently and wrongly.
 
 **`DAEMON` must point at whatever `proxy-http.mts` forwards to.** Getting that
 wrong makes the harness assert against a different daemon than the browser is

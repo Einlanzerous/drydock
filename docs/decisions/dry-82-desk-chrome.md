@@ -265,9 +265,13 @@ the bug it was written for:
   response, which lets the hung promise settle and unlatches the handle for
   free. Break to `502` instead: the old request stays held, a new one fails
   fast, so "the note changed" can only mean a request went out.
-- **The rig's `DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS` has to outlast the whole
-  round.** Shorter than the shell's budget (the default is) and a silent stub
-  arrives as a prompt 502, so the shell's own deadline is never exercised.
-  Longer but still inside the round — 30s, measured — and the daemon gives up
-  partway through and unwedges the shell for you.
+- **Every daemon-side tracker deadline has to outlast the whole round.**
+  Shorter than the shell's budget (the defaults are) and a silent stub arrives
+  as a prompt 502, so the shell's own deadline is never exercised. Longer but
+  still inside the round — 30s, measured — and the daemon gives up partway
+  through and unwedges the shell for you. There are now TWO of them:
+  `DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS` (DRY-72) and, since DRY-61,
+  `DRYDOCK_TRACKER_LIST_TIMEOUT_MS`, which bounds the whole pull and defaults to
+  10s — inside this round, so a rig that sets only the first one silently goes
+  back to passing against the bug.
 
