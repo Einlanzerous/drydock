@@ -78,6 +78,12 @@ Three groups:
   touching when a spawned CLI is judged ready to be typed at
   (`scheduleInitialInput` / `paintsSomething`), whether the prompt is submitted
   (`flushInitialInput`), or `spawnWorkspace` in `App.vue`.
+- **Where a spawned window lands (DRY-93)** —
+  [its own section](#where-a-spawned-window-lands-dry-93). A browser, a
+  throwaway daemon and the same stub CLI as DRY-88; about three minutes. Run it
+  when touching `spawnFresh` / `spawnWorkspace` / `watchRun` in `App.vue`,
+  `setLayout` / `add` / `computeRects` in `useWindowManager.ts`, or anything
+  else that decides what a new window does to the desk that is already there.
 - **The tombstone's resume button (DRY-62)** —
   [its own section](#the-tombstones-resume-button-dry-62). A browser and a
   throwaway Postgres, about a minute. Run it when touching
@@ -1653,6 +1659,86 @@ listening, `stopDaemon` escalates to SIGKILL rather than giving up quietly, and
 crashes halfway otherwise leaves a daemon holding the port and breaks the *next*
 run instead of the one that made the mess.
 
+## Where a spawned window lands (DRY-93)
+
+A browser, a throwaway daemon and a stub CLI on its PATH — about three minutes.
+Run it when touching `spawnFresh` / `spawnWorkspace` / `watchRun` in `App.vue`,
+`setLayout` / `add` / `computeRects` in `useWindowManager.ts`, or anything else
+that decides what a new window does to the desk already on screen.
+
+The stub is the same shim DRY-88 uses and for the same reason: `spawnWorkspace`
+spawns a bare `claude`, so without a shim earlier on the daemon's PATH this
+starts the real CLI, once per round, on whatever host it runs on.
+
+```sh
+bunx playwright install chromium             # once per machine; see "Running these"
+
+mkdir -p /tmp/dry93-bin
+printf '#!/bin/sh\nexec node --import %s/node_modules/tsx/dist/loader.mjs %s/scripts/verify/stub-cli.mts "$@"\n' \
+  "$PWD" "$PWD" > /tmp/dry93-bin/claude && chmod +x /tmp/dry93-bin/claude
+
+mkdir -p /tmp/dry93-repos/switchyard        # a NON-git dir, so the panel offers no worktree
+
+(cd daemon && PATH="/tmp/dry93-bin:$PATH" \
+   DRYDOCK_PORT=4393 DRYDOCK_HOST=127.0.0.1 DRYDOCK_SESSIONS_DIR=/tmp/d93 \
+   DRYDOCK_STATE_FILE=/tmp/dry93-state.json DRYDOCK_TRACKER=fixture \
+   DRYDOCK_REPO_PATHS=switchyard=/tmp/dry93-repos/switchyard \
+   DRYDOCK_CLEAR_FINISHED_AFTER_MS=0 \
+   DRYDOCK_WORKTREES_ROOT=/tmp/dry93-wt DRYDOCK_WORKTREE_REAP_MS=0 \
+   node --import tsx src/index.ts &)
+(cd shell && VITE_DAEMON_URL=http://127.0.0.1:4393 bunx vite --port 5393 --strictPort &)
+
+(cd daemon && node --import tsx ../scripts/verify/spawn-layout.mts)
+```
+
+`DRYDOCK_CLEAR_FINISHED_AFTER_MS=0` turns DRY-60's sweep off — five minutes is
+the right default and a terrible test, and here it is worse than useless: a
+window this file has counted could be taken mid-round by something that has
+nothing to do with the ticket. The two worktree knobs are not this ticket's
+business either, and are set for a different reason: left at their defaults a
+throwaway daemon boots pointed at the HOST's worktrees root and runs DRY-90's
+sweep across other agents' checkouts. It kept all nine of them, correctly —
+liveness is read from every daemon's index, not this one's — but that is a
+policy no rig should be leaning on.
+
+What it holds down:
+
+- **All three spawn paths, in all three modes.** The palette's pinned row
+  (`spawnFresh`), the ticket panel's Spawn Agent (`spawnWorkspace`) and the
+  rail's Watch (`watchRun`) were three separate call sites, and a fix that
+  covered one looked identical from the other two.
+- **"The mode didn't change" is not the claim.** Each spawn also has to leave a
+  window you can SEE, in that mode's terms — so tile asserts uniform cells and
+  no overlap, and focus asserts the new window is the large pane rather than a
+  200px thumbnail. Checked on its own, the mode is satisfied by a spawn that
+  produced nothing at all.
+- **The mode is read from the DAEMON too**, not only from the header. It is
+  persisted, so a desk that snapped to float wrote "float" to `/api/workspace` —
+  and a spawn that changed the mode and changed it back would still be caught.
+- **The `arranged` flag** (section D), which is why this isn't cosmetic:
+  `setLayout` marks the desk as arranged BY A PERSON, and DRY-28's conflict rule
+  reads that flag to decide whose desk survives an outage. Nothing exposes it,
+  so it is asserted through the only thing it does — the store is unreachable
+  from before the first read, a spawn happens, the store heals, and the daemon's
+  desk must still win.
+- **Section D has to run from a TILED desk, and that is its whole difficulty.**
+  The forced call was `setLayout("float")`, which the guard makes a no-op in
+  float — so a version of D run from the default mode passes against the bug,
+  which is exactly what its first cut did. Clicking the switcher to get out of
+  float would itself set the flag, so the mode arrives from the local MIRROR
+  instead (`apply()` assigns `layout` directly, deliberately: putting somebody
+  else's desk on screen is not this client arranging one). Hence the reused
+  browser context, and hence three different answers — mirror `tile`, daemon
+  `focus`, and in D′ a click on `float` — so every check has a one-word verdict.
+- **D′ is the control**, and without it D passes against an `arranged` that
+  nothing ever sets, including a "fix" that deleted the flag outright.
+
+Discrimination (see [the section below](#making-sure-a-harness-still-discriminates),
+which carries the recipe): against the pre-fix tree it fails **26 of 80**. The
+float round is not among them, honestly — the removed call was already a no-op
+there, which is the whole reason this shipped unnoticed — so those 21 checks are
+a guard on what must not regress rather than evidence of the fix.
+
 ## Workspace store: why a proxy and not `docker stop`
 
 `docker stop` frees the port, so every connect fails instantly with
@@ -1719,6 +1805,7 @@ tiers** — the file store is what a fresh clone runs.
 | `drift.sh` | Postgres only. An edited applied migration 503s naming the file while the live PTY keeps running; reverting clears it; a null checksum is adopted and backfilled. |
 | `epic-children.mts` | DRY-83. An epic with nothing under it in the pull expands to its open children, without widening the pull, without fanning out under a filter, and without the rows blinking out when Refresh re-pulls them. |
 | `health.mts` | DRY-48. `/healthz` has an opinion: a real uncaught exception is counted and reported as `degraded` without ever reading as `down`, a broken store or tracker or log sink never un-readies the daemon, and the three postures of `DRYDOCK_EXIT_ON_UNCAUGHT` do what they say — including `idle`, which must stay up while a session runs and exit once none does. |
+| `spawn-layout.mts` | DRY-93. A spawn adds a window to the desk you are on: the layout mode is untouched — on the header AND on the daemon — and the new window is visible in that mode's own terms (a cell of the grid in tile, the large pane in focus). All three spawn paths, all three modes, plus the flag DRY-28's conflict rule reads: a spawn must not count as somebody arranging this desk, and a switcher click still must. |
 | `desk-chrome.mts` | DRY-82. One spawn control on the header and a palette that carries what the two removed buttons did; a layout switcher centred on the window rather than on the slack its siblings leave; `key=value` filter pills that cost the tracker nothing and say when they name something this pull cannot contain; and a term the pull cannot contain found through `/api/tracker/search`, debounced. |
 
 Each exits non-zero on failure and prints one line per check.
@@ -1786,6 +1873,15 @@ git checkout <that commit>~1 -- shell/src/App.vue shell/src/lib/tracker.ts \
 (cd daemon && node --import tsx ../scripts/verify/desk-chrome.mts)  # expect 44 failures of 72
 git checkout HEAD -- shell/src/App.vue shell/src/lib/tracker.ts \
   shell/src/components/QuickLaunch.vue shell/src/components/TrackerSidebar.vue
+
+# DRY-93 where a spawned window lands. Merge not written down, for the same
+# reason as the two above — find it from the file that arrived with it:
+#   git log --diff-filter=A --format=%h -- scripts/verify/spawn-layout.mts
+# App.vue ALONE: the other half of that commit is comment, so reverting
+# useWindowManager.ts too would change nothing and imply it had.
+git checkout <that commit>~1 -- shell/src/App.vue
+(cd daemon && node --import tsx ../scripts/verify/spawn-layout.mts)  # expect 26 failures of 80
+git checkout HEAD -- shell/src/App.vue
 ```
 
 The sidebar and epic-children counts are what DRY-80's re-run actually observed;

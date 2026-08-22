@@ -240,10 +240,21 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
     arranged = true;
   }
 
+  /**
+   * Switch layout mode. The header's switcher is the only caller (DRY-93).
+   *
+   * It had three others until then: every spawn path called it with "float" so
+   * the new window would be visible. That threw a Tile or Focus desk away on
+   * every spawn — and, since a real change sets `arranged`, it latched the flag
+   * that says a human shaped this desk in the one path that had just unshaped
+   * it. Adding a window is the adder's business; see the note above
+   * `spawnFresh` in App.vue.
+   *
+   * The early return stays, and is now the whole of the "not arranging" rule
+   * here: re-picking the mode you are already in changes nothing, and nothing
+   * is not an arrangement.
+   */
   function setLayout(m: LayoutMode) {
-    // Only a real change counts. Every spawn path calls this with "float" to
-    // make sure the new window is visible, and a spawn is a session appearing,
-    // not a desk being arranged.
     if (layout.value === m) return;
     layout.value = m;
     arranged = true;
