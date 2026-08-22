@@ -17,7 +17,7 @@ cd daemon && DRYDOCK_PORT=4399 DRYDOCK_HOST=127.0.0.1 node --import tsx src/inde
 #    vite server start and is the only override that survives (see below).
 VITE_DAEMON_URL=http://127.0.0.1:4399 bunx vite --port 5399 --strictPort &   # run from shell/
 
-curl -s localhost:4399/healthz         # {ok:true, sessions:N} → ready
+curl -s localhost:4399/healthz         # {status:"ok", ok:true, sessions:N} → ready
 ```
 
 ## Driving the UI with Playwright

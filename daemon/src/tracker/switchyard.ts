@@ -1,4 +1,5 @@
 import { ChildStatsCache } from "./cache.js";
+import { TrackerHttpError } from "./types.js";
 import type {
   Project,
   Ticket,
@@ -226,7 +227,12 @@ export class SwitchyardProvider implements TrackerProvider {
         ...init?.headers,
       },
     });
-    if (!res.ok) throw new Error(`switchyard ${path} -> ${res.status} ${await res.text()}`);
+    if (!res.ok) {
+      throw new TrackerHttpError(
+        `switchyard ${path} -> ${res.status} ${await res.text()}`,
+        res.status,
+      );
+    }
     return res.status === 204 ? {} : res.json();
   }
 
@@ -305,6 +311,10 @@ export class SwitchyardProvider implements TrackerProvider {
     const epic: SwitchyardTicket = await this.req(`/v1/tickets/${encodeURIComponent(q.parent!)}`);
     // A ticket with no id can't be asked about, and answering [] would render an
     // epic that opens onto nothing — indistinguishable from one with no children.
+    // NOT a TrackerHttpError, deliberately (DRY-48): an unknown key has already
+    // 404'd out of `req` above, so reaching here means a 200 whose shape we
+    // don't understand — a tracker problem rather than a caller's, and the
+    // health watch should read it as one.
     if (!epic.id) throw new Error(`switchyard: no id for ${q.parent}`);
     const status = q.open
       ? q.includeBacklog

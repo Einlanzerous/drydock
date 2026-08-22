@@ -14,12 +14,9 @@
 //
 // These are type-only imports, so nothing here survives the transform — tsx
 // never resolves a path into `daemon/src` at runtime.
+import type { DaemonHealth, Readiness } from "../../daemon/src/health.js";
 import type { SessionInfo } from "../../daemon/src/protocol.js";
-import type {
-  SessionRecord,
-  StoreHealth,
-  WorkspaceState,
-} from "../../daemon/src/state/types.js";
+import type { SessionRecord, WorkspaceState } from "../../daemon/src/state/types.js";
 import type { Ticket } from "../../daemon/src/tracker/types.js";
 
 export type { SessionInfo, SessionRecord, Ticket, WorkspaceState };
@@ -50,12 +47,17 @@ export interface SpawnResponse {
   session: SessionInfo;
 }
 
-/** `GET /healthz` */
-export interface HealthResponse {
-  ok: boolean;
-  sessions: number;
-  store: StoreHealth & { capabilities?: { sessionHistory?: boolean } };
-}
+/**
+ * `GET /healthz` and `GET /readyz` (DRY-48).
+ *
+ * Imported rather than declared, now that there is something to import: this
+ * used to be three fields written out by hand, which was fine while the payload
+ * was three fields and is exactly the guess this file exists to remove now that
+ * it reports on four subsystems — including the store, whose `StoreHealth` was
+ * being partially re-declared here (`capabilities?`) and now arrives whole.
+ */
+export type HealthResponse = DaemonHealth;
+export type ReadyResponse = Readiness;
 
 /** `GET /api/workspace` — null until something has been saved. */
 export interface WorkspaceResponse {

@@ -1,3 +1,4 @@
+import { TrackerHttpError } from "./types.js";
 import type {
   Project,
   Ticket,
@@ -159,7 +160,10 @@ export class FixtureProvider implements TrackerProvider {
 
   async getTicket(key: string, opts?: TicketDetailOptions): Promise<TicketDetail> {
     const f = FIXTURES.find((x) => x.key === key);
-    if (!f) throw new Error(`unknown ticket ${key}`);
+    // 404 so the health watch reads this as the tracker answering rather than
+    // as an outage (DRY-48) — a stand-in tracker still has to be honest about
+    // WHICH kind of no it is saying.
+    if (!f) throw new TrackerHttpError(`unknown ticket ${key}`, 404);
     const detail: TicketDetail = {
       ...toTicket(f),
       project: f.repo,

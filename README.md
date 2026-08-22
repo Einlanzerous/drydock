@@ -123,6 +123,34 @@ quietly running single-user. A run can be started *shared*, which everyone
 signed in can see and watch — read-only, since watching somebody's agent is not
 supervising it.
 
+### Is it healthy, and is it suspect?
+
+`GET /healthz` is a report and `GET /readyz` is a signal (DRY-48). Both are
+unauthenticated, and neither is an instruction to restart.
+
+`/healthz` carries a `status` of `ok`, `degraded` or `down`, and the parts it is
+derived from: the fault count (uncaught exceptions and unhandled rejections this
+process has taken, with the last one quoted), the session registry and the
+on-disk index a restart reads it back from, the log sink, the tracker, and the
+workspace store. `degraded` means something is broken that costs nobody a live
+PTY — a dead store, a tracker that can't be reached, a log file that can't be
+written, or a fault the process stayed up through. **`ok` is still false only
+for `down`**, which means the daemon cannot enumerate its own sessions; a daemon
+holding five agents after one uncaught exception is suspect, not down, and
+bouncing it for that is the thing the whole design is arranged to avoid.
+
+`/readyz` is what something polls on a timer: synchronous, 200 or 503, and
+deliberately blind to the store and the tracker — an outage in either costs
+nobody a session, while `/healthz` may block for the store's connect timeout.
+It reports `suspect` so a supervisor can see a fault without acting on one.
+
+Once "suspect" is expressible, the crash policy stops being a boolean:
+`DRYDOCK_EXIT_ON_UNCAUGHT=idle` stays up while the daemon still holds sessions
+and exits once it holds none, so the reattach a restart costs is paid at the
+moment it costs nothing. "Holds" includes a run that has *finished* and not been
+dismissed — that card and its scrollback don't survive a restart, and DRY-60
+exists to keep it on screen until somebody has seen it.
+
 ### Bun + node-pty caveat (why the daemon runs on Node)
 
 The daemon process runs on **Node**, not Bun: `node-pty`'s native addon uses the
@@ -323,7 +351,9 @@ one.
 
 `/healthz` reports the store alongside the daemon, and distinguishes a store
 that's down from one inside its retry window (`store.cooling` + `retryInMs`) —
-`ok` there is still an answer about the daemon, which is up either way.
+`ok` there is still an answer about the daemon, which is up either way. That
+endpoint has an opinion about the daemon itself now, too — see
+[Is it healthy, and is it suspect?](#is-it-healthy-and-is-it-suspect) above.
 
 State is keyed by an `owner`: the constant `local` (`DRYDOCK_OWNER`) with auth
 off or a single account, and the signed-in account's id under

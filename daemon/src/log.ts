@@ -48,6 +48,7 @@ for (const stream of [process.stdout, process.stderr]) {
  */
 let fileFailedAt = 0; // 0 = healthy; otherwise when it broke
 let fileDropped = 0; // lines lost since it broke
+let fileError = ""; // why, for /healthz (DRY-48) — the console note is one-shot
 const FILE_RETRY_MS = 30_000;
 
 function target(): string {
@@ -103,6 +104,7 @@ function write(line: string): void {
       });
       fileFailedAt = 0;
       fileDropped = 0;
+      fileError = "";
       fs.appendFileSync(file, note + "\n");
     }
   } catch (err) {
@@ -113,6 +115,7 @@ function write(line: string): void {
     const first = fileFailedAt === 0;
     fileFailedAt = Date.now();
     fileDropped++;
+    fileError = String(err);
     if (first) {
       toConsole(
         process.stderr,
@@ -142,12 +145,59 @@ function emit(level: "INFO" | "WARN" | "ERROR", msg: string, fields?: LogFields)
   write(line);
 }
 
+/** Whether anything written here is still landing anywhere (DRY-48). */
+export interface LogSinkHealth {
+  ok: boolean;
+  /** "" when the file sink is deliberately disabled (DRYDOCK_LOG_FILE=). */
+  file: string;
+  droppedLines?: number;
+  downSec?: number;
+  error?: string;
+}
+
+/**
+ * Report the file sink's state without writing to it.
+ *
+ * A read of the two variables above rather than a probe: a health check that
+ * tested the sink by writing to it would be the only thing keeping the retry
+ * loop turning on a busy daemon, and a probe that repairs is a probe that can't
+ * report. It is also why this can't just say "did the last write work" — the
+ * backoff means most writes during an outage are skipped rather than attempted.
+ *
+ * The disabled case is not a fault (a host that redirects stdout to a journal
+ * has a perfectly good sink), UNLESS the consoles have gone too: a daemon with
+ * no file sink and a broken pipe on both streams is writing its lines into the
+ * void, which is the exact "they died and there are no logs" symptom this
+ * module exists to end.
+ */
+function health(): LogSinkHealth {
+  const file = target();
+  if (!file) {
+    const lost = dead.has(process.stdout) && dead.has(process.stderr);
+    return {
+      ok: !lost,
+      file: "",
+      ...(lost ? { error: "the file sink is disabled and both console sinks are closed" } : {}),
+    };
+  }
+  if (!fileFailedAt) return { ok: true, file };
+  return {
+    ok: false,
+    file,
+    droppedLines: fileDropped,
+    downSec: Math.round((Date.now() - fileFailedAt) / 1000),
+    ...(fileError ? { error: fileError } : {}),
+  };
+}
+
 export const log = {
   info: (msg: string, fields?: LogFields) => emit("INFO", msg, fields),
   warn: (msg: string, fields?: LogFields) => emit("WARN", msg, fields),
   error: (msg: string, fields?: LogFields) => emit("ERROR", msg, fields),
   /** Where lines are landing, for the startup banner. "" when disabled. */
   file: target,
+  /** Is anything still landing? See `LogSinkHealth`. */
+  health,
 };
 
 /**

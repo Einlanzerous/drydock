@@ -214,6 +214,37 @@ export interface TrackerCapabilities {
 }
 
 /**
+ * A tracker that ANSWERED, with the status it answered with (DRY-48).
+ *
+ * The distinction this exists to make is between a tracker that could not be
+ * reached and one that told us no. `/healthz` reports the tracker as degraded
+ * when a call fails, and without a status it would have to treat a 404 for a
+ * ticket key somebody mistyped in the palette as an outage — a health endpoint
+ * accusing a perfectly reachable Jira, and (with nothing else necessarily
+ * polling) going on accusing it. See `TrackerWatch` in ../health.ts for which
+ * statuses count as which.
+ *
+ * What a caller sees is deliberately unchanged from the plain `Error` this
+ * replaced — including `String(err)`, which is why `name` is left alone rather
+ * than set to the class name as a subclass usually would. That string is what
+ * the routes put in a 502 body and what `stale.error` carries to every sidebar
+ * poll (DRY-72), i.e. it is rendered to a person; "TrackerHttpError: jira
+ * /search -> 500" tells them nothing the old text didn't and costs them a word
+ * of jargon. jira.ts's Cloud/DC probes also match `-> 404` / `-> 400` on it to
+ * decide which API a deployment has. New code should read `.status`; those were
+ * left alone because a probe that works against a real instance is not worth
+ * re-testing for tidiness.
+ */
+export class TrackerHttpError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+  }
+}
+
+/**
  * One issue tracker. The shell depends on this, not on Switchyard or Jira.
  * `comment` / `transition` are optional and advertised via `capabilities`.
  *

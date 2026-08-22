@@ -4,6 +4,7 @@ import * as http from "node:http";
 import * as path from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import { CONFIG, PERMISSION_MODES, type PermissionMode } from "./config.js";
+import { faults, Health, IdleExit } from "./health.js";
 import { describe, log, type LogFields } from "./log.js";
 import { SessionManager } from "./manager.js";
 import type { PtySession, SpawnOptions } from "./session.js";
@@ -102,6 +103,65 @@ const reaper = new WorktreeReaper({
 // capability is derived from that, so it can't claim more than the backend does.
 const history = new SessionHistoryRecorder(store.history, CONFIG.state.owner);
 manager.useHistory(history);
+
+/**
+ * The conditional arm of DRYDOCK_EXIT_ON_UNCAUGHT (DRY-48).
+ *
+ * Armed by the uncaught-exception handler under `when-idle`, and it exits once
+ * the registry is EMPTY — not once nothing is running. The first cut said
+ * `!some(running)` under a comment claiming a fresh daemon would rebuild the
+ * finished cards from `adoptExited`, and review caught that being false twice
+ * over: a session that ends while this daemon is up has its index files
+ * `forget`ten on the spot (session.ts), and on the path where `adoptExited` IS
+ * reached it deliberately does not put the session back in the registry. So an
+ * exited session is not recoverable by restarting — it is a card on somebody's
+ * desk with readable scrollback, and DRY-60 spent a whole ticket making sure a
+ * finished run survives until somebody has actually SEEN it (five minutes of
+ * VISIBLE time, by default). Exiting the moment the last PTY stops would
+ * discard exactly that, on the host most likely to choose this posture, and
+ * would do it after deliberately waiting for the moment those cards were the
+ * only thing left.
+ *
+ * The daemon cannot tell a read card from an unread one — that clock is the
+ * shell's, because only the browser knows what is on screen — so "nothing left
+ * to lose" is the honest reading: no sessions at all. A ✕, DRY-60's sweep and
+ * `Clear finished` all kill, and a kill leaves the registry synchronously, so a
+ * desk somebody is watching empties on its own. A desk nobody is watching does
+ * not, and this stays up: that is the conservative direction, and never worse
+ * than the `0` posture such a host would otherwise be running.
+ *
+ * The exit is deliberately bare — no `detachAll()`, unlike the signal handlers.
+ * That call exists to say "let go without signalling", and letting the process
+ * end does exactly that: the supervisors are not our children and closing our
+ * socket ends nothing (DRY-57). Doing MORE work in a process we have already
+ * decided is suspect is the wrong direction.
+ */
+const idleExit = new IdleExit({
+  idle: () => manager.list().length === 0,
+  exit: () => {
+    log.error("suspect and idle — exiting so a fresh daemon takes over", {
+      ...inventory(),
+      policy: CONFIG.log.onUncaught,
+    });
+    process.exit(1);
+  },
+});
+
+/**
+ * What state this daemon is in, for /healthz and /readyz (DRY-48).
+ *
+ * Everything it reports on is injected, so health.ts stays a module with
+ * opinions about state rather than one that reaches into the daemon — the same
+ * rule `runs.ts` and the worktree reaper follow. `manager.list()` and not
+ * `listFor`: this endpoint's audience is the HOST, and a census that depended on
+ * who asked would be a strange thing for an operator to read.
+ */
+const health = new Health({
+  sessions: () => manager.list(),
+  store,
+  trackerId: tracker.id,
+  idleExit,
+});
 
 // Permission modes where Claude Code runs tools without asking. In these the
 // PreToolUse hook still fires, but our approve/deny is moot — so we auto-allow
@@ -354,39 +414,61 @@ const server = http.createServer(async (req, res) => {
     let who: Identity | undefined;
 
     if (req.method === "OPTIONS") return send(res, 204, {});
+
+    // --- Liveness (DRY-48) ---------------------------------------------------
+    // Both unauthenticated, like the /healthz this replaces: whatever is asking
+    // whether the daemon is alive is the thing least able to hold a credential,
+    // and a liveness probe that needs a login is a probe nobody can point at a
+    // daemon that has stopped answering.
+    //
+    // What that costs is a deliberate decision rather than an inherited one
+    // (review). On a daemon with auth ON this is the only route besides
+    // /api/auth/{info,login} that answers a stranger, and it now serves more
+    // than `ok` and the store: two host paths (the sessions dir and the log
+    // file), live/exited session counts, and `faults.last` — the message of an
+    // exception this daemon took. Those are kept, because they are the answer to
+    // "what is this daemon and what happened to it", which is the whole ticket,
+    // and because the store's error has carried a path here since DRY-28. What
+    // is NOT kept is somebody ELSE's text: `TrackerWatch` reports "the tracker
+    // answered 500" rather than the 500's body, which on a tracker behind a
+    // proxy is that proxy's error page. The body still goes to the sidebar and
+    // the 502, both behind the gate.
+    //
+    // Two endpoints because they answer to two audiences. /healthz is the
+    // report — everything probed, including the store, whose probe is allowed
+    // to block for the pool's connect timeout when a configured Postgres is
+    // down — inside the store's retry window it answers immediately instead,
+    // with `store.cooling` and `retryInMs` (DRY-58). That is also why nothing
+    // on the deploy path waits on it:
+    // `install-prod.sh` polls /api/sessions instead (DRY-81), and would trade a
+    // false failure under auth for a slow one under a database outage if it
+    // came here. /readyz is what something polls on a timer: narrower,
+    // synchronous, and deliberately blind to the store and the tracker, because
+    // an outage in either costs nobody a PTY and a supervisor acting on one
+    // would restart a daemon that is serving perfectly (DRY-28's first
+    // property).
+    //
+    // /healthz always answers 200 and puts its verdict in the body; /readyz is
+    // the one that speaks in status codes. That split is deliberate rather than
+    // incidental — a report that 503s is a report several things already
+    // watching this endpoint would stop reading (a `fetch` caller checking
+    // `res.ok` gets nothing at exactly the moment the body has the most to
+    // say), and a signal that always answers 200 is not a signal.
+    //
+    // NEITHER is an instruction to restart. `degraded` means suspect or
+    // depending on something broken — restarting for that is what DRY-45 was
+    // written to prevent — and even `down` is more likely to want a human than a
+    // bounce (a vanished sessions dir is not fixed by starting again, it is made
+    // permanent). See health.ts.
     if (pathname === "/healthz") {
-      return send(res, 200, {
-        // `ok` stays an answer about the DAEMON, not about everything it talks
-        // to. A daemon whose workspace store is unreachable spawns, attaches
-        // and replays perfectly well — reporting it as unhealthy would make
-        // anything watching this endpoint act on a fault that costs nobody a
-        // session. The store reports alongside instead, so a degraded one is
-        // visible without being fatal. (DRY-48 is where this endpoint grows a
-        // real opinion about internal state.)
-        //
-        // NB this probe can block for up to the pool's connect timeout when a
-        // configured Postgres is down and its retry window is open. Nothing on
-        // the deploy path waits on it — install-prod.sh polls /api/sessions —
-        // but a monitor pointed here wants a timeout above 5s. Inside the
-        // cooldown it answers immediately with `store.cooling` + `retryInMs`,
-        // which is the difference between "the database is down" and "we're
-        // waiting to find out" (DRY-58).
-        ok: true,
-        sessions: manager.list().length,
-        store: {
-          ...(await store.health()),
-          // What this backend can do, not just whether it's up (DRY-56).
-          //
-          // For an operator, not the shell — this endpoint's audience is
-          // whoever is asking "what is this daemon". The shell learns the same
-          // fact from /api/sessions/history answering 501, which is the answer
-          // it needs at the moment it needs it; making it poll /healthz to
-          // decide would be a second source for one truth. Derived from whether
-          // the port exists, so neither source can drift from what the store
-          // actually implements.
-          capabilities: { sessionHistory: Boolean(store.history) },
-        },
-      });
+      return send(res, 200, await health.report());
+    }
+
+    if (pathname === "/readyz") {
+      const ready = health.readiness();
+      // 503 rather than 200-with-a-field, because the audience is a supervisor
+      // and the status code is the part of this it can act on without parsing.
+      return send(res, ready.ready ? 200 : 503, ready);
     }
 
     // --- Identity (DRY-27) -------------------------------------------------
@@ -1644,7 +1726,7 @@ wss.on("wsClientError", (err, socket) => {
   rejectUpgrade(socket, 400, "bad websocket handshake", { err: err.message });
 });
 
-// --- Crash containment (DRY-45, revised by DRY-57) ---
+// --- Crash containment (DRY-45, revised by DRY-57, reported by DRY-48) ---
 // This process is no longer the lifetime of the sessions it owns. Each PTY is
 // held by its own detached supervisor and found again at boot, so an exit costs
 // a reconnect rather than every agent on the host.
@@ -1652,7 +1734,8 @@ wss.on("wsClientError", (err, socket) => {
 // Two of the three rules survive that change, and one inverts. Still true: never
 // die for a reason that only concerns one client (a bad WebSocket frame, a
 // vanished SSE reader), and always leave a trace when we do die. No longer true:
-// that staying up in a suspect state beats exiting — see CONFIG.log.exitOnUncaught.
+// that staying up in a suspect state beats exiting — see CONFIG.log.onUncaught,
+// which since DRY-48 is a policy rather than a boolean, and the faults it counts.
 
 /**
  * One-line census of what's at stake, for the log lines that precede a death.
@@ -1670,24 +1753,44 @@ function inventory(): LogFields {
 }
 
 process.on("uncaughtException", (err) => {
+  // Recorded BEFORE the log line, so a process that exits on the next statement
+  // has still counted the fault — and so a `/healthz` polled between the throw
+  // and a `when-idle` exit says what happened. `faults.record` cannot throw by
+  // construction (health.ts), which is the same constraint `describe` is
+  // written to: a TypeError raised INSIDE this handler is fatal (Node exits 7),
+  // and a crash handler with its own crash path is worse than no handler.
+  faults.record("uncaughtException", err);
   // describe() rather than err.message: `throw null` makes that dereference a
-  // TypeError, and a TypeError raised INSIDE this handler is fatal (Node exits
-  // 7) — a crash handler with its own crash path is worse than no handler.
-  // Stack goes in as a field so the record stays one greppable line.
+  // TypeError. Stack goes in as a field so the record stays one greppable line.
   log.error("UNCAUGHT EXCEPTION", {
     ...describe(err),
     ...inventory(),
-    action: CONFIG.log.exitOnUncaught ? "exiting" : "staying up",
+    action: {
+      exit: "exiting",
+      stay: "staying up",
+      "when-idle": "staying up until nothing is running",
+    }[CONFIG.log.onUncaught],
+    faults: faults.total,
   });
   // Node's default here is to die, and since DRY-57 we let it: the sessions
   // outlive us and a fresh daemon reattaches to them, which beats serving the
-  // shell from a process in an unknown state. DRYDOCK_EXIT_ON_UNCAUGHT=0 keeps
-  // the old wedged-but-attached posture (see config.ts).
-  if (CONFIG.log.exitOnUncaught) process.exit(1);
+  // shell from a process in an unknown state. The other two postures are
+  // DRYDOCK_EXIT_ON_UNCAUGHT=0 (wedged-but-attached, what shipped before
+  // DRY-57) and =idle (DRY-48) — see config.ts.
+  if (CONFIG.log.onUncaught === "exit") process.exit(1);
+  if (CONFIG.log.onUncaught === "when-idle") idleExit.arm();
 });
 
 process.on("unhandledRejection", (reason) => {
-  log.error("UNHANDLED REJECTION", { ...describe(reason), ...inventory() });
+  faults.record("unhandledRejection", reason);
+  log.error("UNHANDLED REJECTION", { ...describe(reason), ...inventory(), faults: faults.total });
+  // Deliberately not routed through the exit policy, which is about uncaught
+  // EXCEPTIONS and says so in its name. A rejection leaves a far narrower dent —
+  // one promise chain failed, rather than an arbitrary point in a synchronous
+  // run being abandoned mid-way — and it has never exited this daemon, so
+  // routing it here would smuggle a real behaviour change into a ticket about
+  // reporting. It is counted, so /healthz reports the process as suspect, which
+  // is what DRY-48 was actually asked for.
 });
 
 // A shutdown no longer destroys anything. Let go of each supervisor without
