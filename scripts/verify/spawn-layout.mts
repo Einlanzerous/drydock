@@ -63,9 +63,11 @@
 //
 // VERBOSE=1 prints every rectangle it measures.
 //
-// Afterwards: `rm -rf /tmp/d93 /tmp/dry93-*`, and kill the supervisors it
-// leaves behind (CLAUDE.md's loop over /proc/<pid>/exe, never
-// `pkill -f supervisor/main`).
+// Afterwards, IN THIS ORDER: kill the supervisors it leaves behind (CLAUDE.md's
+// loop over /proc/<pid>/exe, never `pkill -f supervisor/main`), and only then
+// `rm -rf /tmp/d93 /tmp/dry93-*`. The other way round deletes the only handle
+// anything has on those processes, leaving stub CLIs and `sleep 900` shells no
+// daemon can ever find — CLAUDE.md says so from having done it.
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import type { Detail, SessionsResponse, WorkspaceResponse } from "./api.mjs";
 
@@ -304,8 +306,18 @@ async function landed(
       inside(isNew, desk, RAIL_HEIGHT),
       `${fmt(isNew)} in ${fmt(desk)}`,
     );
-    // Uniform cells is what tiling MEANS, and it is the check a window dropped
-    // at its own float rect fails — containment alone would pass it.
+    // Uniform cells is what tiling MEANS. Both of the checks below are kept and
+    // they do NOT cover the same ground, which is worth knowing before trimming
+    // either: windows added by `reconcile` all take `add()`'s 632×462 defaults,
+    // so in the PALETTE spawn every frame is that size whether it is a tiled
+    // cell or a float rect, and `odd` comes back empty against the bug too.
+    // `nothing overlaps` is what fires there — `cascade()` offsets 30/26px
+    // against 632×462 windows, so float rects pile up. Measured against the
+    // pre-fix tree: overlap fails in all three spawns, uniformity only from the
+    // ticket spawn on, once the workspace's 760×620 window is on the desk.
+    // Uniformity earns its place on the other side — a desk laid out without
+    // overlaps that is still not one grid (a focus strip) passes the overlap
+    // check and fails this one.
     const odd = f.filter((w) => Math.abs(w.w - isNew.w) > 3 || Math.abs(w.h - isNew.h) > 3);
     check(`${label}: every window is a cell of one grid`, odd.length === 0, odd.map(fmt).join(" | "));
     const hits = f.flatMap((a, i) =>
