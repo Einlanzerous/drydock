@@ -39,7 +39,15 @@ import { AsyncLocalStorage } from "node:async_hooks";
  * beyond its per-request backstop — which is deliberate for `getTicket`, see
  * below.
  *
- * ## What is deliberately NOT wrapped
+ * ## What is wrapped, and what deliberately is not
+ *
+ * `listTickets` and `searchTickets`, each under its OWN name. The second
+ * delegates into the first, so it would inherit the budget anyway — it is
+ * wrapped for the label, because a nested `withDeadline` is a passthrough and
+ * the outer name is what a blown budget reports. The palette's search route is
+ * the one tracker path with no cache in front of it, so that message is read
+ * directly by a person, and "ticket list exceeded its deadline" would name an
+ * operation they never asked for.
  *
  * `getTicket` — the SessionStart brief (DRY-53). Its optional decorations
  * already carry tighter budgets of their own (`extrasDeadline`,

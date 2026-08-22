@@ -499,7 +499,24 @@ export class SwitchyardProvider implements TrackerProvider {
     return { rows: out, truncated: paginate && !!cursor };
   }
 
+  /**
+   * The Ctrl+K palette's search, under its own deadline (DRY-61).
+   *
+   * Wrapped rather than left to inherit `listTickets`' deadline, even though it
+   * delegates straight into it: `withDeadline` nests as a passthrough, so the OUTER label
+   * is the one a blown budget reports — and this route is uncached, so unlike
+   * the sidebar's pull there is no last-good list to fall back on and the
+   * message goes straight to the palette. "switchyard ticket list exceeded its
+   * 10000ms deadline" would name an operation the user never asked for. Same
+   * budget, because it is the same tracker doing the same kind of work.
+   */
   async searchTickets(text: string, projects?: string[]): Promise<Ticket[]> {
+    return withDeadline(this.listTimeoutMs, "switchyard ticket search", () =>
+      this.searchWithin(text, projects),
+    );
+  }
+
+  private async searchWithin(text: string, projects?: string[]): Promise<Ticket[]> {
     // Search spans all statuses (you're looking for a specific ticket) but
     // stays inside the project scope (DRY-30).
     return this.listTickets({ text, projects, limit: 50 });

@@ -405,7 +405,7 @@ backstop 8s, so the clock says which one ended the pull.
 
 | harness | what it holds down |
 |---|---|
-| `tracker-deadline.mts` | A partitioned tracker (accepts, then silence) is answered on the daemon's OPERATION clock, not `requests × request-backstop`, and the 502 names the tracker and the deadline rather than saying "signal timed out". A tracker that is merely SLOW — every request succeeding well inside its own budget — is bounded too, which is the case a per-request timeout structurally cannot reach. With a list already cached, blowing the deadline costs the refresh and not the sidebar: 200, rows intact, `stale` set. And upstream sockets stop piling up wave on wave, which is the half the browser cannot see. |
+| `tracker-deadline.mts` | A partitioned tracker (accepts, then silence) is answered on the daemon's OPERATION clock, not `requests × request-backstop`, and the 502 names the tracker and the deadline rather than saying "signal timed out". A tracker that is merely SLOW — every request succeeding well inside its own budget — is bounded too, which is the case a per-request timeout structurally cannot reach. With a list already cached, blowing the deadline costs the refresh and not the sidebar: 200, rows intact, `stale` set. Upstream sockets stop piling up wave on wave, which is the half the browser cannot see. And the palette's search — the one tracker route with no cache in front of it, so its message is read directly — is bounded under its own name rather than reporting itself as a ticket list. |
 
 Turn the deadlines down, and the harness insists on it: the shipping values (10s
 operation, 20s request) are correct in prod and useless here, so it reads both
@@ -434,12 +434,18 @@ deadline off and everything else unchanged:
 DRYDOCK_TRACKER_LIST_TIMEOUT_MS=0    # …rest of the env as above
 ```
 
-Expect **7 failures**, and expect the numbers to be the diagnosis: the hung pull
-answering `8010ms` against a 3000ms deadline, its message reading
+Leave the harness's own `LIST_TIMEOUT_MS` alone — it stays 3000. Those variables
+tell it what the daemon's deadlines are *supposed* to be; here it is measuring
+one that has been taken away, and zeroing it too would only make it refuse to
+run.
+
+Expect **9 failures**, and expect the numbers to be the diagnosis: the hung pull
+answering `8005ms` against a 3000ms deadline, its message reading
 `TimeoutError: The operation was aborted due to timeout` instead of naming
 Switchyard, a slow-but-healthy tracker answering `200` at `6322ms` with nothing
-marked stale, and wave 2 landing on top of wave 1 — `8 in flight during wave 1,
-16 during wave 2`.
+marked stale, wave 2 landing on top of wave 1 — `8 in flight during wave 1, 16
+during wave 2` — and the palette's search giving up on the same 8s request clock
+under the same anonymous message.
 
 ## Expanding an epic to its children (DRY-83)
 
@@ -1935,9 +1941,16 @@ some other route ever needs the same treatment); `PG_PROXY_PORT` / `PG_PORT` /
 `DAEMON_URL` / `STUB_URL` for `tracker-cache.mts` and `tracker-deadline.mts`,
 plus `LIST_TIMEOUT_MS` / `REQUEST_TIMEOUT_MS` for the latter — those two are the
 harness being TOLD the daemon's two deadlines, not setting them, so they must
-match the `DRYDOCK_TRACKER_*` values the daemon actually booted with. The whole
-file is an argument about which of the two ended a pull; told the wrong numbers
-it makes that argument confidently and wrongly.
+match the `DRYDOCK_TRACKER_*` values the daemon booted with. The whole file is an
+argument about which of the two ended a pull; told the wrong numbers it makes
+that argument confidently and wrongly.
+
+**Except in that harness's discriminator run**, which is the one place the two
+deliberately disagree: the daemon boots with `DRYDOCK_TRACKER_LIST_TIMEOUT_MS=0`
+and the harness KEEPS `LIST_TIMEOUT_MS=3000`, because it is being told the
+deadline the daemon is supposed to have and is measuring its absence. Zeroing it
+there instead would trip the refuse-to-run gate and report "rig not usable" on
+the one run that proves the harness discriminates (review).
 
 **`DAEMON` must point at whatever `proxy-http.mts` forwards to.** Getting that
 wrong makes the harness assert against a different daemon than the browser is

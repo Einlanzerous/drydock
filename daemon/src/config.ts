@@ -594,8 +594,9 @@ export const CONFIG = {
      *
      * The sidebar polls every 20s per browser tab and a corporate Jira pull
      * measures 5.7-6s, so uncached this was a permanent ~30% duty cycle against
-     * the tracker per tab — enough that the browser's own 12s budget tripped on
-     * ordinary load. See tracker/cache.ts for why this is stale-while-revalidate
+     * the tracker per tab — enough that the browser's budget of the day (12s,
+     * and 15s since DRY-61) tripped on ordinary load. See tracker/cache.ts for
+     * why this is stale-while-revalidate
      * rather than a plain TTL; nothing here makes a client wait longer, it only
      * bounds how old an answer can be.
      */
@@ -624,9 +625,9 @@ export const CONFIG = {
      * Deadline on a single tracker HTTP request (DRY-72).
      *
      * The providers had none, and nothing propagates a client's abort, so when
-     * the shell gave up at 12s the daemon kept walking pages for a browser that
-     * had stopped listening — and 8s later the next poll started a second
-     * fan-out on top of it. Generous rather than tight: since the cache moved
+     * the shell gave up — at 12s, as it then was — the daemon kept walking pages
+     * for a browser that had stopped listening, and 8s later the next poll
+     * started a second fan-out on top of it. Generous rather than tight: since the cache moved
      * these off the request path, blowing this costs a background refresh, not a
      * sidebar. A caller with its own tighter budget (the SessionStart brief's
      * extras) keeps it.
@@ -649,7 +650,10 @@ export const CONFIG = {
      * bound on the operation, which is what a caller actually waits for.
      *
      * A pull is a cursor chain for the list, a second for the epic exemption,
-     * then the child-stats pass — one chain per epic on Switchyard. Against a
+     * then the child-stats pass — one chain per epic on Switchyard. The Ctrl+K
+     * palette's search takes the same budget under its own name, and is the one
+     * caller with no cache in front of it, so a blown deadline there is what the
+     * palette renders rather than a background refresh nobody sees. Against a
      * tracker that ACCEPTS connections and then goes silent, each of those dies
      * at `requestTimeoutMs` and the next one starts, so the pull runs for
      * roughly requests × 20s while `/api/tracker/tickets` holds its response

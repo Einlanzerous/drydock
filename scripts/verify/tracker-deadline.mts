@@ -35,6 +35,8 @@
 //       not the sidebar: 200, rows intact, `stale` set (DRY-55/DRY-72's rule).
 //   (d) the sockets stop accumulating — the half the browser cannot see, and
 //       the reason this isn't just a nicer error message.
+//   (e) the palette's search is bounded too, under its OWN name. Its route has
+//       no cache in front of it, so that message is what a person reads.
 //
 // Sections (a) and (d) each carry one GUARD that passes in both worlds and says
 // so where it stands: "a 502, not a hang" (the pre-fix daemon 502s too, just
@@ -262,6 +264,25 @@ try {
   const drained = await drain(LIST_MS * 2);
   const idle = (await stubState()).inflight;
   check("no socket is left behind by a pull that gave up", idle === 0, `${idle} in flight after ${drained}ms`);
+  console.log("\n(e) the palette's search is bounded too, and names itself");
+  // `searchTickets` delegates into `listTickets`, so it would inherit the budget
+  // whatever happened — this is about the LABEL. `/api/tracker/search` is the
+  // one tracker route with no cache in front of it, so a blown deadline is read
+  // directly by whoever pressed Ctrl+K, and "ticket list" would name an
+  // operation they never asked for. Still hung from (d).
+  const t0 = Date.now();
+  const searched = await fetch(`${DAEMON}/api/tracker/search?q=cache`, {
+    signal: AbortSignal.timeout(REQUEST_MS * 3),
+  })
+    .then(async (r) => ({ status: r.status, body: (await r.json()) as { error?: string } }))
+    .catch((e) => ({ status: 0, body: { error: String(e) } }));
+  const searchMs = Date.now() - t0;
+  check("the search gives up on the operation clock", atOperationDeadline(searchMs), `${searchMs}ms`);
+  check(
+    "and calls itself a search, not a list",
+    /switchyard ticket search exceeded/.test(searched.body.error ?? ""),
+    (searched.body.error ?? `(status ${searched.status})`).slice(0, 140),
+  );
 } finally {
   await ctl("/__heal").catch(() => {});
   await ctl("/__latency?ms=0").catch(() => {});

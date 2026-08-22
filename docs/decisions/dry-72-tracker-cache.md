@@ -4,8 +4,9 @@ Until this, nothing in the tracker path cached anything: `/api/tracker/tickets`
 went straight at the provider, and the sidebar polls it every 20s **per browser
 tab**. Measured against a corporate Jira (3 projects, ~225 open) one pull runs
 **5.7-6s** — three cursor pages plus a `parent in (…)` child query — so the
-browser's own 12s budget was tripping on ordinary load, and every abort left the
-daemon still walking pages for a client that had stopped listening.
+browser's own budget (12s then, 15s since DRY-61) was tripping on ordinary
+load, and every abort left the daemon still walking pages for a client that had
+stopped listening.
 
 Now the daemon answers from memory and refreshes behind the response
 (`daemon/src/tracker/cache.ts`), child stats sit on a much longer TTL, every
@@ -42,8 +43,9 @@ outage. The traps:
 3a. **Staleness is reported by AGE as well as by failure**, because the cache
    removed a signal that used to be free. A tracker that is slow rather than
    broken — every request succeeding, the whole page-walk taking minutes — used
-   to trip the browser's 12s budget and report. Now the browser is answered
-   instantly and nothing fails, so without an age test the sidebar presents an
+   to trip the browser's budget (12s then) and report. Now the browser is
+   answered instantly and nothing fails, so without an age test the sidebar
+   presents an
    arbitrarily old list as live. The per-request deadline does not help: it
    bounds one request, so N pages cost N × it. (DRY-61 later bounded the whole
    pull as well, which puts a ceiling on that N × it — but the age test is still

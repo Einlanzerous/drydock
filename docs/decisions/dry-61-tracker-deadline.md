@@ -81,10 +81,21 @@ README. The traps:
    the existing decoration catch, so the pull returns a real list with no
    progress bars rather than failing. That is the right outcome, and it means
    "the deadline fired" and "the pull failed" are not the same event.
-9. **The knob goes through `msOrOff`, not `num()`** — DRY-60's trap 9 again. 0
+9. **The deadline is now the effective page cap on a slow Jira**, ahead of
+   `MAX_TICKETS`, and that is a consequence rather than a bug (review). That
+   backstop allows twenty sequential pages, which at 10s for the whole pull is
+   unreachable on any instance slower than ~500ms a page — so what bounds a big
+   pull is the clock, not the count. It is the better of the two bounds for a
+   sidebar (a person is waiting, and a truncated list is still a list), but a
+   host that genuinely needs twenty pages has to raise the knob rather than
+   wonder why `MAX_TICKETS` never fires. Note what is NOT affected: the
+   child-stats pass, which is where the twenty-page walk actually happens, comes
+   after the list and is swallowed — so a deadline that blows there costs the
+   progress bars, not the rows.
+10. **The knob goes through `msOrOff`, not `num()`** — DRY-60's trap 9 again. 0
    means "no operation deadline", which is the pre-DRY-61 behaviour and a real
    posture to want back while chasing a tracker that is merely very slow.
-10. **The existing hang case structurally could not have caught this**, and it
+11. **The existing hang case structurally could not have caught this**, and it
     passes against the bug. `tracker-cache.mts` (h) runs with the per-request
     deadline at 3s and a pull that is ONE request long, so the pull ends at 3s in
     both worlds. Two deadlines are only distinguishable when the rig separates
@@ -92,7 +103,7 @@ README. The traps:
     assertion is a TIMING or an upstream socket count. Never a status code — 502
     is the answer before and after on the cases that answer at all (CLAUDE.md
     trap 3).
-11. **A new error class has to answer to `/healthz` too (DRY-48, merged while
+12. **A new error class has to answer to `/healthz` too (DRY-48, merged while
     this was in flight).** `TrackerWatch.failed` reports the error's NAME and
     never its message — upstream text must not reach the one route that answers
     an anonymous caller on a daemon with auth on — so an error that leaves
@@ -105,7 +116,7 @@ README. The traps:
     the caller-fault exemption still works: a 404 on a keyed pull propagates
     unconverted, because the deadline only rewrites an error when the budget is
     actually gone.
-12. **Be accurate about how much accumulation was left.** DRY-72's single-flight
+13. **Be accurate about how much accumulation was left.** DRY-72's single-flight
     means N polls of the SAME query already share one upstream fan-out, so the
     per-tab pile-up the ticket describes is bounded per cache KEY, not per poll.
     What still accumulated is one hung pull per distinct key — a second browser
