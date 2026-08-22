@@ -36,7 +36,7 @@ import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Detail, SessionsResponse, SpawnResponse } from "./api.mjs";
+import type { Detail, FileResponse, SessionsResponse, SpawnResponse } from "./api.mjs";
 
 const DAEMON = process.env.DAEMON ?? "http://127.0.0.1:4366";
 
@@ -48,11 +48,6 @@ const check = (n: string, ok: boolean, d: Detail = "") => {
 };
 
 interface ErrorResponse {
-  error?: string;
-}
-interface FileResponse {
-  path?: string;
-  content?: string;
   error?: string;
 }
 

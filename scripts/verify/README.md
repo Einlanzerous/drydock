@@ -47,6 +47,12 @@ Three groups:
   daemon, no browser, seconds. Run it when touching `daemon/src/spawn-env.ts`,
   the spawn route's body handling, or `INHERITED_SESSION_MARKERS` — the last of
   which now has two readers, since the route refuses what the supervisor strips.
+- **A run's output over HTTP (DRY-63)** —
+  [its own section](#a-runs-output-over-http-dry-63). A throwaway daemon, no
+  browser, about a minute. Run it when touching the `/transcript` or `/file`
+  routes, `PtySession.transcript()`/`stripAnsi`, or anything that changes when a
+  session leaves the registry — the route can only answer for a session the
+  sweep has not cleared.
 - **A prod deploy keeps the sessions (DRY-87)** —
   [its own section](#a-prod-deploy-keeps-the-sessions-dry-87). Owns its own
   systemd unit; no browser, about thirty seconds. Run it when touching
@@ -754,14 +760,35 @@ a window B opened on purpose — so `=== 0` would fail against correct behaviour
 and (worse) written before the watch step existed it would have passed
 vacuously.
 
-Teardown: kill the daemons by EXECUTABLE, never by pattern — `pgrep -f "tsx
-src/index.ts"` also matches the shell whose command line contains that string,
-which is CLAUDE.md's `pkill -f supervisor/main` footgun one pattern over.
+Teardown needs TWO filters, and the executable is only the first of them. This
+block used to be exe-only (found by the DRY-63 review), and exe-only is not a
+narrowing at all for the supervisors: `pgrep -f "supervisor/main"` matches every
+supervisor on the machine and they are all the same `node` binary, so it
+`kill -9`s the dev daemon's live agents and prod's (`:4318`) along with these
+three. CLAUDE.md names this exact failure — "an exe-only loop kills live agents
+belonging to daemons you are not testing, including the one holding the terminal
+you are typing in".
+
+So: the exe test excludes the shell running the loop (whose command line
+contains both literals), and the throwaway `DRYDOCK_SESSIONS_DIR` — unique to
+these three daemons and present in every one of their supervisors' argv — is
+what excludes everybody else's agents. Supervisors FIRST, then the daemons, then
+the directories.
 
 ```sh
-for p in $(pgrep -f "tsx src/index.ts") $(pgrep -f "supervisor/main"); do
-  case "$(readlink /proc/$p/exe)" in *node*) kill -9 "$p";; esac
+# supervisors: exe AND this rig's own sessions dir
+for p in $(pgrep -f "supervisor/main"); do
+  case "$(readlink /proc/$p/exe)" in *node*)
+    tr '\0' ' ' < /proc/$p/cmdline | grep -q "/tmp/dry27s-" && kill -9 "$p";;
+  esac
 done
+# daemons: exe AND cwd, since other worktrees run their own
+for p in $(pgrep -f "src/index.ts"); do
+  case "$(readlink /proc/$p/exe)" in *node*)
+    case "$(readlink /proc/$p/cwd)" in *<your-worktree>*) kill "$p";; esac;;
+  esac
+done
+rm -rf /tmp/dry27s-off /tmp/dry27s-single /tmp/dry27s-multi
 docker rm -f dry27-db
 ```
 
@@ -1028,6 +1055,115 @@ so a reader who runs this and sees a different total cannot tell a stale doc fro
 a harness that has quietly gained or lost assertions. **Re-measure both numbers
 when adding a case here** — do not count them by hand, which is how they were
 wrong.
+
+## A run's output over HTTP (DRY-63)
+
+Two throwaway daemons and nothing else — no browser, no database, no tracker.
+About a minute, most of it spent printing megabytes through a PTY.
+
+```sh
+(cd daemon && env $(env | grep -o '^DRYDOCK_[A-Z_0-9]*' | sed 's/^/-u /' | tr '\n' ' ') \
+   DRYDOCK_PORT=4363 DRYDOCK_HOST=127.0.0.1 DRYDOCK_TRACKER=fixture \
+   DRYDOCK_SESSIONS_DIR=/tmp/d63 DRYDOCK_STATE_FILE=/tmp/dry63-state.json \
+   DRYDOCK_WORKTREES_ROOT=/tmp/dry63-wt DRYDOCK_RUNS_ROOT=/tmp/dry63-runs \
+   DRYDOCK_SCROLLBACK_BYTES=4194304 node --import tsx src/index.ts &)
+
+(cd daemon && env $(env | grep -o '^DRYDOCK_[A-Z_0-9]*' | sed 's/^/-u /' | tr '\n' ' ') \
+   DRYDOCK_PORT=4364 DRYDOCK_HOST=127.0.0.1 DRYDOCK_TRACKER=fixture \
+   DRYDOCK_SESSIONS_DIR=/tmp/d63b DRYDOCK_STATE_FILE=/tmp/dry63b-state.json \
+   DRYDOCK_WORKTREES_ROOT=/tmp/dry63-wt DRYDOCK_RUNS_ROOT=/tmp/dry63-runs \
+   DRYDOCK_SCROLLBACK_BYTES=16384 node --import tsx src/index.ts &)
+
+(cd daemon && node --import tsx ../scripts/verify/run-result.mts)
+```
+
+**Both, not one.** This block launched only `:4363` until review caught it,
+while the bullets below already said the second was required — and `skip()`
+does not touch the exit code, so a paste of the one-daemon version ended
+`all passed (2 skipped)` having silently dropped the only sections that can see
+either ring-loss defect. That is the failure mode this whole directory is
+against, in the documentation rather than the code.
+
+Three things about that rig are load-bearing rather than tidy:
+
+- **Two daemons, with rings on opposite sides of the cap.** :4363 at 4 MiB and
+  :4364 at 16 KB, on separate sessions dirs — shared, each would adopt the
+  other's agents at boot (CLAUDE.md: the sessions dir is per-port on purpose).
+  Section 5 SKIPS rather than passing when :4364 is absent.
+- **`DRYDOCK_SCROLLBACK_BYTES=4194304`.** The route caps its response at 1 MiB
+  and the ring defaults to the same 1 MiB, so at the default the ring trims the
+  output *before* the route ever sees a megabyte and the truncation branch is
+  unreachable. Left unset, that whole section would go green having exercised
+  nothing. The harness fails rather than passes if it finds an untruncated
+  response, and names this variable in the failure line.
+- **`DRYDOCK_RUNS_ROOT`.** The handoff section starts two autonomous runs, and
+  unset they write into `~/.drydock/runs`, which the dev and prod daemons share.
+  It must also not sit *under* the session cwd the harness creates, or the
+  "another session's handoff is refused" probe is answered by the ordinary
+  cwd-confinement rule and proves nothing about the arm being tested. The
+  harness compares the two paths itself and **skips** rather than passing.
+
+**Run it from a shell still carrying the prod daemon's config and you will test
+the prod daemon.** CLAUDE.md's `env -u` list applies here in full — hence its
+appearance in the rig above rather than a note underneath it.
+
+What it holds down:
+
+- **A record that arrives is not a record that parses.** The result event is one
+  ~420-byte JSON line going through an 80-column PTY and then through
+  `stripAnsi`; every layer can hand back something that still *contains*
+  `total_cost_usd` and no longer parses. So the harness prints a real captured
+  event, `JSON.parse`s it out of the response, and asserts on
+  `total_cost_usd === 0.089832` — a number nothing else on the host emits.
+  Escape noise is printed on both sides of it, because a strip one character too
+  greedy eats the leading `{`.
+- **The cap keeps the TAIL.** The result event is emitted when a run *ends*, so
+  head-truncation would discard exactly the payload the route exists for. The
+  first surviving line is matched whole, which is the line-boundary cut.
+- **And the search for that line boundary is bounded** (section 2b). Output
+  that is one long line keeps its only newline at the very end, so an unbounded
+  snap skips over the whole megabyte it just kept — measured at **1 byte
+  returned** for a 2.6 MB run before `LINE_SNAP_BYTES`. This is the only case
+  here that caught a bug rather than confirming a decision; the payload is
+  multi-byte on purpose, since the fallback path has no line to cut on and only
+  non-ASCII can show a cut landing mid-character.
+- **`bytes` describes the payload it ships with**, not what was captured.
+- **`complete` answers the question `truncated` cannot** (section 5, and the
+  reason the rig needs a second daemon). `truncated` reports one thing: this
+  response hit the HTTP cap. At default config the ring is the SAME 1 MiB and
+  trims below it, so on a normal daemon a run that printed 8 MiB comes back
+  `truncated: false` with most of itself missing — which is how the route read
+  until the DRY-63 review. The small-ring daemon reproduces that in seconds:
+  the harness asserts the head marker is gone *from the bytes*, that `truncated`
+  is nonetheless false, and that `complete` is false. Removing the one line in
+  `session.ts` that records a ring drop turns that last check red and nothing
+  else, which is what makes it worth its own daemon — section 2's version of the
+  claim passes on `!truncated` alone.
+- **And the supervisor's ring counts too** (section 5b, the second review's
+  🔴). A supervisor spawns its PTY before it binds its socket, so a command that
+  prints fast has already overflowed *its* ring before any daemon can attach —
+  and if nothing is printed afterwards the daemon's own trim never fires, so a
+  session it spawned itself came back `complete: true` over a hole. Closed by an
+  optional `dropped` on `SupervisorHello`; **no PROTOCOL_VERSION bump**, per the
+  policy `wire.ts` already states for `SessionMeta.owner`.
+- **`/file` serves this session's own handoff and nothing else** — three
+  negative probes beside the positive one.
+
+Discrimination (see [the section below](#making-sure-a-harness-still-discriminates)):
+against `main` it fails **28 of 35**. Seven survive, and all seven should — the
+unknown-id 404, the three negative handoff probes, the ordinary in-cwd read, and
+the two checks on files the harness wrote itself (the decoy, and 5b's payload). They are answered by code
+this ticket did not touch, so they are green either way; a harness made only of
+those would look identical on a build with none of the feature in it.
+
+Three more used to survive, and finding them is the reason to run this rather
+than assume it: `no escape sequences survive`, `it stayed under the cap` and
+`the head was the half dropped` were all satisfied by an **empty** response, so
+a route that had stopped answering entirely still showed three green lines. They
+carry `text.length` guards now. A fourth — the runsRoot decoy probe — was
+passing only because a leftover file from hand-testing happened to be on disk,
+and answered 404 rather than 403 the moment the rig was cleaned; the harness
+writes that file itself now. **Re-measure both numbers when adding a case here.**
 
 ## Reaping finished worktrees (DRY-90)
 
@@ -1795,6 +1931,20 @@ file disagreed about epic-children — 5 here, 10 in
 right one. A count that drifts in the safe direction is how the next
 re-validation gets read as a regression, which is the same warning the `perl`
 recipes below carry.
+
+`run-result.mts` (DRY-63) is deliberately absent from that block, because while
+it is written `main` genuinely *is* the pre-fix tree — the recipe in its own
+header says `git show main:daemon/src/server.ts > daemon/src/server.ts`, which
+is the state every recipe above was written in and the state all of them rotted
+out of. **Whoever merges it owes this section the replacement**, naming the
+commit before its own merge, or the same false green happens a fourth time.
+
+Two things about that recipe are worth copying rather than the count. It
+restores with `cp` from a copy taken first, not `git checkout` — a `checkout`
+leaves the revert **staged**, and the next commit carries it. And the daemon has
+to be restarted between the two runs: the rig above starts it without `--watch`,
+so unlike the Vite harnesses nothing picks up the swapped file on its own, and a
+run started against the old process reports the result you were hoping for.
 
 `sweep.mts` has no pre-DRY-60 file to check out — there was no sweep to break —
 so it was validated by breaking its load-bearing rules instead, a line each.

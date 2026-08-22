@@ -276,6 +276,7 @@ Sessions, spawning and the supervisor:
 | [dry-64-exit-events](docs/decisions/dry-64-exit-events.md) | `session-exit` on the event stream, and why it isn't wired to `onRunEnd` |
 | [dry-90-worktree-reaper](docs/decisions/dry-90-worktree-reaper.md) | when a worktree may be deleted; liveness is read from every daemon's index, not this one's |
 | [dry-48-health](docs/decisions/dry-48-health.md) | `/healthz` and `/readyz` — what makes a daemon suspect, and why `degraded` must never read as `down` |
+| [dry-63-run-result](docs/decisions/dry-63-run-result.md) | reading a run's output back over HTTP — the one stream nothing else captures |
 
 Identity, state and deploy:
 

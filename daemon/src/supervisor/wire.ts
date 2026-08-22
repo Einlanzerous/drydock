@@ -126,6 +126,28 @@ export interface SupervisorHello {
   startedAt: number;
   cols: number;
   rows: number;
+  /**
+   * Bytes this supervisor's ring has discarded, at the moment of this greeting
+   * (DRY-63).
+   *
+   * The daemon cannot re-derive it, and that is the point. A supervisor spawns
+   * its PTY before it binds its socket, and the daemon then polls for that
+   * socket before it can attach — so a command that prints fast has already
+   * overflowed the ring by the time anybody is listening, and what arrives on
+   * `Replay` is the ring as trimmed rather than the run. Without this the
+   * daemon believes it holds a complete transcript for a session it spawned
+   * itself, which is what `/api/sessions/:id/transcript` then tells a consumer.
+   *
+   * Optional, and — like `SessionMeta.owner` above — NOT a reason to bump
+   * PROTOCOL_VERSION. That integer guards against a field whose MEANING
+   * changed, because guessing at one strands a live agent (CLAUDE.md). This one
+   * is additive and safe in both directions: an older supervisor omits it and a
+   * newer daemon reads the absence as "cannot vouch", which is the pessimistic
+   * answer it would have given anyway; an older daemon decodes the frame as
+   * JSON and ignores a key it does not know. Bumping would make every running
+   * session on the host undrivable to buy nothing.
+   */
+  dropped?: number;
 }
 
 /**
