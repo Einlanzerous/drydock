@@ -5,9 +5,14 @@
 #   push to main      :latest and :<full sha>. No semver — main is not a release.
 #   workflow_call     the semver tags, called by release-please.yml in the same
 #                     run that cut the release (SERV-125). The real release path.
-#   workflow_dispatch re-publish by hand. Run it against a tag ref and the version
-#                     is read from that ref, which is how a release cut before
-#                     this file was fixed gets back-published.
+#   workflow_dispatch pass a `tag` to publish that release's image; leave it empty
+#                     to rebuild the dispatched branch. It has to be an INPUT and
+#                     not a dispatched tag ref: `workflow_dispatch` reads the
+#                     workflow definition from the ref you dispatch, so at an old
+#                     tag it would run that tag's copy of this file — the one with
+#                     no semver logic in it. Taking the tag as an input runs THIS
+#                     file, from main, against an old tag, which is what
+#                     back-publishes a release cut before the fix landed.
 #
 # WHY THE RELEASE PATH IS A CALL AND NOT `on: push: tags` (SERV-125). Until this
 # change no versioned image had ever been published here, so construct-server had
@@ -40,6 +45,12 @@ on:
         default: false
         type: boolean
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (e.g. v1.7.0). Empty rebuilds the dispatched branch."
+        required: false
+        default: ""
+        type: string
 
 jobs:
   build-push:
@@ -50,7 +61,7 @@ jobs:
     env:
       IMAGE: ghcr.io/einlanzerous/drydock/shell
     steps:
-      - name: Resolve the release version
+      - name: Resolve the version and the commit to build
         # Empty on an ordinary main push, and that emptiness is what selects the
         # :latest + :<sha> tag set below instead of the semver one.
         #
@@ -65,6 +76,7 @@ jobs:
           CALLED_TAG: ${{ inputs.tag }}
           REF_NAME: ${{ github.ref_name }}
           REF_TYPE: ${{ github.ref_type }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
 
@@ -83,13 +95,13 @@ jobs:
           fi
 
           if [ -n "${CALLED_TAG:-}" ]; then
-            version="${CALLED_TAG#v}"
-            source="workflow_call (tag $CALLED_TAG)"
+            version="${CALLED_TAG#v}"; build_ref="$CALLED_TAG"
+            source="tag input ($CALLED_TAG)"
           elif [ "$REF_TYPE" = tag ]; then
-            version="${REF_NAME#v}"
-            source="dispatched at tag $REF_NAME"
+            version="${REF_NAME#v}"; build_ref="$SHA"
+            source="pushed tag $REF_NAME"
           else
-            version=""
+            version=""; build_ref="$SHA"
             source="branch build — no semver tags"
           fi
 
@@ -99,12 +111,29 @@ jobs:
           # workflow is being fixed for.
           if [ -n "$version" ] && ! printf '%s' "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+'; then
             echo "Error: '$version' is not a semver, so no semver image tag would be published."
-            echo "Dispatch this workflow against a v* tag ref, or call it with a v* tag."
             exit 1
           fi
 
-          echo "SEMVER=$version" >> "$GITHUB_ENV"
+          {
+            echo "SEMVER=$version"
+            echo "BUILD_REF=$build_ref"
+          } >> "$GITHUB_ENV"
           echo "Version source: $source"
+          echo "Building: $build_ref"
+
+      - uses: actions/checkout@v4
+        with:
+          # Build the commit the revision label claims (DRY-91). `github.sha` is
+          # the workflow's ref, which on a back-publish is main's tip and NOT the
+          # tag being built — so resolving it here, and reading the revision back
+          # out of the checkout below, is what keeps the image, its tags and its
+          # label describing one commit. A revision that can be wrong is worse
+          # than none: the whole point of preferring it to a digest is that it
+          # doesn't lie.
+          ref: ${{ env.BUILD_REF }}
+
+      - name: Record the commit actually built
+        run: echo "REVISION=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
 
       - name: Assemble tags and labels
         # Hand-built rather than via docker/metadata-action, deliberately. The
@@ -132,7 +161,7 @@ jobs:
               echo "${IMAGE}:${SEMVER%.*}"
             else
               echo "${IMAGE}:latest"
-              echo "${IMAGE}:${GITHUB_SHA}"
+              echo "${IMAGE}:${REVISION}"
             fi
             echo '__EOT__'
           } >> "$GITHUB_ENV"
@@ -172,7 +201,7 @@ jobs:
           # default that would go stale and be believed.
           {
             echo 'LABELS<<__EOT__'
-            echo "org.opencontainers.image.revision=${GITHUB_SHA}"
+            echo "org.opencontainers.image.revision=${REVISION}"
             echo "org.opencontainers.image.source=https://github.com/Einlanzerous/drydock"
             if [ -n "$SEMVER" ]; then
               echo "org.opencontainers.image.version=${SEMVER}"
@@ -184,15 +213,6 @@ jobs:
         run: |
           printf 'Tags:\n%s\n\nLabels:\n%s\n' "$TAGS" "$LABELS"
 
-      - uses: actions/checkout@v4
-        with:
-          # Build the commit the revision label below claims (DRY-91). On a push
-          # these already agree; on workflow_dispatch `github.sha` is the branch
-          # tip resolved when the run was dispatched, so a push landing in between
-          # would leave the image built from one commit and stamped with another.
-          # A revision that can be wrong is worse than none — the whole point of
-          # preferring it to a digest is that it doesn't lie.
-          ref: ${{ github.sha }}
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
