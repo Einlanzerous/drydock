@@ -312,13 +312,21 @@ no labels at all, so a hand-built image cannot be mistaken for a published one.
 
 ### construct-server stack
 
-Add to `~/construct-server/docker-compose.yml` (no Watchtower label — default
-means auto-update):
+This is how construct-server actually runs it. Both details below were stale
+here and are worth stating correctly, because they decide the blast radius of a
+mistake on `:latest`: the image is **pinned**, via `DRYDOCK_TAG` in
+construct-server's tracked `versions.env`, and Watchtower does **not** touch it.
+Watchtower has been opt-in since SERV-75 — it monitors only containers carrying
+`com.centurylinklabs.watchtower.enable=true`, which is four third-party leaves —
+so nothing here auto-updates, and `deploy.yml` is the only path to the host.
+
+(This page previously said "no Watchtower label — default means auto-update",
+which was true before SERV-75 and inverts the conclusion.)
 
 ```yaml
   # --- DRYDOCK SHELL (web terminal multiplexer for AI CLIs) ---
   drydock-shell:
-    image: ghcr.io/einlanzerous/drydock/shell:latest
+    image: ghcr.io/einlanzerous/drydock/shell:${DRYDOCK_TAG:-latest}
     container_name: drydock-shell
     restart: unless-stopped
     ports:
