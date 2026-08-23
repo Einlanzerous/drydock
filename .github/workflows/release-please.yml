@@ -16,8 +16,34 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    outputs:
+      # `.` is a ROOT component, and for a root path release-please v4 exposes the
+      # outputs UN-prefixed (`releases_created`, `tag_name`). The `<path>--` prefix
+      # applies only to non-root monorepo paths, so `.--tag_name` reads back empty
+      # here — argosy hit exactly that and shipped a build against the branch name.
+      releases_created: ${{ steps.rp.outputs.releases_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
     steps:
       - uses: googleapis/release-please-action@v4
+        id: rp
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  # Publish the versioned image in the same run that cut the tag (SERV-125).
+  # publish-shell.yml runs on its own for :latest and :<sha> on every main push,
+  # but its semver tags need a release. It cannot wait for a tag event to supply
+  # one: release-please cuts the tag using GITHUB_TOKEN, and GitHub deliberately
+  # creates no workflow runs from events that token authored — so an `on: push:
+  # tags` trigger here would look right and never fire. Until this landed, no
+  # versioned drydock image had ever been published, and construct-server had to
+  # pin this service by sha rather than by major.minor.
+  publish-shell:
+    needs: release-please
+    if: needs.release-please.outputs.releases_created == 'true'
+    uses: ./.github/workflows/publish-shell.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
+    permissions:
+      contents: read
+      packages: write

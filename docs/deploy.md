@@ -249,10 +249,24 @@ Accounts panel.
 
 ## Shell (container)
 
-Built and pushed by `.github/workflows/publish-shell.yml` on every `main` push
-that touches `shell/**` (tags: `latest` + commit sha). The image serves the
-static bundle and regenerates `/config.js` from env at container start, so the
-same image works for any deployment:
+Built and pushed by `.github/workflows/publish-shell.yml`, which publishes two
+disjoint tag sets:
+
+- every `main` push touching `shell/**` → `latest` + the full commit sha
+- every release → `<major>.<minor>.<patch>` + `<major>.<minor>`, and nothing
+  else
+
+Both fire on a release, because the release-please merge commit is itself a
+push to `main`. Splitting the sets keeps the two builds from racing to write
+the same tag. The release build is *called* from `release-please.yml` rather
+than triggered by the tag: release-please cuts the tag with `GITHUB_TOKEN`, and
+GitHub creates no workflow runs from events that token authored, so a `push:
+tags` trigger here would look correct and never fire (SERV-125). To publish a
+tag cut before that was fixed, dispatch `publish-shell.yml` against the tag ref
+— the version is read from the ref.
+
+The image serves the static bundle and regenerates `/config.js` from env at
+container start, so the same image works for any deployment:
 
 - `DRYDOCK_DAEMON_PORT` (default `4318`) — daemon on the *same host the page
   was loaded from*, the normal setup. Works from localhost, LAN, or Tailscale
@@ -274,13 +288,16 @@ on the host, so there is no HTTP surface inside the container to probe — and
 they are what construct-server's `delivery-facts.sh` reads to place drydock in
 the delivery matrix.
 
-`org.opencontainers.image.version` is deliberately empty. Nothing here
-publishes a semver tag (`latest` + sha, pinned by sha in compose), and an empty
-version is a legitimate row that records the digest and shows the version as
-unknown — whereas filling it from `package.json`, which carries the *last*
+`org.opencontainers.image.version` is set on a **release** build and absent on
+every other one, and the absence is deliberate rather than an omission. A
+release build takes the version from the tag release-please just cut, which is
+the one moment the tag and the tree genuinely agree. Between releases there is
+no semver to state: filling it from `package.json`, which carries the *last*
 released version at every commit on `main`, would have every between-releases
-build claim to be a release. A plain local `docker build` sets no labels at
-all, so a hand-built image cannot be mistaken for a published one.
+build claim to be a release it isn't. An absent version is a legitimate row
+that records the revision and shows the version as unknown; a confident wrong
+one is the failure the label exists to avoid. A plain local `docker build` sets
+no labels at all, so a hand-built image cannot be mistaken for a published one.
 
 ### construct-server stack
 
