@@ -12,6 +12,8 @@
 //   2. it survives a session poll landing mid-spawn
 //   3. a bare workspace (the palette's pinned row) has no prompt and types nothing
 //   4. the RETURN is the only difference between this and an autonomous run
+//   5. the HOST's configured prompt is what arrives, placeholders expanded (DRY-94)
+//   6. …and with no value set, the daemon's built-in default arrives instead
 //
 // ON `page.evaluate` BODIES (DRY-80): no body here may bind a name to a
 // function — tsx's transform wraps those in a `__name(...)` helper that does
@@ -20,12 +22,20 @@
 // Rig in the README. Run from `daemon/`, where tsx resolves:
 //   (cd daemon && node --import tsx ../scripts/verify/prefill.mts)
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { spawn } from "node:child_process";
+import { createServer, type AddressInfo } from "node:net";
 import type { Detail, SessionsResponse, SpawnResponse } from "./api.mjs";
 
 const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5388";
 const DAEMON = process.env.DAEMON ?? "http://127.0.0.1:4388";
 /** The fixture ticket the rounds spawn from — flat, so no epic to expand. */
 const TICKET = process.env.TICKET ?? "SWY-12";
+/**
+ * Its repo, which is what `{repo}` expands to (DRY-94) and what the rig maps to
+ * a non-git directory. Overriding TICKET means overriding this too — hence a
+ * name rather than the literal it was worth being for one use.
+ */
+const REPO = process.env.TICKET_REPO ?? "switchyard";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let failures = 0;
@@ -63,7 +73,79 @@ const rows = (page: Page): Promise<string> =>
 /** How many times `needle` appears in `hay`. A retype is a pass otherwise. */
 const times = (hay: string, needle: string): number => hay.split(needle).length - 1;
 
-const PROMPT = `Workticket${TICKET}.`; // the head of TicketDetail's defaultPrompt, despaced
+const PROMPT = `Workticket${TICKET}.`; // the head of the prompt template, despaced
+
+/**
+ * The template the daemon under test must be started with (DRY-94) — see the
+ * README rig, which sets DRYDOCK_AGENT_PROMPT to exactly this.
+ *
+ * Every piece of it is load-bearing:
+ *   - it opens with the same sentence rounds 1-2 look for, so those keep
+ *     asserting what they always did (the prompt arrived, once, unsubmitted)
+ *     without caring which template produced it;
+ *   - `{key}` and `{repo}` are both here, because a template that only ever
+ *     substituted the key would pass a harness that only ever checked one;
+ *   - `{{esc}}` is the doubled-brace escape, and the round asserts a literal
+ *     `{esc}` comes out — a prompt is prose and is entitled to contain braces,
+ *     and the boot check refuses anything that looks like a placeholder it
+ *     cannot fill;
+ *   - the `\n` is the OTHER escape, and it is the only way a multi-line prompt
+ *     can be configured at all: `env.ts` reads a `.env` line by line, so a
+ *     value written across two lines arrives as its first line alone.
+ */
+const CONFIGURED_RAW = String.raw`Work ticket {key}. See {repo} through.\nLeave {{esc}} alone.\nAnd this line too.`;
+/**
+ * …and what the daemon must therefore SERVE: every escape decoded.
+ *
+ * `replaceAll`, mirroring `normalizeAgentPrompt`'s `/g`. With `replace` and a
+ * string pattern only the FIRST is decoded, so a template with two of them
+ * leaves `CONFIGURED` holding a literal `\n` the daemon expanded — matching
+ * neither form, which makes the rig check refuse and send whoever ran it to fix
+ * a rig that was already right. (Two of them here for that reason: one is a
+ * template where the difference cannot show.)
+ */
+const CONFIGURED = CONFIGURED_RAW.replaceAll(String.raw`\n`, "\n");
+/**
+ * The above as the pane renders it — despaced, so the newline is invisible here
+ * and what is asserted is that the text either side of it arrived as ONE block.
+ * That is the multi-line coverage: `flushInitialInput` sends a payload with a
+ * newline in it as a bracketed paste, and one that submitted a fragment per
+ * line instead would leave the second half missing.
+ */
+const CONFIGURED_SEEN = `Workticket${TICKET}.See${REPO}through.Leave{esc}alone.Andthislinetoo.`;
+
+/** `desk` as of DRY-94. `agentPrompt` is absent on an older daemon. */
+type ConfigBody = {
+  autonomous?: { permissionMode?: string };
+  desk?: { clearFinishedAfterMs?: number; agentPrompt?: string };
+};
+
+/**
+ * This harness is only meaningful against a daemon started with the template
+ * above, and it REFUSES rather than measuring nothing — the same rule sweep.mts
+ * follows for its turned-down delay. Silently asserting the built-in default
+ * would pass on a rig that never set the variable, which is the one thing round
+ * 5 exists to find out.
+ */
+const hostConfig = (await (await fetch(`${DAEMON}/api/config`)).json()) as ConfigBody;
+const SERVED = hostConfig.desk?.agentPrompt;
+// Either form satisfies the RIG check. A daemon serving the escape undecoded is
+// a broken daemon rather than a broken rig, so round 5 fails a CHECK on it; what
+// refuses is a daemon that was never given the variable, since asserting the
+// built-in default there would be a pass bought by not testing.
+if (SERVED !== CONFIGURED && SERVED !== CONFIGURED_RAW) {
+  console.log(
+    `this daemon serves desk.agentPrompt = ${JSON.stringify(SERVED)}\n` +
+      `                          it needs = ${JSON.stringify(CONFIGURED)}\n` +
+      // Both escaped above so a difference is VISIBLE — an undecoded `\n` and a
+      // real one print identically otherwise, which reads as "set it to the
+      // thing it already is". Then the raw form, unescaped, to paste into the rig.
+      `\nStart it with DRYDOCK_AGENT_PROMPT set to exactly (see the README rig):\n` +
+      `  ${CONFIGURED_RAW}\n\n` +
+      `Rounds 5 and 6 measure nothing without it.`,
+  );
+  process.exit(2);
+}
 
 async function reset(): Promise<void> {
   const list = (await (await fetch(`${DAEMON}/api/sessions`)).json()) as SessionsResponse;
@@ -80,9 +162,28 @@ async function reset(): Promise<void> {
  * daemon for the whole of its life, so a browser that types one is a browser
  * holding a copy that a re-mount can lose.
  */
-async function open(browser: Browser): Promise<{ ctx: BrowserContext; page: Page }> {
+async function open(
+  browser: Browser,
+  /**
+   * Answer /api/config with this body instead of the daemon's own (round 6).
+   *
+   * The shell's daemon URL is baked in by Vite at start-up, so a desk cannot be
+   * re-pointed at a second daemon from inside a running browser. What it can do
+   * is be handed that daemon's real config body — which is what this is: not a
+   * hand-written fixture, but the answer a daemon started with no
+   * DRYDOCK_AGENT_PROMPT actually gives.
+   */
+  config?: ConfigBody,
+): Promise<{ ctx: BrowserContext; page: Page }> {
   const ctx = await browser.newContext({ viewport: { width: 1500, height: 950 } });
   const page = await ctx.newPage();
+  if (config) {
+    // Before goto: the desk reads this once during start-up, and a route
+    // installed after that lands on nothing.
+    await page.route("**/api/config", (route) =>
+      route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(config) }),
+    );
+  }
   await page.addInitScript(() => {
     (window as any).__typed = [];
     const send = WebSocket.prototype.send;
@@ -204,7 +305,6 @@ console.log("\n3. the bare workspace spawn has no prompt to pre-fill");
   check("no ticket drawer", (await page.locator(".drawerbar").count()) === 0);
   await ctx.close();
 }
-await browser.close();
 
 console.log("\n4. the RETURN is what separates a run from a pre-fill");
 {
@@ -240,6 +340,140 @@ console.log("\n4. the RETURN is what separates a run from a pre-fill");
   check("autonomous: submitted", unattended.includes("[CR]"));
   check("neither dropped anything", !`${supervised}${unattended}`.includes("[dropped"));
 }
+
+console.log("\n5. the HOST's configured prompt is what arrives (DRY-94)");
+{
+  await reset();
+  const { ctx, page } = await open(browser);
+  await openTicket(page);
+  await page.locator("button.send").click();
+  await page.waitForSelector(".agent .xterm", { timeout: 15000 });
+  await sleep(6000);
+  const seen = await rows(page);
+  // Asserted on the CLI's echo, like every other round here: /api/config
+  // answering with the template proves the daemon read the variable and
+  // nothing more. The prompt this ticket is about is the one that reaches an
+  // agent, and the two were a whole shell bundle apart.
+  check("the \\n escape decoded to a real newline", SERVED === CONFIGURED, JSON.stringify(SERVED));
+  check("the configured prompt arrived", times(seen, CONFIGURED_SEEN) === 1, seen.slice(-140));
+  check("{key} was expanded", !seen.includes("{key}"));
+  check("{repo} was expanded", !seen.includes("{repo}"));
+  // A dropped `{esc}` and an expanded one are indistinguishable in a template
+  // that never had one, which is why the rig's template carries the escape.
+  check("{{esc}} survived as a literal {esc}", seen.includes("{esc}"));
+  check("nothing was dropped", !seen.includes("[dropped"), seen.slice(-90));
+  check("still a pre-fill, not a run", !seen.includes("[CR]"));
+  await ctx.close();
+}
+
+console.log("\n6. …and with none set, the built-in default arrives");
+{
+  // A second daemon, started with the variable EMPTY, asked what it serves.
+  //
+  // Empty rather than absent, and that is not the shortcut it looks like:
+  // `config.ts` folds "" into the default (it is how a half-commented-out knob
+  // reads), while `env.ts` skips any key already present in the environment —
+  // so an empty value is also what stops a `.env` sitting above the checkout
+  // from quietly supplying one. Absent, this round would report whatever the
+  // developer's own host is configured with and call it the built-in default.
+  const port = await new Promise<number>((res) => {
+    // Asked of the kernel rather than computed from the harness's own port:
+    // this host runs several agents at once, each with a throwaway daemon in
+    // the 43xx range, and a guessed port finds somebody else's.
+    const probe = createServer();
+    probe.listen(0, "127.0.0.1", () => {
+      // Read BEFORE close: `address()` is null once the server has closed.
+      const { port: free } = probe.address() as AddressInfo;
+      probe.close(() => res(free));
+    });
+  });
+  // Every DRYDOCK_* stripped, then only what this daemon needs put back. The
+  // set is not fixed, and overriding one at a time is how a "throwaway" ends up
+  // on the prod database with the prod auth password (see CLAUDE.md).
+  const env: NodeJS.ProcessEnv = {};
+  for (const [k, v] of Object.entries(process.env)) if (!k.startsWith("DRYDOCK_")) env[k] = v;
+  Object.assign(env, {
+    DRYDOCK_AGENT_PROMPT: "",
+    DRYDOCK_PORT: String(port),
+    DRYDOCK_HOST: "127.0.0.1",
+    DRYDOCK_TRACKER: "fixture",
+    DRYDOCK_SESSIONS_DIR: `/tmp/dry94-sessions-${port}`,
+    DRYDOCK_STATE_FILE: `/tmp/dry94-state-${port}.json`,
+    // Off, or this throwaway runs DRY-90's boot sweep over the worktrees of
+    // whoever is running the harness. It only ever removes work that is clean
+    // and merged, so nothing is lost — but a test daemon that deletes anything
+    // at all on the way up is not a thing to leave switched on.
+    DRYDOCK_WORKTREE_REAP_MS: "0",
+  });
+  // Runs from `daemon/`, like the harness itself. It spawns no PTY and so
+  // leaves no supervisor behind — a kill is the whole cleanup.
+  const child = spawn(process.execPath, ["--import", "tsx", "src/index.ts"], {
+    cwd: process.cwd(),
+    env,
+    stdio: "ignore",
+  });
+  let config: ConfigBody | null = null;
+  for (let i = 0; i < 60 && !config; i++) {
+    await sleep(500);
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/api/config`);
+      if (r.ok) config = (await r.json()) as ConfigBody;
+    } catch {
+      /* not up yet */
+    }
+  }
+  try {
+    const builtIn = config?.desk?.agentPrompt ?? "";
+    check("a daemon with none set still serves a template", !!builtIn, builtIn.slice(0, 60));
+    // The strip above actually worked. Without this the round would happily
+    // "confirm the default" while reading the rig's own variable back.
+    check("it is not the rig's configured one", builtIn !== CONFIGURED);
+    check("it is a template, unexpanded", builtIn.includes("{key}"));
+    // Three tripwires on the SHIPPED default, because they are this ticket's
+    // claim about it rather than incidental wording: an autonomous run has to be
+    // told to open a PR, to see the review through, and to stop. A default that
+    // stops saying one of them should fail here and be re-argued, not sail past.
+    check("it says to open a PR", /\bPR\b/.test(builtIn), builtIn.slice(0, 60));
+    check("it says to see the review through", /review/i.test(builtIn));
+    check("it bounds the loop", /at most|stop waiting|give up/i.test(builtIn));
+
+    if (config) {
+      // As every other round does, and for a reason this round found the hard
+      // way: the desk RESTORES the saved arrangement, so without this the page
+      // comes up holding round 5's workspace and `rows()` reads that pane —
+      // which shows the configured prompt, and the check below fails against
+      // correct code. The three that follow it would have passed vacuously.
+      await reset();
+      const { ctx, page } = await open(browser, config);
+      await openTicket(page);
+      await page.locator("button.send").click();
+      await page.waitForSelector(".agent .xterm", { timeout: 15000 });
+      await sleep(6000);
+      const seen = await rows(page);
+      // Whitespace-insensitive because `rows()` is — which is also what makes
+      // it a check on the WHOLE default rather than its opening clause: the
+      // shipped one is a long single line and the pane wraps it. (Multi-line
+      // delivery is round 5's job now; the default is one line deliberately,
+      // because a `.env` cannot carry two.)
+      const want = builtIn
+        .replace("{key}", TICKET)
+        .replace("{repo}", REPO)
+        .replace(/\s+/g, "");
+      check("the built-in default reached the CLI, whole", seen.includes(want), seen.slice(-140));
+      check("nothing was dropped", !seen.includes("[dropped"), seen.slice(-90));
+      check("still a pre-fill, not a run", !seen.includes("[CR]"));
+      await ctx.close();
+    }
+  } finally {
+    // In a `finally` because the block above waits on two selectors, and a
+    // throw in either would otherwise leave a daemon listening on a
+    // kernel-assigned port nobody can guess afterwards. It holds no PTY, so
+    // this is the whole cleanup.
+    child.kill();
+  }
+}
+
+await browser.close();
 
 console.log(failures ? `\n${failures} of ${ran} FAILED\n` : `\nall ${ran} checks passed\n`);
 process.exit(failures ? 1 : 0);

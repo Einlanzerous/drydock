@@ -1,4 +1,10 @@
 import * as os from "node:os";
+import {
+  AGENT_PROMPT_KEYS,
+  DEFAULT_AGENT_PROMPT,
+  normalizeAgentPrompt,
+  unknownAgentPromptKeys,
+} from "./agent-prompt.js";
 
 /**
  * Parse DRYDOCK_REPO_PATHS ("name=path,other=~/other") into a name→path map.
@@ -568,6 +574,27 @@ export const CONFIG = {
      * never swept whatever this says, and neither is the window you have focused.
      */
     clearFinishedAfterMs: msOrOff(process.env.DRYDOCK_CLEAR_FINISHED_AFTER_MS, 300_000),
+
+    /**
+     * What the ticket panel pre-fills the agent's prompt with (DRY-94).
+     *
+     * Here for the same reason the sweep delay above is: this process never
+     * acts on it. The desk expands `{key}`/`{repo}` and puts the result in the
+     * composer, which is where it has to happen — a supervised spawn shows the
+     * prompt to a human who may edit it before pressing return. What the daemon
+     * owns is holding the string and refusing a template with a placeholder
+     * nothing can fill (the CONFIG_ERRORS block at the foot of this file).
+     *
+     * The built-in default is the shipped policy for this host and is worth
+     * reading before overriding it: it tells the agent to see a change through
+     * REVIEW, not just to open a PR. See `agent-prompt.ts`.
+     */
+    agentPrompt: normalizeAgentPrompt(
+      // `||`, not `??`: an empty DRYDOCK_AGENT_PROMPT is a knob somebody
+      // half-commented out, the same case msOrOff() treats as unset. An agent
+      // spawned with no prompt at all sits at an empty composer forever.
+      process.env.DRYDOCK_AGENT_PROMPT?.trim() || DEFAULT_AGENT_PROMPT,
+    ),
   },
 
   /**
@@ -690,3 +717,31 @@ export const CONFIG = {
     },
   },
 };
+
+/**
+ * A prompt template with a placeholder nothing can fill stops the daemon
+ * (DRY-94).
+ *
+ * The house pattern for a knob that cannot mean what it says: collected here,
+ * printed by index.ts, and the port is never bound. Filtering the token out
+ * instead is the failure this guards — `{tickets}` expands to nothing, the
+ * prompt loses the one thing it was about, and an unattended run is the case
+ * where nobody is looking at the composer to see it happen (DRY-66 trap 1).
+ *
+ * Checked against the EFFECTIVE value, so the built-in default is checked too:
+ * a placeholder added to it without being added to `AGENT_PROMPT_KEYS` fails
+ * every daemon on the first boot rather than only the hosts that override it.
+ */
+{
+  const unknown = unknownAgentPromptKeys(CONFIG.desk.agentPrompt);
+  if (unknown.length) {
+    CONFIG_ERRORS.push(
+      `DRYDOCK_AGENT_PROMPT has ${unknown.length === 1 ? "a placeholder" : "placeholders"} ` +
+        `nothing can fill: ${unknown.map((k) => `{${k}}`).join(", ")}.\n` +
+        `  Known: ${AGENT_PROMPT_KEYS.map((k) => `{${k}}`).join(", ")}.\n` +
+        `  This is refused rather than expanded to nothing, because a prompt that\n` +
+        `  quietly lost the ticket it was about is a run nobody is watching.\n` +
+        `  To write a literal brace pair, double the braces: {{${unknown[0]}}}.`,
+    );
+  }
+}

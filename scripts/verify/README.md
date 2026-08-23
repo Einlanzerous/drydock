@@ -1671,7 +1671,7 @@ case is asked of the kernel rather than computed as `PORT + 1`: this host runs
 several agents at once, each with a throwaway daemon in the 43xx range, and that
 check first went green against somebody else's.
 
-## The agent's pre-filled prompt (DRY-88)
+## The agent's pre-filled prompt (DRY-88, DRY-94)
 
 A browser, a throwaway daemon, and a stub CLI on its PATH — about a minute.
 Run it when touching `scheduleInitialInput` / `flushInitialInput` /
@@ -1696,6 +1696,8 @@ mkdir -p /tmp/dry88-repos/switchyard        # a NON-git dir, so the panel offers
    DRYDOCK_PORT=4388 DRYDOCK_HOST=127.0.0.1 DRYDOCK_SESSIONS_DIR=/tmp/d88 \
    DRYDOCK_STATE_FILE=/tmp/dry88-state.json DRYDOCK_TRACKER=fixture \
    DRYDOCK_REPO_PATHS=switchyard=/tmp/dry88-repos/switchyard \
+   DRYDOCK_WORKTREE_REAP_MS=0 \
+   DRYDOCK_AGENT_PROMPT='Work ticket {key}. See {repo} through.\nLeave {{esc}} alone.\nAnd this line too.' \
    node --import tsx src/index.ts &)
 (cd shell && VITE_DAEMON_URL=http://127.0.0.1:4388 bunx vite --port 5388 --strictPort &)
 
@@ -1707,6 +1709,25 @@ CLI with the SESSION's cwd, so a bare `--import tsx` resolves from a directory
 with no `node_modules` and the "agent" dies with `ERR_MODULE_NOT_FOUND` — which
 presents as a pane that draws nothing and a prompt that went nowhere, i.e. as
 this ticket's bug.
+
+Two of those lines arrived with DRY-94 and are not optional either:
+
+- `DRYDOCK_AGENT_PROMPT` must be **exactly** that string, `\n` and all — note
+  the single quotes, which are what keep the shell from eating the backslash.
+  Rounds 5 and 6 are about which prompt reaches the CLI, and the harness reads
+  `/api/config` before round 1 and REFUSES (exit 2) if the daemon serves
+  something that is neither that string nor its decoded form — asserting the
+  built-in default against a rig that never set the variable would be a pass
+  bought by not testing. Every piece of the template carries a check: both
+  placeholders expanding, the doubled-brace escape coming out as a literal
+  `{esc}`, and BOTH `\n`s arriving as real newlines whose three lines reach the
+  CLI as one block (which is the bracketed-paste path). Two rather than one
+  because a single escape is a template where `replace` and `replaceAll` cannot
+  be told apart, and the harness has to decode the way the daemon does.
+- `DRYDOCK_WORKTREE_REAP_MS=0` because a throwaway daemon otherwise runs DRY-90's
+  boot sweep over the worktrees of whoever is running the harness. It only ever
+  removes work that is clean and merged, so nothing is lost — but a test daemon
+  that deletes anything on the way up is not a thing to leave switched on.
 
 What it holds down:
 
@@ -1735,14 +1756,39 @@ What it holds down:
   only that a supervised spawn doesn't submit is passed by deleting the submit
   outright — at which point every autonomous run sits at a full composer nobody
   ever sends.
+- **WHICH prompt arrives, not just that one did** (rounds 5-6, DRY-94). Round 5
+  is the whole chain unstubbed: the env var above, through `/api/config`, into
+  the composer, typed by the daemon, echoed by the stub. Round 6 starts a SECOND
+  daemon with the variable EMPTY and relays its real config body into the page
+  with `page.route` — a desk's daemon URL is baked in by Vite and can't be
+  re-pointed from a running browser, so the built-in default is read from a
+  daemon that actually has none set rather than from a fixture. Empty rather
+  than absent because `env.ts` skips keys already in the environment, which is
+  what stops a `.env` above the checkout from quietly supplying one; the rest of
+  `DRYDOCK_*` is stripped from that child for the reason CLAUDE.md gives.
+  (Multi-line delivery is round 5's job: the shipped default is a single line
+  on purpose, because a `.env` cannot carry two.)
 
 Discrimination (see [the section below](#making-sure-a-harness-still-discriminates),
-which carries the recipe): against the pre-fix tree it fails **8 of 17**. Round
-2's timing checks are not among them,
-honestly: widening the gap between the two spawns — which is what provokes the
-poll race it is testing — also pushes the old pane's 700ms write past the point
-the CLI starts listening, so the old code passes them. `the browser still never
-typed it` is that round's discriminating check, and it is there for that reason.
+which carries the recipe). Two eras, and they are separate numbers:
+
+- **DRY-94's half**: `perl -0pi -e 's/props\.agentPrompt \|\| LEGACY_AGENT_PROMPT/LEGACY_AGENT_PROMPT/'`
+  on `shell/src/components/TicketDetail.vue` restores the pre-DRY-94 behaviour
+  exactly — a hardcoded sentence, the served template ignored — and fails
+  **3 of 33**: round 5's `the configured prompt arrived` and `{{esc}} survived`,
+  and round 6's `the built-in default reached the CLI, whole`. Restore it with
+  `cp`/`git checkout` and note that `git checkout HEAD -- <path>` will take any
+  uncommitted work on that file with it. Dropping `agentPrompt` from
+  `/api/config` instead makes the harness refuse (exit 2) rather than quietly
+  assert the default.
+- **DRY-88's half no longer completes**, and that is measured rather than
+  assumed: the recipe below reverts `App.vue` to before DRY-88, but round 3 now
+  drives the DRY-82 palette that checkout has never had, so the run aborts there
+  on a selector timeout. It reaches 10 checks and fails 4 of them — both
+  `the browser never typed it` checks, and round 1's `the prompt is in the
+  composer` and `nothing was typed before the CLI was listening` — so it still
+  discriminates for the rounds it gets to. The old count (**8 of 17**) was true when it was
+  written and is kept here as history, not as an expectation.
 
 **The stub is a model, and models go stale.** When Claude Code is upgraded,
 re-measure rather than trusting a green run: spawn a real one with `input` set
@@ -2087,9 +2133,19 @@ git checkout HEAD -- shell/src/components/TrackerSidebar.vue shell/src/lib/track
 #   git log --diff-filter=A --format=%h -- scripts/verify/prefill.mts
 git checkout <that commit>~1 -- daemon/src/session.ts shell/src/App.vue \
   shell/src/components/TerminalPane.vue shell/src/components/WorkspacePane.vue
-(cd daemon && node --import tsx ../scripts/verify/prefill.mts)     # expect 8 failures of 17
+(cd daemon && node --import tsx ../scripts/verify/prefill.mts)     # aborts in round 3; see below
 git checkout HEAD -- daemon/src/session.ts shell/src/App.vue \
   shell/src/components/TerminalPane.vue shell/src/components/WorkspacePane.vue
+
+# DRY-94 the prompt's CONTENT. No checkout: one mutation restores the
+# pre-DRY-94 behaviour exactly (a hardcoded sentence, the served template
+# ignored). NB `git checkout HEAD --` would take uncommitted work on that file
+# with it, so this one is copied back.
+cp shell/src/components/TicketDetail.vue /tmp/TicketDetail.bak
+perl -0pi -e 's/props\.agentPrompt \|\| LEGACY_AGENT_PROMPT/LEGACY_AGENT_PROMPT/' \
+  shell/src/components/TicketDetail.vue
+(cd daemon && node --import tsx ../scripts/verify/prefill.mts)     # expect 3 failures of 33
+cp /tmp/TicketDetail.bak shell/src/components/TicketDetail.vue
 
 # DRY-82 the desk chrome. Its merge is deliberately not written down either —
 # find it from the file that arrived with it:
@@ -2109,6 +2165,13 @@ git checkout <that commit>~1 -- shell/src/App.vue
 (cd daemon && node --import tsx ../scripts/verify/spawn-layout.mts)  # expect 26 failures of 80
 git checkout HEAD -- shell/src/App.vue
 ```
+
+The prefill recipe is the fourth to rot, and its own comment says so a line
+above — reverting `App.vue` to before DRY-88 also removes the DRY-82 palette
+that round 3 clicks, so the run now aborts there rather than reporting a count.
+What it reaches still discriminates (4 failures of the 10 checks it runs, all in
+rounds 1-2). Repairing it would mean rewriting round 3 against a two-ticket-old
+desk, which is why the DRY-94 mutation above is a mutation and not a checkout.
 
 The sidebar and epic-children counts are what DRY-80's re-run actually observed;
 `roam`'s 6 is inherited and was not re-measured. Note the two halves of this

@@ -805,7 +805,14 @@ const server = http.createServer(async (req, res) => {
         // sweeping, because only the desk can see what's on screen. Served here
         // so the delay is host config like everything else, and so turning it
         // off is one env var rather than a setting per browser profile.
-        desk: { clearFinishedAfterMs: CONFIG.desk.clearFinishedAfterMs },
+        // Same category, added by DRY-94: the template the ticket panel
+        // pre-fills a spawn's prompt with, `{key}`/`{repo}` unexpanded. The
+        // desk expands it, because the supervised half of that spawn is a
+        // human reading the sentence before pressing return.
+        desk: {
+          clearFinishedAfterMs: CONFIG.desk.clearFinishedAfterMs,
+          agentPrompt: CONFIG.desk.agentPrompt,
+        },
       });
     }
 
