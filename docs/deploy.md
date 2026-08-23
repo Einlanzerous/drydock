@@ -6,7 +6,7 @@ constraints:
 | component | packaging | why |
 |---|---|---|
 | **daemon** | systemd **user unit** on the host, from a pinned checkout | it spawns `claude` and `$SHELL` PTYs *as you, on your machine* — agents need your repos, toolchain, dotfiles, and `~/.claude` auth. A container would strip all of that or mount most of the host back in. |
-| **shell** | nginx container from GHCR (`ghcr.io/einlanzerous/drydock/shell`) | static Vite build; containerizes trivially, Watchtower keeps it fresh. |
+| **shell** | nginx container from GHCR (`ghcr.io/einlanzerous/drydock/shell`) | static Vite build; containerizes trivially. **Nothing auto-updates it** — construct-server pins the image via `DRYDOCK_TAG` and Watchtower has been opt-in since SERV-75, so `deploy.yml` is the only path to prod. |
 
 Prod runs alongside dev on separate ports, so hacking on Drydock can never
 kill a prod session (the original point of this ticket):
@@ -249,10 +249,55 @@ Accounts panel.
 
 ## Shell (container)
 
-Built and pushed by `.github/workflows/publish-shell.yml` on every `main` push
-that touches `shell/**` (tags: `latest` + commit sha). The image serves the
-static bundle and regenerates `/config.js` from env at container start, so the
-same image works for any deployment:
+Built and pushed by `.github/workflows/publish-shell.yml`, which publishes two
+disjoint tag sets:
+
+- every `main` push matching the paths filter — `shell/**`, `package.json`,
+  `bun.lock`, or the workflow itself → `latest` + the full commit sha
+- every release → `<major>.<minor>.<patch>` + `<major>.<minor>`, and nothing
+  else
+
+Both fire on a release, and the reason is the paths filter rather than the push:
+a release-please merge commit touches `package.json`, `CHANGELOG.md` and the
+manifest — **not** `shell/**` — so it is the `package.json` entry above that
+makes the push run fire at all. Being a push to `main` is not sufficient. That is
+also what makes the two runs build the *same* commit, which `dry-91` item 2
+depends on. Splitting the sets keeps them from racing to write the same tag. The release build is *called* from `release-please.yml` rather
+than triggered by the tag: release-please cuts the tag with `GITHUB_TOKEN`, and
+GitHub creates no workflow runs from events that token authored, so a `push:
+tags` trigger here would look correct and never fire (SERV-125).
+
+To publish a tag cut *before* that fix, dispatch `publish-shell.yml` from `main`
+and pass the tag as the `tag` **input**:
+
+```sh
+gh workflow run publish-shell.yml --repo Einlanzerous/drydock -f tag=v1.7.0
+```
+
+Back-publish only the **newest patch in its `X.Y` series**. The `X.Y` tag is a
+float that construct-server pins to, so publishing `v1.7.0` while `v1.7.1` exists
+would repoint `1.7` at the older commit and roll prod back one patch on its next
+pull, with nothing in `versions.env` to record it — the same "walking a tag
+backwards" hazard as below, one tag over.
+
+Not enforced in the workflow, for two reasons and **not** because it would be
+hard to scope — `from_release` already separates the release path from a hand
+dispatch, so a guard could be written to skip the release call entirely. It is
+not enforced because it is not reachable yet (every release in this repo's
+history is a minor bump, so each `X.Y` has exactly one patch), and because the
+enforcement most people reach for is the wrong one: refusing a superseded tag
+also refuses the legitimate case of rebuilding `1.7.0`'s image after `v1.7.1`
+exists. If it ever becomes reachable, the narrower fix is to publish `X.Y.Z` and
+**skip** the `X.Y` tag, not to fail the run.
+
+**Not** by dispatching *at* the tag ref. `workflow_dispatch` reads the workflow
+definition from the ref you dispatch, so at an old tag it runs that tag's copy
+of the file — the one with no semver logic — which publishes no semver tag at
+all and rebuilds `:latest` from the old commit, walking the tag backwards. It
+goes green either way, which is what makes it worth spelling out.
+
+The image serves the static bundle and regenerates `/config.js` from env at
+container start, so the same image works for any deployment:
 
 - `DRYDOCK_DAEMON_PORT` (default `4318`) — daemon on the *same host the page
   was loaded from*, the normal setup. Works from localhost, LAN, or Tailscale
@@ -274,23 +319,34 @@ on the host, so there is no HTTP surface inside the container to probe — and
 they are what construct-server's `delivery-facts.sh` reads to place drydock in
 the delivery matrix.
 
-`org.opencontainers.image.version` is deliberately empty. Nothing here
-publishes a semver tag (`latest` + sha, pinned by sha in compose), and an empty
-version is a legitimate row that records the digest and shows the version as
-unknown — whereas filling it from `package.json`, which carries the *last*
+`org.opencontainers.image.version` is set on a **release** build and absent on
+every other one, and the absence is deliberate rather than an omission. A
+release build takes the version from the tag release-please just cut, which is
+the one moment the tag and the tree genuinely agree. Between releases there is
+no semver to state: filling it from `package.json`, which carries the *last*
 released version at every commit on `main`, would have every between-releases
-build claim to be a release. A plain local `docker build` sets no labels at
-all, so a hand-built image cannot be mistaken for a published one.
+build claim to be a release it isn't. An absent version is a legitimate row
+that records the revision and shows the version as unknown; a confident wrong
+one is the failure the label exists to avoid. A plain local `docker build` sets
+no labels at all, so a hand-built image cannot be mistaken for a published one.
 
 ### construct-server stack
 
-Add to `~/construct-server/docker-compose.yml` (no Watchtower label — default
-means auto-update):
+This is how construct-server actually runs it. Both details below were stale
+here and are worth stating correctly, because they decide the blast radius of a
+mistake on `:latest`: the image is **pinned**, via `DRYDOCK_TAG` in
+construct-server's tracked `versions.env`, and Watchtower does **not** touch it.
+Watchtower has been opt-in since SERV-75 — it monitors only containers carrying
+`com.centurylinklabs.watchtower.enable=true`, which is four third-party leaves —
+so nothing here auto-updates, and `deploy.yml` is the only path to the host.
+
+(This page previously said "no Watchtower label — default means auto-update",
+which was true before SERV-75 and inverts the conclusion.)
 
 ```yaml
   # --- DRYDOCK SHELL (web terminal multiplexer for AI CLIs) ---
   drydock-shell:
-    image: ghcr.io/einlanzerous/drydock/shell:latest
+    image: ghcr.io/einlanzerous/drydock/shell:${DRYDOCK_TAG:-latest}
     container_name: drydock-shell
     restart: unless-stopped
     ports:
