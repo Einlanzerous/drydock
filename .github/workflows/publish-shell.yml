@@ -65,8 +65,12 @@ jobs:
         # Empty on an ordinary main push, and that emptiness is what selects the
         # :latest + :<sha> tag set below instead of the semver one.
         #
-        # `github.ref_type` covers the dispatch case, so a hand-run against a tag
-        # ref needs no second input that could disagree with the ref being built.
+        # The `github.ref_type` branch covers a dispatch made AT a tag ref, which
+        # works only for tags cut after this file landed — those carry a copy of
+        # it that has the semver logic. For anything older, dispatch from main
+        # and pass `tag`; see the header. The two are not alternatives offered on
+        # equal terms, and the file said so in one place while implying otherwise
+        # in another.
         #
         # Inputs reach the shell through env rather than being interpolated into
         # the script body — a `run:` block that pastes ${{ }} inline executes
@@ -109,7 +113,7 @@ jobs:
           # publishing a tag built from a partial parse. A release build that goes
           # green having published no usable semver tag is the exact failure this
           # workflow is being fixed for.
-          if [ -n "$version" ] && ! printf '%s' "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+'; then
+          if [ -n "$version" ] && ! printf '%s' "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "Error: '$version' is not a semver, so no semver image tag would be published."
             exit 1
           fi

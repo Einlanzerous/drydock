@@ -287,7 +287,7 @@ Identity, state and deploy:
 | [dry-28-workspace-state](docs/decisions/dry-28-workspace-state.md) | both state backends; a dead database must never cost a PTY |
 | [dry-87-deploy-keeps-agents](docs/decisions/dry-87-deploy-keeps-agents.md) | `KillMode=process` — `setsid` does not leave a cgroup |
 | [dry-81-deploy-probe](docs/decisions/dry-81-deploy-probe.md) | why a deploy that worked used to say it failed |
-| [dry-91-image-labels](docs/decisions/dry-91-image-labels.md) | OCI revision/source on the shell image, and why `version` is deliberately empty |
+| [dry-91-image-labels](docs/decisions/dry-91-image-labels.md) | OCI revision/source on the shell image, and why `version` is set only on a release |
 
 Desk and shell:
 

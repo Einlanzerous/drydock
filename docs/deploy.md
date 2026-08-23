@@ -261,9 +261,20 @@ push to `main`. Splitting the sets keeps the two builds from racing to write
 the same tag. The release build is *called* from `release-please.yml` rather
 than triggered by the tag: release-please cuts the tag with `GITHUB_TOKEN`, and
 GitHub creates no workflow runs from events that token authored, so a `push:
-tags` trigger here would look correct and never fire (SERV-125). To publish a
-tag cut before that was fixed, dispatch `publish-shell.yml` against the tag ref
-— the version is read from the ref.
+tags` trigger here would look correct and never fire (SERV-125).
+
+To publish a tag cut *before* that fix, dispatch `publish-shell.yml` from `main`
+and pass the tag as the `tag` **input**:
+
+```sh
+gh workflow run publish-shell.yml --repo Einlanzerous/drydock -f tag=v1.7.0
+```
+
+**Not** by dispatching *at* the tag ref. `workflow_dispatch` reads the workflow
+definition from the ref you dispatch, so at an old tag it runs that tag's copy
+of the file — the one with no semver logic — which publishes no semver tag at
+all and rebuilds `:latest` from the old commit, walking the tag backwards. It
+goes green either way, which is what makes it worth spelling out.
 
 The image serves the static bundle and regenerates `/config.js` from env at
 container start, so the same image works for any deployment:
