@@ -278,12 +278,17 @@ Back-publish only the **newest patch in its `X.Y` series**. The `X.Y` tag is a
 float that construct-server pins to, so publishing `v1.7.0` while `v1.7.1` exists
 would repoint `1.7` at the older commit and roll prod back one patch on its next
 pull, with nothing in `versions.env` to record it — the same "walking a tag
-backwards" hazard as below, one tag over. Not currently reachable (every release
-in this repo's history is a minor bump, so each `X.Y` has exactly one patch) and
-deliberately not enforced in the workflow: the check would have to run on the
-release path too, where a false positive blocks the publish this whole change
-exists to make happen. Trading a live failure for an unreachable one is the wrong
-direction.
+backwards" hazard as below, one tag over.
+
+Not enforced in the workflow, for two reasons and **not** because it would be
+hard to scope — `from_release` already separates the release path from a hand
+dispatch, so a guard could be written to skip the release call entirely. It is
+not enforced because it is not reachable yet (every release in this repo's
+history is a minor bump, so each `X.Y` has exactly one patch), and because the
+enforcement most people reach for is the wrong one: refusing a superseded tag
+also refuses the legitimate case of rebuilding `1.7.0`'s image after `v1.7.1`
+exists. If it ever becomes reachable, the narrower fix is to publish `X.Y.Z` and
+**skip** the `X.Y` tag, not to fail the run.
 
 **Not** by dispatching *at* the tag ref. `workflow_dispatch` reads the workflow
 definition from the ref you dispatch, so at an old tag it runs that tag's copy
