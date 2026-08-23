@@ -59,10 +59,16 @@ are not one route among several here; they are the only one.
    no OCI labels of its own, so there is no base-image version to be inherited
    and believed.
 
-Verify with the same command the audit used, against a freshly pulled image:
+Verify with the same command the audit used, against a freshly pulled image —
+but **against a release tag, not `:latest`**:
 
 ```sh
 docker inspect -f '{{index .Config.Labels "org.opencontainers.image.version"}}|{{index .Config.Labels "org.opencontainers.image.revision"}}' \
-  ghcr.io/einlanzerous/drydock/shell:latest
+  ghcr.io/einlanzerous/drydock/shell:1.7.0
 ```
+
+`:latest` is a `main` build, and under item 1 its `version` is empty **by
+design** — so running this against `:latest` prints `|<sha>` whether the release
+labelling works or not, and a correct build reads as a broken one. A check that
+reports the same thing either way is not a check.
 

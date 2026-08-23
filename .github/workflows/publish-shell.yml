@@ -86,7 +86,9 @@ jobs:
 
           # A tag that reads back empty must be an ERROR here, not a fallback.
           # Without this, a broken `tag_name` output would land in the `else`
-          # branch above, publish :latest and sha-<short>, and go green having
+          # branch below, publish :latest and the bare 40-char sha — NOT
+          # `sha-<short>`, which is argosy's form and the confusion the tag
+          # comment further down exists to prevent — and go green having
           # published no semver tag at all — which is precisely the silent
           # failure this workflow was fixed for, rebuilt out of new parts.
           # argosy has already been bitten by the sibling case once, reading

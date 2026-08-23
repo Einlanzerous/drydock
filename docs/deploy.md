@@ -6,7 +6,7 @@ constraints:
 | component | packaging | why |
 |---|---|---|
 | **daemon** | systemd **user unit** on the host, from a pinned checkout | it spawns `claude` and `$SHELL` PTYs *as you, on your machine* — agents need your repos, toolchain, dotfiles, and `~/.claude` auth. A container would strip all of that or mount most of the host back in. |
-| **shell** | nginx container from GHCR (`ghcr.io/einlanzerous/drydock/shell`) | static Vite build; containerizes trivially, Watchtower keeps it fresh. |
+| **shell** | nginx container from GHCR (`ghcr.io/einlanzerous/drydock/shell`) | static Vite build; containerizes trivially. **Nothing auto-updates it** — construct-server pins the image via `DRYDOCK_TAG` and Watchtower has been opt-in since SERV-75, so `deploy.yml` is the only path to prod. |
 
 Prod runs alongside dev on separate ports, so hacking on Drydock can never
 kill a prod session (the original point of this ticket):
@@ -252,13 +252,17 @@ Accounts panel.
 Built and pushed by `.github/workflows/publish-shell.yml`, which publishes two
 disjoint tag sets:
 
-- every `main` push touching `shell/**` → `latest` + the full commit sha
+- every `main` push matching the paths filter — `shell/**`, `package.json`,
+  `bun.lock`, or the workflow itself → `latest` + the full commit sha
 - every release → `<major>.<minor>.<patch>` + `<major>.<minor>`, and nothing
   else
 
-Both fire on a release, because the release-please merge commit is itself a
-push to `main`. Splitting the sets keeps the two builds from racing to write
-the same tag. The release build is *called* from `release-please.yml` rather
+Both fire on a release, and the reason is the paths filter rather than the push:
+a release-please merge commit touches `package.json`, `CHANGELOG.md` and the
+manifest — **not** `shell/**` — so it is the `package.json` entry above that
+makes the push run fire at all. Being a push to `main` is not sufficient. That is
+also what makes the two runs build the *same* commit, which `dry-91` item 2
+depends on. Splitting the sets keeps them from racing to write the same tag. The release build is *called* from `release-please.yml` rather
 than triggered by the tag: release-please cuts the tag with `GITHUB_TOKEN`, and
 GitHub creates no workflow runs from events that token authored, so a `push:
 tags` trigger here would look correct and never fire (SERV-125).
@@ -269,6 +273,17 @@ and pass the tag as the `tag` **input**:
 ```sh
 gh workflow run publish-shell.yml --repo Einlanzerous/drydock -f tag=v1.7.0
 ```
+
+Back-publish only the **newest patch in its `X.Y` series**. The `X.Y` tag is a
+float that construct-server pins to, so publishing `v1.7.0` while `v1.7.1` exists
+would repoint `1.7` at the older commit and roll prod back one patch on its next
+pull, with nothing in `versions.env` to record it — the same "walking a tag
+backwards" hazard as below, one tag over. Not currently reachable (every release
+in this repo's history is a minor bump, so each `X.Y` has exactly one patch) and
+deliberately not enforced in the workflow: the check would have to run on the
+release path too, where a false positive blocks the publish this whole change
+exists to make happen. Trading a live failure for an unreachable one is the wrong
+direction.
 
 **Not** by dispatching *at* the tag ref. `workflow_dispatch` reads the workflow
 definition from the ref you dispatch, so at an old tag it runs that tag's copy
