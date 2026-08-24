@@ -71,6 +71,28 @@ somebody starts watching again.
    arithmetic — the property is thirty seconds of polling to observe
    behaviourally and one `Math.max` to check. **Caught in review, not by me:
    the trap list said the requirement and the code didn't hold it.**
+
+   **And then only half of it was held, which review caught too.** A floor
+   satisfies the lower side and says nothing about the upper one: `max(window/2,
+   30s)` is under the window only while the window is over 30s, so
+   `DRYDOCK_TRACKER_STALE_AFTER_MS=25000` derived a 30s gap, a 28-second hide
+   was counted as attention, and the wake raised the notice with nothing having
+   failed — this ticket's own bug, at a shorter duration, reachable through the
+   knob added to fix it. The upper side needs a TTL of slack in it as well as
+   the gap, because a healthy cycle already leaves an entry un-refreshed for up
+   to one TTL before any hidden stretch starts: a 45s window derives a legal-
+   looking 30s gap and still breaks (30 + 20 ≥ 45).
+
+   It cannot be clamped. Below roughly twice the client's poll interval the two
+   sides are jointly unsatisfiable — there is no gap both above 20s and below a
+   20s window — so there is no value to fall back to, and picking one would be
+   choosing a number nobody asked for over saying no. `staleWindowError` refuses
+   the pair at boot instead, the way `flag()` refuses `DRYDOCK_MULTI_USER=True`
+   rather than guessing, and it names the number to clear. Only the DERIVED gap
+   is checked: an explicit `DRYDOCK_TRACKER_WATCH_GAP_MS` is the caller's promise
+   about their own clients, which is how the harnesses run the whole window
+   inside a second, and it is the same rule that lets an explicit gap under the
+   floor.
 3. **A read-stream hole RESTARTS the clock; it does not subtract from it.**
    Accumulating watched time and discounting the holes is the more precise
    model and the wrong one: a tab hidden for ten minutes would come back with

@@ -377,11 +377,15 @@ Through HTTP those are minute-long waits and races; here they're a stub fetch an
 TTLs in tens of milliseconds.
 
 Section (m) is arithmetic rather than behaviour, and deliberately: the property
-it pins — that the derived watch gap stays clear of the interval its client
-polls at — can only be reached behaviourally by a test that polls for longer
-than that interval, i.e. thirty seconds to check a `Math.max`. It is the
-property the whole fix rests on, since below it every ordinary poll reads as a
-hole and the age test can never fire.
+it pins — that the watch gap clears the interval its client polls at AND stays a
+TTL under the staleness window — takes thirty seconds of polling to observe
+behaviourally and two comparisons to check. Both sides are asserted because each
+is a different bug and they pull in opposite directions: under the poll interval
+every ordinary poll reads as a hole and the age test can never fire; over the
+window minus a TTL, a hide shorter than the gap is counted as attention and the
+wake raises the notice with nothing wrong. The windows where they cannot both
+hold are refused at boot (`staleWindowError`), which the same section calls
+directly — standing a daemon up to read one sentence is a minute per case.
 
 **Read (g) and (l) as one test.** They are the same 200ms of a list not being
 refreshed; the only difference is whether the harness keeps calling `get`
@@ -398,6 +402,7 @@ To confirm IT discriminates, revert a fix and watch the matching section fail:
 | in `start`, go back to `e.refreshing ??= (async () => { … finally { e.refreshing = undefined } })()` with `fetch()` called **directly inside** that IIFE | (h) `GEN-0` — the key never refreshes again |
 | in `staleReason`, measure the age from `e.at` instead of `e.watchedSince` (the pre-DRY-84 clock) | 2 failures in (l), and the first one prints the reported symptom verbatim: `no successful refresh in 202ms` over an entry nobody had asked about |
 | drop `WATCH_GAP_FLOOR_MS` from the derivation in the constructor, leaving `staleAfterMs / 2` | (m) `15000ms vs a 20000ms poll` — the age test is off for any host that turned the window down, which is the shape a behavioural test would need half a minute to reach |
+| in `staleWindowError`, compare `gap` against the window instead of `gap + ttlMs` | (m) `a 45s window is refused` flips to accepted — the pair that boots and then raises the notice on a wake, because a healthy cycle spends a TTL before the hide even starts |
 
 **The second one has a trap in it, and it caught me.** Wrapping the *existing*
 `this.run(...)` in a try/finally does NOT reproduce the bug and section (h) passes

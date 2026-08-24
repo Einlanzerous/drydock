@@ -24,6 +24,10 @@ import {
   type CacheDiagnostic,
   type CachedTickets,
 } from "../../daemon/src/tracker/cache.js";
+// Section (m) checks a boot refusal, which is config's half of DRY-84's
+// constraint. Importing config evaluates the env — harmless here, and cheaper
+// than a daemon per case.
+import { staleWindowError } from "../../daemon/src/config.js";
 import type { Ticket } from "../../daemon/src/tracker/types.js";
 
 let failures = 0;
@@ -335,35 +339,59 @@ console.log("\n(l) DRY-84: time in which nobody asked is not time the list rotte
   );
 }
 
-console.log("\n(m) the derived watch gap clears a real client's poll interval");
+console.log("\n(m) the watch gap is squeezed from both sides, and the pair is checked");
 {
-  // The one property the whole fix rests on, and the one a behavioural test
-  // can't reach: the gap has to be LONGER than the interval the client polls
-  // at, or every ordinary poll reads as a hole, `watchedSince` restarts on
-  // every read, and the age test can never fire again — DRY-72's trap 3a
-  // switched off by arithmetic, with nothing saying so.
+  // The property the whole fix rests on, and the one a behavioural test can't
+  // reach — thirty seconds of polling to observe what is two comparisons:
   //
-  // Half the window satisfies that at the shipping numbers by coincidence
-  // (60s / 2 = 30s > the shell's 20s poll) and stops satisfying it the moment
-  // somebody turns the window down. Asserted here rather than by polling for
-  // thirty seconds, because it is a `Math.max`.
+  //   above the client's poll interval   or every poll of a live tab reads as a
+  //                                      hole, `watchedSince` restarts on every
+  //                                      read, and the age test can never fire
+  //                                      (DRY-72's trap 3a, off by arithmetic).
+  //   below the window MINUS a TTL       or a tab hidden for less than the gap
+  //                                      has that time counted as attention and
+  //                                      the wake trips the notice — this
+  //                                      ticket's own bug, at a shorter
+  //                                      duration. The TTL is in it because a
+  //                                      healthy cycle already leaves an entry
+  //                                      un-refreshed for up to one before any
+  //                                      hidden stretch begins.
+  //
+  // Half the window holds the first at the shipping numbers by coincidence
+  // (60s / 2 = 30s > a 20s poll) and the second with 10s to spare. Both stop
+  // holding as soon as the window is turned down, in opposite directions, which
+  // is why each is asserted rather than the one that was in front of me.
   const POLL_MS = 20_000; // TICKET_POLL_MS, shell/src/lib/tracker.ts
-  const shipped = new TicketListCache(20_000);
+  const TTL_MS = 20_000; // the shipping DRYDOCK_TRACKER_CACHE_MS
+  const shipped = new TicketListCache(TTL_MS);
   check(
-    "at the shipping numbers",
+    "the shipping gap clears the shell's poll",
     shipped.watchedGapMs > POLL_MS,
     `${shipped.watchedGapMs}ms vs a ${POLL_MS}ms poll`,
   );
-  // "Tell me sooner" is the natural way to reach for this knob, and before the
-  // floor it was how you turned the feature off.
-  const sooner = new TicketListCache(20_000, { staleAfterMs: 30_000 });
   check(
-    "and with the window turned down to 30s",
-    sooner.watchedGapMs > POLL_MS,
-    `${sooner.watchedGapMs}ms vs a ${POLL_MS}ms poll`,
+    "and leaves a TTL of room under the window",
+    shipped.watchedGapMs + TTL_MS < 60_000,
+    `${shipped.watchedGapMs} + ${TTL_MS} vs a 60000ms window`,
   );
   const stated = new TicketListCache(20, { staleAfterMs: 80, watchedGapMs: 40 });
-  check("an explicit gap still bypasses the floor, for harnesses", stated.watchedGapMs === 40, `${stated.watchedGapMs}ms`);
+  check("an explicit gap bypasses the floor, for harnesses", stated.watchedGapMs === 40, `${stated.watchedGapMs}ms`);
+
+  // The windows that can't satisfy both are refused at boot rather than clamped:
+  // below about twice the poll interval there is no value that satisfies them,
+  // so there is nothing to fall back TO. `staleWindowError` is what index.ts
+  // prints; here it is called directly, since standing a daemon up to read one
+  // sentence is a minute per case.
+  const cases: Array<[string, ReturnType<typeof staleWindowError>, boolean]> = [
+    ["the shipping pair boots", staleWindowError({ staleAfterMs: 60_000, ttlMs: 20_000 }), false],
+    ["a 45s window is refused (gap 30s + TTL 20s ≥ 45s)", staleWindowError({ staleAfterMs: 45_000, ttlMs: 20_000 }), true],
+    ["so is 30s — 'tell me sooner', the way in", staleWindowError({ staleAfterMs: 30_000, ttlMs: 20_000 }), true],
+    ["0 is off, not incoherent", staleWindowError({ staleAfterMs: 0, ttlMs: 20_000 }), false],
+    ["an explicit gap is the caller's promise", staleWindowError({ staleAfterMs: 5_000, watchGapMs: 2_500, ttlMs: 4_000 }), false],
+  ];
+  for (const [name, got, shouldRefuse] of cases) {
+    check(name, shouldRefuse === !!got, got ? `${got.slice(0, 60)}…` : "accepted");
+  }
 }
 
 console.log("\n(n) the age test switches off; a failure still speaks");

@@ -5,6 +5,11 @@ import {
   normalizeAgentPrompt,
   unknownAgentPromptKeys,
 } from "./agent-prompt.js";
+// Arithmetic only — `cache.ts` imports nothing but its own types, so this
+// cannot become the import cycle that a config module usually is at the bottom
+// of. The alternative is a second copy of the derivation here, which is how a
+// boot check and the behaviour it checks drift apart (DRY-84).
+import { deriveWatchGapMs } from "./tracker/cache.js";
 
 /**
  * Parse DRYDOCK_REPO_PATHS ("name=path,other=~/other") into a name→path map.
@@ -166,6 +171,51 @@ const PORT = Number(process.env.DRYDOCK_PORT ?? 4317);
  * and an object literal can't read its own sibling.
  */
 const TICKET_CACHE_MS = msOrOff(process.env.DRYDOCK_TRACKER_CACHE_MS, 20_000);
+const TICKET_STALE_AFTER_MS = msOrOff(
+  process.env.DRYDOCK_TRACKER_STALE_AFTER_MS,
+  Math.max(TICKET_CACHE_MS * 3, 60_000),
+);
+const TICKET_WATCH_GAP_MS = optionalNum(process.env.DRYDOCK_TRACKER_WATCH_GAP_MS);
+
+/**
+ * Whether the staleness window and the watch gap can both do their jobs (DRY-84).
+ *
+ * The gap has to clear the interval a client polls at — else every poll of a
+ * live tab reads as a hole and the age test can never fire — and the window has
+ * to clear the gap by more than one TTL, because a healthy cycle already leaves
+ * an entry un-refreshed for up to a TTL before any hidden stretch begins. Below
+ * roughly twice the client's poll interval those cannot both hold: there is no
+ * gap that is above 20s and below a 20s window. So this refuses the combination
+ * rather than clamping it to a number nobody asked for.
+ *
+ * Only the DERIVED gap is checked. An explicit `DRYDOCK_TRACKER_WATCH_GAP_MS` is
+ * the caller's promise about their own clients — it is how the harnesses run the
+ * whole window inside a second — and the same rule that lets it under the floor
+ * lets it make its own arrangement with the window. Exported so the in-process
+ * suite can check the arithmetic without standing a daemon up.
+ *
+ * Returns the sentence to print, or undefined when the pair is coherent.
+ */
+export function staleWindowError(o: {
+  staleAfterMs: number;
+  watchGapMs?: number;
+  ttlMs: number;
+}): string | undefined {
+  // 0 = the age test is off; there is no window to be incoherent with.
+  if (!o.staleAfterMs || o.watchGapMs !== undefined) return undefined;
+  const gap = deriveWatchGapMs(o.staleAfterMs);
+  if (gap + o.ttlMs < o.staleAfterMs) return undefined;
+  return (
+    `DRYDOCK_TRACKER_STALE_AFTER_MS=${o.staleAfterMs} is too small to be honest. ` +
+    `The staleness clock only counts time while a client is polling, so the gap that ` +
+    `still counts as polling (${gap}ms here — it has to clear the shell's 20s poll) plus ` +
+    `one cache TTL (${o.ttlMs}ms) is what an ordinary tab can accumulate with nothing ` +
+    `wrong, and that is already ${gap + o.ttlMs}ms. Coming back to the desk would raise ` +
+    `"tickets aren't refreshing" over a tracker that was never asked. Raise it above ` +
+    `${gap + o.ttlMs}ms, set DRYDOCK_TRACKER_WATCH_GAP_MS explicitly if your clients poll ` +
+    `faster than the shell does, or set it to 0 to turn the age test off outright.`
+  );
+}
 
 /**
  * How this daemon decides who is asking (DRY-27).
@@ -682,10 +732,7 @@ export const CONFIG = {
        * known to be slow. Hence `msOrOff`: through `num()` that deliberate 0
        * would silently restore the derived default (DRY-60's trap 9).
        */
-      staleAfterMs: msOrOff(
-        process.env.DRYDOCK_TRACKER_STALE_AFTER_MS,
-        Math.max(TICKET_CACHE_MS * 3, 60_000),
-      ),
+      staleAfterMs: TICKET_STALE_AFTER_MS,
       /**
        * The longest gap between two reads of the same list that still counts as
        * somebody watching it (DRY-84) — the clock above only runs across gaps
@@ -700,11 +747,13 @@ export const CONFIG = {
        * thing to ask for on a rig and a foot-gun in prod, so it is spelled out
        * rather than derived.
        *
-       * Through `num()`, not `msOrOff`: zero here isn't a posture, it's a typo —
-       * it would mean "no read is ever more than 0ms after the last one", i.e.
-       * the pre-DRY-84 clock, reached by a value that reads like an off switch.
+       * Through `optionalNum`, not `msOrOff` and not `num()`: unset has to stay
+       * distinguishable from any number, because "derive it" is a third state —
+       * and zero here isn't a posture, it's a typo. It would mean "no read is
+       * ever more than 0ms after the last one", i.e. the pre-DRY-84 clock,
+       * reached by a value that reads like an off switch.
        */
-      watchGapMs: optionalNum(process.env.DRYDOCK_TRACKER_WATCH_GAP_MS),
+      watchGapMs: TICKET_WATCH_GAP_MS,
       /**
        * An epic's child counts (DRY-13), which are the unbounded half of a pull
        * — that query spans every status, so it grows with years of closed work
@@ -810,4 +859,28 @@ export const CONFIG = {
         `  To write a literal brace pair, double the braces: {{${unknown[0]}}}.`,
     );
   }
+}
+
+/**
+ * The staleness window has to leave room for the watch gap (DRY-84).
+ *
+ * Refused rather than clamped: the two constraints on the gap are jointly
+ * unsatisfiable below about twice the client's poll interval, so there is no
+ * value to fall back to — and the failure it prevents is this ticket's own bug
+ * returning from the other side, where coming back to a desk raises "tickets
+ * aren't refreshing" over a tracker nothing has asked anything.
+ *
+ * Checked here, at the effective values, so a host that only ever sets
+ * `DRYDOCK_TRACKER_STALE_AFTER_MS` is caught. It is the ONLY way to reach the
+ * bad pair by accident; an explicit gap is exempt, and the harnesses use one.
+ */
+{
+  const why = staleWindowError({
+    staleAfterMs: CONFIG.tracker.cache.staleAfterMs,
+    ...(CONFIG.tracker.cache.watchGapMs === undefined
+      ? {}
+      : { watchGapMs: CONFIG.tracker.cache.watchGapMs }),
+    ttlMs: CONFIG.tracker.cache.ticketsMs,
+  });
+  if (why) CONFIG_ERRORS.push(why);
 }

@@ -134,23 +134,53 @@ const dur = (ms: number): string => (ms < 1000 ? `${Math.round(ms)}ms` : `${Math
  * Floor on the watch gap (DRY-84), and the reason it is a floor rather than a
  * derivation.
  *
- * The gap has one job: be longer than the interval its CLIENT polls at. The
- * paired shell polls every `TICKET_POLL_MS` (20s, `shell/src/lib/tracker.ts`)
- * and arms the next poll only once the previous one has SETTLED, so a real
- * tab's gaps run a little over 20s; 30s clears that with margin. Deriving the
- * gap from the staleness window alone satisfies that at the shipping numbers by
- * arithmetic coincidence (60s / 2 = 30s) and stops satisfying it the moment
- * somebody turns the window down — at `DRYDOCK_TRACKER_STALE_AFTER_MS=30000`,
- * a perfectly reasonable "tell me sooner", every poll of an ordinary tab reads
- * as a hole, `watchedSince` restarts on every read, and the age test can never
- * fire again. Asking for a notice EARLIER would have switched it off, silently,
- * with only `0` documented as the off switch.
+ * The gap is squeezed from BOTH sides, and each side is a different bug:
  *
- * An explicit `watchedGapMs` (the env knob, and the harnesses) is allowed under
+ *   too small   every poll of an ordinary tab reads as a hole, `watchedSince`
+ *               restarts on every read, and the age test can never fire —
+ *               DRY-72's trap 3a silently off.
+ *   too large   a tab hidden for less than the gap has that time counted as
+ *               attention, so the wake can trip the notice with nothing having
+ *               failed. That is this ticket's own bug, at a shorter duration.
+ *
+ * This constant is the lower side. The paired shell polls every
+ * `TICKET_POLL_MS` (20s, `shell/src/lib/tracker.ts`) and arms the next poll only
+ * once the previous one has SETTLED, so a real tab's gaps run a little over 20s;
+ * 30s clears that with margin. Deriving from the window alone satisfies it at
+ * the shipping numbers by arithmetic coincidence (60s / 2 = 30s) and stops the
+ * moment somebody turns the window down: at
+ * `DRYDOCK_TRACKER_STALE_AFTER_MS=30000`, a perfectly reasonable "tell me
+ * sooner", asking for the notice EARLIER would have switched it off.
+ *
+ * The upper side can't be a clamp, because below about twice the client's poll
+ * interval the two are jointly unsatisfiable — there is no gap both above 20s
+ * and below a 20s window. It is a boot check on the pair instead
+ * (`staleWindowError`, `config.ts`), which refuses the combination rather than
+ * picking a number nobody asked for.
+ *
+ * One honest limit on the 20s figure: the shell BACKS OFF on consecutive failed
+ * pulls (`TICKET_POLL_MS * 2 ** failures`, capped at 120s), so a tab whose pulls
+ * are timing out reads this daemon every 40s or more and every read of it looks
+ * like a hole. The age test is off for as long as that lasts — acceptable
+ * because the browser is reporting those failures through its own catch
+ * meanwhile, and it ends the moment one pull succeeds and the count resets.
+ *
+ * An explicit `watchedGapMs` (the env knob, and the harnesses) may sit under
  * this floor: a harness that runs the whole window in 200ms needs a gap to
  * match, and saying so out loud is different from arriving there by accident.
  */
-const WATCH_GAP_FLOOR_MS = 30_000;
+export const WATCH_GAP_FLOOR_MS = 30_000;
+
+/**
+ * The gap a given staleness window derives, when nobody states one.
+ *
+ * Exported because `config.ts` has to check the pair it produces BEFORE the
+ * daemon boots, and a second copy of this arithmetic there is how the check and
+ * the behaviour drift apart.
+ */
+export function deriveWatchGapMs(staleAfterMs: number): number {
+  return Math.max(Math.round(staleAfterMs / 2), WATCH_GAP_FLOOR_MS);
+}
 
 interface Entry {
   /** Absent until the first successful fetch — see the cold path in `get`. */
@@ -298,8 +328,7 @@ export class TicketListCache {
     // Half the window, but never under the floor — see WATCH_GAP_FLOOR_MS for
     // why the second half of that is load-bearing rather than belt-and-braces.
     // An explicit value (harnesses, and the knob they set) is taken as given.
-    this.watchedGapMs =
-      watchedGapMs ?? Math.max(Math.round(this.staleAfterMs / 2), WATCH_GAP_FLOOR_MS);
+    this.watchedGapMs = watchedGapMs ?? deriveWatchGapMs(this.staleAfterMs);
     this.idleMs = idleMs;
     this.onDiagnose = onDiagnose;
   }
