@@ -9,7 +9,7 @@ import {
 // cannot become the import cycle that a config module usually is at the bottom
 // of. The alternative is a second copy of the derivation here, which is how a
 // boot check and the behaviour it checks drift apart (DRY-84).
-import { deriveWatchGapMs } from "./tracker/cache.js";
+import { deriveStaleAfterMs, deriveWatchGapMs } from "./tracker/cache.js";
 
 /**
  * Parse DRYDOCK_REPO_PATHS ("name=path,other=~/other") into a name→path map.
@@ -170,10 +170,12 @@ const PORT = Number(process.env.DRYDOCK_PORT ?? 4317);
  * Hoisted out of CONFIG because the staleness window below is derived from it,
  * and an object literal can't read its own sibling.
  */
-const TICKET_CACHE_MS = msOrOff(process.env.DRYDOCK_TRACKER_CACHE_MS, 20_000);
+const TICKET_CACHE_MS = msOrOff(process.env.DRYDOCK_TRACKER_CACHE_MS, 20 * 1000);
 const TICKET_STALE_AFTER_MS = msOrOff(
   process.env.DRYDOCK_TRACKER_STALE_AFTER_MS,
-  Math.max(TICKET_CACHE_MS * 3, 60_000),
+  // Derived by the cache rather than repeated here, so this and the window an
+  // unconfigured cache picks for itself cannot say different things (DRY-84).
+  deriveStaleAfterMs(TICKET_CACHE_MS),
 );
 const TICKET_WATCH_GAP_MS = optionalNum(process.env.DRYDOCK_TRACKER_WATCH_GAP_MS);
 

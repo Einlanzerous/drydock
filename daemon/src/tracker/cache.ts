@@ -131,6 +131,23 @@ function describe(err: unknown): string {
 const dur = (ms: number): string => (ms < 1000 ? `${Math.round(ms)}ms` : `${Math.round(ms / 1000)}s`);
 
 /**
+ * The staleness window a given TTL derives, when nobody states one (DRY-72
+ * trap 3a; retimed by DRY-84). Three TTLs, and never under a minute, so an
+ * ordinary refresh cycle is nowhere near it — the constructor below says why
+ * the test exists at all.
+ *
+ * Exported for the same reason `deriveWatchGapMs` is: `config.ts` has to
+ * produce the effective window before the daemon boots, in order to check the
+ * pair it makes with the gap, and a second copy of this arithmetic there is how
+ * a boot check and the behaviour it checks drift apart.
+ */
+export const STALE_WINDOW_FLOOR_MS = 60 * 1000; // a minute
+
+export function deriveStaleAfterMs(ttlMs: number): number {
+  return Math.max(ttlMs * 3, STALE_WINDOW_FLOOR_MS);
+}
+
+/**
  * Floor on the watch gap (DRY-84), and the reason it is a floor rather than a
  * derivation.
  *
@@ -169,7 +186,7 @@ const dur = (ms: number): string => (ms < 1000 ? `${Math.round(ms)}ms` : `${Math
  * this floor: a harness that runs the whole window in 200ms needs a gap to
  * match, and saying so out loud is different from arriving there by accident.
  */
-export const WATCH_GAP_FLOOR_MS = 30_000;
+export const WATCH_GAP_FLOOR_MS = 30 * 1000; // half a minute, and comfortably over the shell's 20s poll
 
 /**
  * The gap a given staleness window derives, when nobody states one.
@@ -274,7 +291,7 @@ export class TicketListCache {
     private readonly ttlMs: number,
     {
       staleAfterMs,
-      idleMs = 600_000,
+      idleMs = 10 * 60 * 1000,
       watchedGapMs,
       onDiagnose,
     }: {
@@ -324,7 +341,7 @@ export class TicketListCache {
     // present an
     // arbitrarily old list as live, which is the exact dishonesty DRY-55 exists
     // to prevent.
-    this.staleAfterMs = staleAfterMs ?? Math.max(ttlMs * 3, 60_000);
+    this.staleAfterMs = staleAfterMs ?? deriveStaleAfterMs(ttlMs);
     // Half the window, but never under the floor — see WATCH_GAP_FLOOR_MS for
     // why the second half of that is load-bearing rather than belt-and-braces.
     // An explicit value (harnesses, and the knob they set) is taken as given.
