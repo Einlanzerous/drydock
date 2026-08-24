@@ -60,11 +60,14 @@ Numbered because each is a bug that either shipped or was one commit away.
    correction. Reversed, labelled ("newest first" is on the count line), and the
    first card is badged.
 
-3. **A comment carries its own markdown headings, several outranking anything
-   above them.** `## What the design adds` is a real comment on this project's
-   own tickets; under the shared `.mdbody` scale it renders larger than the
-   panel's 16px title, so one comment restyles the panel around it and reads as
-   a section OF the ticket rather than as somebody talking. The brief solves
+3. **A comment carries its own markdown headings, pitched against the panel's
+   own.** `## What the design adds` is a real comment on this project's own
+   tickets; under the shared `.mdbody` scale that `h2` renders at 15px bold
+   against the panel's 16px title — and an `h1` in a comment, at 16.9px with a
+   rule under it, is simply larger than the title. Either way one comment
+   restyles the panel around it and reads as a section OF the ticket rather
+   than as somebody talking. (The numbers matter: 15px is the one a reader is
+   most likely to check, and "bigger than the title" would not survive it.) The brief solves
    this with `<comment author= at=>` tags (DRY-53 trap 4); a rendered surface
    can't use a delimiter, so `.mdbody.comment-body` collapses every heading
    level to the body's own size and drops `h1`'s rule and `hr`'s prominence. The
@@ -105,7 +108,19 @@ Numbered because each is a bug that either shipped or was one commit away.
    stays pinned. Asserted on all four edges plus the viewport, because DRY-74's
    symptom was a button that had left a panel which itself looked fine.
 
-8. **The comment that justified the old behaviour outlived it.** The route's own
+8. **Switching tickets mid-fetch repaints the panel from the request that
+   loses.** Older than this ticket — the panel is reused between tickets and its
+   fetch never checked that the answer belonged to the ticket still on screen —
+   but DRY-76 both widens the window (a Switchyard open is 3 upstream GETs where
+   it was 1, with the walk's own 6s budget on top) and changes what a stale
+   reply paints: not an out-of-date description under the right title, but a
+   comment THREAD under the wrong ticket, on the one surface whose whole job is
+   telling you whether what you are reading is still current. Guarded by
+   comparing `props.ticket` after the await, in the catch and in the `finally` —
+   the last one because a superseded reply clearing `loading` leaves a ticket
+   that is still fetching looking loaded.
+
+9. **The comment that justified the old behaviour outlived it.** The route's own
    comment said the panel "renders none of it", `tracker/types.ts` said only the
    brief reads it, and `shell/src/lib/tracker.ts` said the route "does not
    populate these" — three claims, all true when written, all false the moment
@@ -118,7 +133,8 @@ Numbered because each is a bug that either shipped or was one commit away.
 and its own daemons — no browser, ~15s) and `scripts/verify/ticket-panel.mts`
 (the panel, a browser, ~1 minute). Rig and discrimination counts are in
 [scripts/verify/README.md](../../scripts/verify/README.md#the-ticket-panels-comment-thread-dry-76);
-they fail 21 of 37 and 27 of 36 respectively against the unpatched tree.
+they fail 21 of 37 and 31 of 40 respectively against the unpatched tree, and the
+race in trap 8 has its own narrower recipe there (2 of 40).
 
 The one thing neither can catch on its own is the reason there are two: a route
 that hands the thread over proves nothing about a panel that stopped asking for

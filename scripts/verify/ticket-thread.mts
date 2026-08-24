@@ -319,6 +319,11 @@ console.log("\n--- jira ---");
 if (!(await startDaemon("jira"))) {
   console.log("  FAIL  the daemon never came up\n", daemonLog.join("").slice(-800));
   failures++;
+  // Stopped even though it never answered: "didn't come up in 20s" and "isn't
+  // running" are different things — a cold tsx cache can put a daemon over that
+  // wait — and a child left holding PORT makes the NEXT round fail to bind, so
+  // one slow start would report itself as two dead daemons plus a leaked node.
+  await stopDaemon();
 } else {
   // FIRST, before any payload assertion: an unconfigured live provider falls
   // back to the fixture and only logs about it, so a green run here could
@@ -388,6 +393,7 @@ console.log("\n--- switchyard ---");
 if (!(await startDaemon("switchyard"))) {
   console.log("  FAIL  the daemon never came up\n", daemonLog.join("").slice(-800));
   failures++;
+  await stopDaemon(); // see the jira round
 } else {
   const info = (await (await fetch(`${DAEMON}/api/tracker/info`)).json()) as { id?: string };
   check("the daemon really is on the Switchyard provider", info.id === "switchyard", String(info.id));

@@ -41,6 +41,8 @@ import type { Detail, TicketDetail } from "./api.mjs";
 const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5384";
 /** The fixture ticket with a thread — and with a description the thread contradicts. */
 const TICKET = process.env.TICKET ?? "ARGY-89";
+/** A second ticket under the same epic, for the switch-while-loading round. */
+const SIBLING = process.env.SIBLING ?? "ARGY-90";
 
 let failures = 0;
 let ran = 0;
@@ -351,6 +353,56 @@ console.log("\n7. a long thread does not push Spawn Agent off the panel (DRY-74)
   });
   check("the thread scrolls inside the description box", (grew?.over ?? 0) > 0, JSON.stringify(grew));
   check("…rather than growing the panel past its cap", (grew?.panel ?? 0) <= 950 * 0.82 + 2, JSON.stringify(grew));
+  await page.close();
+}
+
+console.log("\n8. a slower earlier ticket cannot land on the one now open");
+{
+  // The race is older than this ticket — the panel is reused between tickets,
+  // and its fetch had no guard that the answer belonged to the ticket still on
+  // screen — but DRY-76 both widens it (a Switchyard open is 3 upstream GETs
+  // where it was 1) and sharpens it: what a stale reply now paints is a comment
+  // THREAD under the wrong ticket, on the panel whose whole job is telling you
+  // whether the description in front of you is still current.
+  const page = await ctx.newPage();
+  await page.route("**/api/tracker/ticket/**", async (route: Route) => {
+    const first = route.request().url().includes(TICKET);
+    // Only the FIRST ticket is slow, so the reply order is guaranteed to be the
+    // wrong one. A harness that raced the two would pass by luck.
+    if (first) await sleep(3000);
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ticket: detail({
+          key: first ? TICKET : SIBLING,
+          description: first ? "SLOW-A description" : "FAST-B description",
+          commentCount: 1,
+          comments: [
+            {
+              author: first ? "slow" : "fast",
+              createdAt: "2026-07-04T10:00:00.000+0000",
+              body: first ? "SLOW-A comment" : "FAST-B comment",
+            },
+          ],
+        }),
+      }),
+    });
+  });
+  await page.goto(SHELL);
+  await page.waitForSelector(".grp", { timeout: 15000 });
+  await openTicket(page);
+  // …and switch before the first answers.
+  await page.locator(".row:not(.epic)").filter({ hasText: SIBLING }).first().click();
+  await sleep(1000);
+  const during = await read(page);
+  check("the second ticket's thread renders", during.comments[0]?.body === "FAST-B comment", during.comments[0]?.body ?? "(none)");
+  // Past the point the first request answers.
+  await sleep(3500);
+  const after = await read(page);
+  check("the superseded reply does not overwrite it", after.comments[0]?.body === "FAST-B comment", after.comments[0]?.body ?? "(none)");
+  check("…nor its description", after.desc.includes("FAST-B"), after.desc.slice(0, 60));
+  check("…and the panel is not stuck loading", !after.desc.includes("Loading") && after.comments.length === 1, `${after.comments.length} cards`);
   await page.close();
 }
 

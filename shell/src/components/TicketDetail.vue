@@ -233,6 +233,18 @@ watch(
     if (panelEl.value) panelEl.value.scrollTop = 0;
     // Resolve the spawn cwd + worktree in parallel with the description fetch.
     void previewTarget(t);
+    // Is this still the ticket on screen? Checked after the await below, and in
+    // the catch and finally beside it — which is why it is declared out here.
+    //
+    // The race predates DRY-76 — click one ticket, then another before the
+    // first replies, and the first reply wins the assignment — but this ticket
+    // widens it and sharpens it. Widens: a Switchyard open is 3 upstream GETs
+    // where it was 1, with the walk's own 6s budget on top. Sharpens: the
+    // losing payload now carries a comment thread and an epic, so a stale
+    // answer is no longer an out-of-date description under the right title, it
+    // is a THREAD under the wrong ticket — on the one panel whose whole premise
+    // is telling you whether the description in front of you is still true.
+    const mine = (): boolean => props.ticket === t;
     try {
       // `{thread: true}` (DRY-76): the comment thread and the resolved epic,
       // which the agent's brief has had since DRY-53 and this panel had not.
@@ -242,11 +254,14 @@ watch(
       // Switchyard the comments are inlined too, leaving only the bounded
       // ancestry walk. A second request behind the description would spend a
       // whole extra ticket GET to save that walk.
-      detail.value = await getTicket(t.key, { thread: true });
+      const loaded = await getTicket(t.key, { thread: true });
+      if (mine()) detail.value = loaded;
     } catch (e) {
-      loadError.value = String(e);
+      if (mine()) loadError.value = String(e);
     } finally {
-      loading.value = false;
+      // Only the request the panel is still waiting on may clear the spinner —
+      // otherwise a superseded reply lands "loaded" on a ticket still fetching.
+      if (mine()) loading.value = false;
     }
   },
   { immediate: true },
@@ -361,7 +376,21 @@ type Thread =
   | { kind: "silent" }
   | { kind: "empty" }
   | { kind: "lost"; total: number }
-  | { kind: "shown"; comments: TicketComment[]; total: number };
+  | { kind: "shown"; comments: RenderedComment[]; total: number };
+
+/**
+ * A comment with its markdown ALREADY rendered.
+ *
+ * Rendered here rather than as `v-html="renderMarkdown(c.body)"` in the
+ * template, because that call would sit inside the `v-for` and so inside the
+ * render function — re-running marked + DOMPurify once per comment on every
+ * reactive change this panel has, not just when the ticket does. Two live ones
+ * in this very component: `onDragMove` writes `pos` on every mousemove and
+ * `pos` feeds `.panel`'s `:style`, and the prompt/cwd/branch inputs re-render
+ * on every keystroke. That was one parse before DRY-76 and is up to forty
+ * after it. The computed re-runs only when `detail` is replaced.
+ */
+type RenderedComment = TicketComment & { html: string };
 
 /**
  * NEWEST FIRST — the one ordering decision here worth arguing about.
@@ -388,7 +417,11 @@ const thread = computed<Thread | null>(() => {
   const total = Math.max(d.commentCount ?? list.length, list.length);
   if (!total) return { kind: "empty" };
   if (!list.length) return { kind: "lost", total };
-  return { kind: "shown", comments: [...list].reverse(), total };
+  return {
+    kind: "shown",
+    comments: [...list].reverse().map((c) => ({ ...c, html: renderMarkdown(c.body) })),
+    total,
+  };
 });
 
 /** The thread's true length, for the jump pill. 0 when there is nothing to jump to. */
@@ -524,7 +557,7 @@ function jumpToThread(): void {
                    h1 inside a comment outranks the panel's own title. The rules
                    that flatten them live in style.css, because scoped CSS does
                    not reach v-html content. -->
-              <div class="mdbody comment-body" v-html="renderMarkdown(c.body)"></div>
+              <div class="mdbody comment-body" v-html="c.html"></div>
             </article>
           </template>
         </section>

@@ -2064,7 +2064,7 @@ bunx playwright install chromium             # once per machine; see "Running th
 
 | harness | what it holds down |
 |---|---|
-| `ticket-panel.mts` | The panel renders the thread, newest first, and says how much of the record it is showing. Round 1 is the whole path unfaked (real daemon, fixture provider, real `?thread=true`) on ARGY-89 — the fixture ticket whose second comment cancels a feature its description still describes. Rounds 2-6 fulfil the route in the browser for the four shapes a fixture tracker cannot produce, and round 7 holds DRY-74's line: forty comments scroll inside `.desc` instead of pushing **Spawn Agent** off the panel. |
+| `ticket-panel.mts` | The panel renders the thread, newest first, and says how much of the record it is showing. Round 1 is the whole path unfaked (real daemon, fixture provider, real `?thread=true`) on ARGY-89 — the fixture ticket whose second comment cancels a feature its description still describes. Rounds 2-6 fulfil the route in the browser for the four shapes a fixture tracker cannot produce; round 7 holds DRY-74's line (forty comments scroll inside `.desc` instead of pushing **Spawn Agent** off the panel); round 8 switches tickets mid-flight, with the FIRST request held 3s so the reply order is guaranteed wrong rather than raced. |
 
 Three of those rounds exist to keep three different facts from rendering as the
 same sentence: "no comments", "63 comments and none of them arrived", and "the
@@ -2079,9 +2079,14 @@ which loads after it — silently pointing the page at :4317, the LIVE daemon.
 Discrimination (see [the section below](#making-sure-a-harness-still-discriminates)):
 against the unpatched tree `ticket-thread.mts` fails **21 of 37** — revert the
 `{thread: true}` argument in `server.ts`'s ticket route — and `ticket-panel.mts`
-fails **27 of 36** with the three shell files (`TicketDetail.vue`, `lib/tracker.ts`,
-`style.css`) at `HEAD`, which vite hot-reloads without restarting anything.
+fails **31 of 40** with the three shell files (`TicketDetail.vue`, `lib/tracker.ts`,
+`style.css`) at `main`, which vite hot-reloads without restarting anything.
 Both report rather than throw, so the count is readable off one run.
+
+Round 8 has a narrower recipe worth keeping, because the race it covers is older
+than the feature: drop the three `if (mine())` guards in `TicketDetail.vue`'s
+ticket watcher and it fails **2 of 40** — the superseded reply repaints the
+panel's description and its thread — while every other round stays green.
 
 The handful that pass either way are negative assertions — "no cards are
 invented", "no pill to jump to nothing" — and each is paired with a positive one
