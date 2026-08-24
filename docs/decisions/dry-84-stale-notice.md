@@ -46,15 +46,31 @@ somebody starts watching again.
    INFO [drydock] tracker list aged with nobody polling it event=unwatched \
      ageSec=9 watchedSec=0 unwatchedSec=9 refreshes=7 failures=0 query="…"
    ```
-2. **The gap threshold cannot come from the TTL, and cannot be the window
-   either.** It has to sit above the client's poll interval (or an ordinary tab
+   All three are once per onset, and `unwatched` needs its own latch
+   (`noticedUnwatched`) rather than riding `reported`, because it isn't a state
+   the entry is in — it's an observation about one read. Where the watch gap is
+   tuned under the client's cadence (a harness, or a host that has set the knob
+   there) EVERY read is a hole, so without the latch the line meant to be the
+   rare trace of a tab that stopped polling prints once per poll.
+2. **The gap threshold cannot come from the TTL, cannot be the window, and
+   cannot be half the window either — a floor is what makes the property
+   true.** It has to sit above the client's poll interval (or an ordinary tab
    looks like a hole every single poll, and age-staleness quietly stops working)
    and below the staleness window (or a tab hidden for 45s comes back, has its
    gap counted as attention, and trips the notice — the bug, at a shorter
-   duration). Half the window: 30s at the shipping numbers, against a shell that
-   polls every 20s. Deriving it from `ttlMs` fails the first test the moment a
-   rig turns the TTL down — the harness runs a 4s TTL against a browser still
-   polling every 20s.
+   duration). Deriving it from `ttlMs` fails the first test the moment a rig
+   turns the TTL down. Half the window looks right and is the same bug one step
+   further out: it clears the shell's 20s poll at the shipping numbers only
+   because 60s / 2 = 30s, so `DRYDOCK_TRACKER_STALE_AFTER_MS=30000` — "tell me
+   sooner", the obvious reason to touch that knob — derives 15s, every poll of a
+   live tab reads as a hole, and the age test can never fire again. Asking for
+   the notice EARLIER would have switched it off, with only `0` documented as
+   the off switch. Hence `WATCH_GAP_FLOOR_MS` (30s) under the derivation, an
+   explicit `DRYDOCK_TRACKER_WATCH_GAP_MS` for the harnesses that legitimately
+   need to go below it, and section (m) of the in-process suite asserting the
+   arithmetic — the property is thirty seconds of polling to observe
+   behaviourally and one `Math.max` to check. **Caught in review, not by me:
+   the trap list said the requirement and the code didn't hold it.**
 3. **A read-stream hole RESTARTS the clock; it does not subtract from it.**
    Accumulating watched time and discounting the holes is the more precise
    model and the wrong one: a tab hidden for ten minutes would come back with

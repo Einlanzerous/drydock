@@ -185,7 +185,12 @@ console.log("\n(g) a list nobody can refresh, while somebody IS asking, goes sta
   // the two together — either one alone can be satisfied by a cache that is
   // simply wrong in the other direction.
   const s = stub();
-  const cache = new TicketListCache(20, { staleAfterMs: 80 }); // and so a 40ms watch gap
+  // The watch gap is STATED rather than inherited. Derived it would be floored
+  // at 30s (WATCH_GAP_FLOOR_MS, which is what keeps it above a real client's
+  // poll interval), and this section polls every 15ms — so a section that let
+  // it default would be asserting against a number three orders of magnitude
+  // away from the one it depends on.
+  const cache = new TicketListCache(20, { staleAfterMs: 80, watchedGapMs: 40 });
   await cache.get("k", s.fetch);
   const fresh = await cache.get("k", s.fetch);
   check("not stale while it's young", !fresh.stale, JSON.stringify(fresh.stale));
@@ -290,7 +295,11 @@ console.log("\n(l) DRY-84: time in which nobody asked is not time the list rotte
   // trouble. Same 200ms of aging as (g), same cache, only nobody polling.
   const s = stub();
   const seen: CacheDiagnostic[] = [];
-  const cache = new TicketListCache(20, { staleAfterMs: 80, onDiagnose: (d) => seen.push(d) });
+  const cache = new TicketListCache(20, {
+    staleAfterMs: 80,
+    watchedGapMs: 40, // stated, as in (g) — the silence below is 200ms, five times it
+    onDiagnose: (d) => seen.push(d),
+  });
   await cache.get("k", s.fetch);
   // Nothing will land from here on, so the age clock is the ONLY thing that
   // could speak — which is what makes the silence below mean something.
@@ -326,7 +335,38 @@ console.log("\n(l) DRY-84: time in which nobody asked is not time the list rotte
   );
 }
 
-console.log("\n(m) the age test switches off; a failure still speaks");
+console.log("\n(m) the derived watch gap clears a real client's poll interval");
+{
+  // The one property the whole fix rests on, and the one a behavioural test
+  // can't reach: the gap has to be LONGER than the interval the client polls
+  // at, or every ordinary poll reads as a hole, `watchedSince` restarts on
+  // every read, and the age test can never fire again — DRY-72's trap 3a
+  // switched off by arithmetic, with nothing saying so.
+  //
+  // Half the window satisfies that at the shipping numbers by coincidence
+  // (60s / 2 = 30s > the shell's 20s poll) and stops satisfying it the moment
+  // somebody turns the window down. Asserted here rather than by polling for
+  // thirty seconds, because it is a `Math.max`.
+  const POLL_MS = 20_000; // TICKET_POLL_MS, shell/src/lib/tracker.ts
+  const shipped = new TicketListCache(20_000);
+  check(
+    "at the shipping numbers",
+    shipped.watchedGapMs > POLL_MS,
+    `${shipped.watchedGapMs}ms vs a ${POLL_MS}ms poll`,
+  );
+  // "Tell me sooner" is the natural way to reach for this knob, and before the
+  // floor it was how you turned the feature off.
+  const sooner = new TicketListCache(20_000, { staleAfterMs: 30_000 });
+  check(
+    "and with the window turned down to 30s",
+    sooner.watchedGapMs > POLL_MS,
+    `${sooner.watchedGapMs}ms vs a ${POLL_MS}ms poll`,
+  );
+  const stated = new TicketListCache(20, { staleAfterMs: 80, watchedGapMs: 40 });
+  check("an explicit gap still bypasses the floor, for harnesses", stated.watchedGapMs === 40, `${stated.watchedGapMs}ms`);
+}
+
+console.log("\n(n) the age test switches off; a failure still speaks");
 {
   // 0 is a posture, not a typo: a tracker known to be slow, where the only
   // thing worth a notice is a refresh that actually threw. What it must not do

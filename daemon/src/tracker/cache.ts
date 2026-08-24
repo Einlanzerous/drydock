@@ -130,6 +130,28 @@ function describe(err: unknown): string {
  */
 const dur = (ms: number): string => (ms < 1000 ? `${Math.round(ms)}ms` : `${Math.round(ms / 1000)}s`);
 
+/**
+ * Floor on the watch gap (DRY-84), and the reason it is a floor rather than a
+ * derivation.
+ *
+ * The gap has one job: be longer than the interval its CLIENT polls at. The
+ * paired shell polls every `TICKET_POLL_MS` (20s, `shell/src/lib/tracker.ts`)
+ * and arms the next poll only once the previous one has SETTLED, so a real
+ * tab's gaps run a little over 20s; 30s clears that with margin. Deriving the
+ * gap from the staleness window alone satisfies that at the shipping numbers by
+ * arithmetic coincidence (60s / 2 = 30s) and stops satisfying it the moment
+ * somebody turns the window down — at `DRYDOCK_TRACKER_STALE_AFTER_MS=30000`,
+ * a perfectly reasonable "tell me sooner", every poll of an ordinary tab reads
+ * as a hole, `watchedSince` restarts on every read, and the age test can never
+ * fire again. Asking for a notice EARLIER would have switched it off, silently,
+ * with only `0` documented as the off switch.
+ *
+ * An explicit `watchedGapMs` (the env knob, and the harnesses) is allowed under
+ * this floor: a harness that runs the whole window in 200ms needs a gap to
+ * match, and saying so out loud is different from arriving there by accident.
+ */
+const WATCH_GAP_FLOOR_MS = 30_000;
+
 interface Entry {
   /** Absent until the first successful fetch — see the cold path in `get`. */
   tickets?: Ticket[];
@@ -171,6 +193,15 @@ interface Entry {
   lastRefreshMs?: number;
   /** What was last reported for this entry, so onset is logged once and not once per poll. */
   reported?: StaleReason;
+  /**
+   * Whether the `unwatched` line has already been said for the current stretch
+   * of not-refreshing, cleared by a refresh that lands. Same reason `reported`
+   * exists: with a watch gap deliberately tuned below the client's cadence (a
+   * harness, or a host that has turned the knob right down) EVERY read is a
+   * hole, and the line meant to be the rare trace of a tab that stopped polling
+   * would otherwise print once per poll.
+   */
+  noticedUnwatched?: boolean;
 }
 
 /**
@@ -193,7 +224,13 @@ interface Entry {
 export class TicketListCache {
   private readonly entries = new Map<string, Entry>();
   private readonly staleAfterMs: number;
-  private readonly watchedGapMs: number;
+  /**
+   * Readable so the property that matters can be asserted directly (DRY-84).
+   * The floor below only holds if something checks it, and checking it through
+   * behaviour means a test that polls for longer than the client's poll
+   * interval — a 30s test for a one-line `Math.max`.
+   */
+  readonly watchedGapMs: number;
   private readonly idleMs: number;
   private readonly onDiagnose?: (d: CacheDiagnostic) => void;
 
@@ -231,12 +268,15 @@ export class TicketListCache {
       idleMs?: number;
       /**
        * The longest hole in the read stream that still counts as somebody
-       * watching (DRY-84) — see `watchedSince`. Half the staleness window by
-       * default, which at the shipping numbers is 30s against a shell that polls
-       * every 20s: comfortably more than one poll, comfortably less than the
-       * window itself, so an ordinary tab holds the clock running and a tab that
-       * has stopped polling doesn't. A parameter so the property is testable in
-       * a second rather than in a minute.
+       * watching (DRY-84) — see `watchedSince`. Defaults to half the staleness
+       * window, floored at `WATCH_GAP_FLOOR_MS`, which is what keeps it above
+       * the interval its client polls at however the window is tuned.
+       *
+       * Passing one BYPASSES that floor, which is the point: a harness runs the
+       * whole window in milliseconds and needs a gap to match. In prod it is
+       * `DRYDOCK_TRACKER_WATCH_GAP_MS`, and setting it under the shell's 20s
+       * poll turns the age test off for an ordinary tab — deliberate there,
+       * silent if it had been arrived at by arithmetic.
        */
       watchedGapMs?: number;
       /** Where an entry's account of itself goes (DRY-84); the daemon logs it. */
@@ -255,9 +295,11 @@ export class TicketListCache {
     // arbitrarily old list as live, which is the exact dishonesty DRY-55 exists
     // to prevent.
     this.staleAfterMs = staleAfterMs ?? Math.max(ttlMs * 3, 60_000);
-    // At least 1ms, so a caller who turns the window right down still has a gap
-    // test rather than one that rounds to "every read is a hole".
-    this.watchedGapMs = watchedGapMs ?? Math.max(Math.round(this.staleAfterMs / 2), 1);
+    // Half the window, but never under the floor — see WATCH_GAP_FLOOR_MS for
+    // why the second half of that is load-bearing rather than belt-and-braces.
+    // An explicit value (harnesses, and the knob they set) is taken as given.
+    this.watchedGapMs =
+      watchedGapMs ?? Math.max(Math.round(this.staleAfterMs / 2), WATCH_GAP_FLOOR_MS);
     this.idleMs = idleMs;
     this.onDiagnose = onDiagnose;
   }
@@ -322,7 +364,10 @@ export class TicketListCache {
     // fetch above, and the age has to be of the answer being returned.
     const settled = Date.now();
     const ageMs = settled - e.at;
-    if (wouldHaveFlagged) this.diagnose(e, "unwatched", key, ageMs, settled, gapMs);
+    if (wouldHaveFlagged && !e.noticedUnwatched) {
+      e.noticedUnwatched = true;
+      this.diagnose(e, "unwatched", key, ageMs, settled, gapMs);
+    }
     const reason = this.staleReason(e, settled);
     // Once per onset, not once per poll: at a 20s poll the alternative is 180
     // identical lines an hour for one outage, which is how a log stops being read.
@@ -452,6 +497,7 @@ export class TicketListCache {
       // Nothing is owed any more, so the age clock starts over from the data
       // rather than from whenever somebody last asked (DRY-84).
       e.watchedSince = e.at;
+      e.noticedUnwatched = undefined;
       e.refreshes++;
       e.failures = 0;
       e.error = undefined;

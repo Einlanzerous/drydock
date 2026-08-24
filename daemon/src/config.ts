@@ -86,6 +86,21 @@ function msOrOff(raw: string | undefined, fallback: number): number {
 }
 
 /**
+ * A knob whose "unset" is a THIRD state neither `num()` nor `msOrOff()` can
+ * express: not a number, not zero-means-off, but "let the consumer derive it".
+ *
+ * `num(raw, 0)` would collapse that into a 0 the consumer then has to read as
+ * "unset", which is exactly the ambiguity DRY-60's trap 9 is about — one value
+ * standing for two intentions. Anything unparseable or non-positive falls back
+ * to the derivation rather than to a number nobody chose.
+ */
+function optionalNum(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw.trim() === "") return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+/**
  * Configuration that cannot mean what it says. Collected rather than thrown,
  * because this module is imported by every other one and a throw here produces
  * a stack trace where a sentence belongs — `index.ts` prints these and exits
@@ -671,6 +686,25 @@ export const CONFIG = {
         process.env.DRYDOCK_TRACKER_STALE_AFTER_MS,
         Math.max(TICKET_CACHE_MS * 3, 60_000),
       ),
+      /**
+       * The longest gap between two reads of the same list that still counts as
+       * somebody watching it (DRY-84) — the clock above only runs across gaps
+       * shorter than this.
+       *
+       * Unset it derives from the window (half, floored at 30s in
+       * `tracker/cache.ts`), which is what keeps it clear of the shell's 20s
+       * poll however the window is tuned. It is reachable at all for the
+       * harnesses, which run the whole window inside a second and need a gap to
+       * match — and setting it BELOW the poll interval makes every ordinary poll
+       * look like a hole, which switches the age test off. That is a legitimate
+       * thing to ask for on a rig and a foot-gun in prod, so it is spelled out
+       * rather than derived.
+       *
+       * Through `num()`, not `msOrOff`: zero here isn't a posture, it's a typo —
+       * it would mean "no read is ever more than 0ms after the last one", i.e.
+       * the pre-DRY-84 clock, reached by a value that reads like an off switch.
+       */
+      watchGapMs: optionalNum(process.env.DRYDOCK_TRACKER_WATCH_GAP_MS),
       /**
        * An epic's child counts (DRY-13), which are the unbounded half of a pull
        * — that query spans every status, so it grows with years of closed work

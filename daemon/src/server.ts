@@ -76,6 +76,12 @@ auth.useSessions({
 // tracker instead of each paying for its own.
 const ticketCache = new TicketListCache(CONFIG.tracker.cache.ticketsMs, {
   staleAfterMs: CONFIG.tracker.cache.staleAfterMs,
+  // Undefined unless a host set it, and then the cache derives it with a floor
+  // under the shell's poll interval (DRY-84). Spread rather than passed as
+  // `undefined`, so "unset" stays one state instead of two.
+  ...(CONFIG.tracker.cache.watchGapMs === undefined
+    ? {}
+    : { watchedGapMs: CONFIG.tracker.cache.watchGapMs }),
   // The desk's tracker notice, in the daemon's own words (DRY-84). It fired
   // against a corporate Jira with no outage behind it, and the two possible
   // causes — a tab that had stopped polling, or refreshes that were failing or

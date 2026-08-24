@@ -312,7 +312,8 @@ bunx playwright install chromium             # once per machine; see "Running th
    DRYDOCK_TRACKER=switchyard DRYDOCK_SWITCHYARD_URL=http://127.0.0.1:4386 \
    DRYDOCK_TRACKER_PROJECTS=DRY \
    DRYDOCK_TRACKER_CACHE_MS=4000 DRYDOCK_TRACKER_CHILD_STATS_CACHE_MS=60000 \
-   DRYDOCK_TRACKER_STALE_AFTER_MS=5000 DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS=3000 \
+   DRYDOCK_TRACKER_STALE_AFTER_MS=5000 DRYDOCK_TRACKER_WATCH_GAP_MS=2500 \
+   DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS=3000 \
    DRYDOCK_DATABASE_URL= DRYDOCK_STATE_FILE=/tmp/dry72-state.json \
    DRYDOCK_SESSIONS_DIR=/tmp/dry72-sessions node --import tsx src/index.ts &)
 (cd shell && VITE_DAEMON_URL=http://127.0.0.1:4385 bunx vite --port 5385 --strictPort &)
@@ -332,6 +333,18 @@ have — so section (c) measures the TTL it actually observes and fails if it to
 runs it at 5s, and section (j)'s second half is what fails if the rig left it at
 the default — a run that waited a minute out would prove nothing about either
 half of it.
+
+`DRYDOCK_TRACKER_WATCH_GAP_MS` beside it is **not** optional and is not merely
+"turned down". Unset, the gap derives at a floor of 30s — deliberately above the
+shell's 20s poll, so that a host tuning the window can't switch the age test off
+by arithmetic — and a floor of 30s makes section (j)'s nine-second silence look
+like somebody watching. The rig states 2.5s because everything here runs inside
+a second or two, and the harness's own HTTP polls (every 300ms) are what stand
+in for a tab. One consequence worth knowing while reading a run: under this rig
+the BROWSER's 20s poll is longer than the gap, so the page in sections (k) and
+(l) can never show an age-stale marker — every one of its own polls restarts the
+clock. That is why the age claims are made over `pull()` and the surface claims
+are made over failures.
 
 **Section (l) fakes the hidden tab; it must not background the real one.**
 Chromium throttles a background tab's timers to about once a minute, so hiding
@@ -363,6 +376,13 @@ failed, that a flight throwing synchronously doesn't wedge its key forever.
 Through HTTP those are minute-long waits and races; here they're a stub fetch and
 TTLs in tens of milliseconds.
 
+Section (m) is arithmetic rather than behaviour, and deliberately: the property
+it pins — that the derived watch gap stays clear of the interval its client
+polls at — can only be reached behaviourally by a test that polls for longer
+than that interval, i.e. thirty seconds to check a `Math.max`. It is the
+property the whole fix rests on, since below it every ordinary poll reads as a
+hole and the age test can never fire.
+
 **Read (g) and (l) as one test.** They are the same 200ms of a list not being
 refreshed; the only difference is whether the harness keeps calling `get`
 during it, and that has to be the difference between a notice and silence
@@ -377,6 +397,7 @@ To confirm IT discriminates, revert a fix and watch the matching section fail:
 | in `refresh`, replace the `e.refreshing` block with a bare `return e.refreshing` | (c) `calls=2`, (d) `+0` — Refresh silently returns a pre-click snapshot |
 | in `start`, go back to `e.refreshing ??= (async () => { … finally { e.refreshing = undefined } })()` with `fetch()` called **directly inside** that IIFE | (h) `GEN-0` — the key never refreshes again |
 | in `staleReason`, measure the age from `e.at` instead of `e.watchedSince` (the pre-DRY-84 clock) | 2 failures in (l), and the first one prints the reported symptom verbatim: `no successful refresh in 202ms` over an entry nobody had asked about |
+| drop `WATCH_GAP_FLOOR_MS` from the derivation in the constructor, leaving `staleAfterMs / 2` | (m) `15000ms vs a 20000ms poll` — the age test is off for any host that turned the window down, which is the shape a behavioural test would need half a minute to reach |
 
 **The second one has a trap in it, and it caught me.** Wrapping the *existing*
 `this.run(...)` in a try/finally does NOT reproduce the bug and section (h) passes
