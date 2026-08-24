@@ -21,10 +21,12 @@
 //                     the failure, so the surface section at the end re-proves
 //                     the stale marker end-to-end rather than trusting the field.
 //
-// The `page.evaluate` body in section (j) is a function rather than a string,
-// and that is checked rather than assumed: it binds no name to a function, so
-// it picks up none of tsx's `__name(...)` wrapping (see the note at the top of
-// surface.mts). A `const q = (s) => …` added inside it would break it.
+// The `page.evaluate` bodies in sections (k) and (l) are functions rather than
+// strings, and that is checked rather than assumed: they bind no name to a
+// function, so they pick up none of tsx's `__name(...)` wrapping (see the note
+// at the top of surface.mts). A `const q = (s) => …` added inside one would
+// break it — which is also why (l) shadows `visibilityState` with a data
+// property instead of the getter that would otherwise be the obvious spelling.
 //
 // Setup + overrides: see README.md. Run from `daemon/`, where tsx resolves:
 //   (cd daemon && node --import tsx ../scripts/verify/tracker-cache.mts)
@@ -113,7 +115,7 @@ async function settle(): Promise<number> {
   return prev;
 }
 
-/** What the sidebar is saying, for section (j). */
+/** What the sidebar is saying, for sections (k) and (l). */
 interface SidebarSnap {
   groups: number;
   stale: boolean;
@@ -251,7 +253,66 @@ try {
   check("stale clears", !healed.body.stale, JSON.stringify(healed.body.stale ?? null));
   check("rows intact", (healed.body.tickets?.length ?? 0) > 0, `${healed.body.tickets?.length} tickets`);
 
-  console.log("\n(j) at the surface — the sidebar still says when it's out of date");
+  console.log("\n(j) DRY-84: aging counts only while somebody is asking");
+  // Both halves are the same nine seconds of a list not being refreshed. The
+  // only difference is whether anybody polled during them, and that has to be
+  // the difference between silence and a notice — which is what the ticket was
+  // opened over: the desk raised "no successful refresh in Ns" against a
+  // corporate Jira with no outage behind it, because a hidden tab stops polling
+  // (DRY-72 trap 9) and the entry then ages with nothing able to refresh it.
+  await ctl("/__heal");
+  await ctl("/__latency?ms=0");
+  await pull({ fresh: true }); // a known-fresh entry to start the clock from
+  await ctl("/__reset");
+  await sleep(9000); // nobody asks, for well over the staleness window
+  const woke = await pull();
+  check("the pull after the silence is answered", woke.status === 200, `${woke.status}`);
+  check("and is NOT marked stale", !woke.body.stale, JSON.stringify(woke.body.stale ?? null));
+  check("it really had gone unrefreshed", (await stubState()).list <= 1, JSON.stringify(await stubState()));
+  await settle();
+
+  // The other half, and the one that fails loudly if the rig left the staleness
+  // window at its 60s default: the same aging WHILE POLLED must still report,
+  // or DRY-72's trap 3a is undone and a tracker that is slow rather than broken
+  // goes back to being invisible.
+  await pull({ fresh: true });
+  await ctl("/__reset");
+  // Long enough to still be running when the window closes, short enough that
+  // the daemon's own request deadline doesn't turn it into a FAILURE instead.
+  await ctl("/__latency?ms=2000");
+  let stalled: PullResult | null = null;
+  const stallStart = Date.now();
+  while (Date.now() - stallStart < 12_000) {
+    const r = await pull();
+    if (r.body.stale) {
+      stalled = r;
+      break;
+    }
+    await sleep(300);
+  }
+  const stallSeconds = Math.round((Date.now() - stallStart) / 100) / 10;
+  check(
+    "a list nobody can refresh, while polled, is still called stale",
+    !!stalled,
+    stalled ? `after ${stallSeconds}s` : "never in 12s — is DRYDOCK_TRACKER_STALE_AFTER_MS set? see README.md",
+  );
+  check("and the daemon says WHICH kind it is", stalled?.body.stale?.reason === "stalled", stalled?.body.stale?.reason ?? "(none)");
+  check(
+    "quoting the refresh that hasn't landed, not the age",
+    /a refresh has been running/.test(stalled?.body.stale?.error ?? ""),
+    stalled?.body.stale?.error ?? "(none)",
+  );
+  // Same rule as section (c): the shipping window is 60s and a run that waited
+  // one out would prove nothing about either half above.
+  check(
+    "the rig turned the staleness window down (DRYDOCK_TRACKER_STALE_AFTER_MS)",
+    stallSeconds < 15,
+    `${stallSeconds}s`,
+  );
+  await ctl("/__latency?ms=0");
+  await settle();
+
+  console.log("\n(k) at the surface — the sidebar still says when it's out of date");
   // The half that cannot be checked from here. Before DRY-72 a tracker outage
   // reached the browser as a FAILED FETCH, and every DRY-55 assertion hangs off
   // that catch. It doesn't fail any more — the daemon answers 200 — so if the
@@ -307,6 +368,47 @@ try {
   const cleared = await waitFor(async () => !(await snap()).stale);
   check("and it clears itself, no reload", cleared);
   check("the notice cleared too", (await snap()).notices.length === 0, JSON.stringify((await snap()).notices));
+
+  console.log("\n(l) DRY-84: a tab that stopped polling doesn't come back to an outage");
+  // The reported symptom end to end, and a claim section (j) cannot make:
+  // section (j) proves the daemon no longer SAYS stale, this one proves the desk
+  // no longer raises a notice — and the notice is a condition (DRY-51/58), so it
+  // is raised by one pull and cleared by another, not rendered from the last
+  // response. A daemon fix with the shell still reporting from somewhere else
+  // would pass (j) and fail here.
+  //
+  // The tab is hidden by SHADOWING document.visibilityState and firing the
+  // event, never by really backgrounding the headless page: Chromium throttles a
+  // background tab's timers to about once a minute, so the real thing measures
+  // the browser's throttler instead of this code (DRY-60 trap 1). A data
+  // property rather than a getter, which also keeps every `page.evaluate` body
+  // here free of functions — tsx's transform wraps a named one in a `__name(…)`
+  // helper the page doesn't have (see the header).
+  await ctl("/__latency?ms=0");
+  await ctl("/__reset");
+  await page.evaluate(() =>
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "hidden" }),
+  );
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  await sleep(9000); // longer than the staleness window, with nobody asking
+  const idle = await stubState();
+  // The premise, not decoration: if the hidden tab had gone on polling, the
+  // entry would have been refreshed and there would be nothing to report. Zero
+  // upstream requests is what says it sat there getting old — and it re-proves
+  // DRY-72 trap 9, which is the half of this that must NOT be "fixed" by making
+  // a hidden tab poll again.
+  check("the hidden tab stopped polling", idle.list === 0, `list=${idle.list} total=${idle.total}`);
+  await page.evaluate(() =>
+    Object.defineProperty(document, "visibilityState", { configurable: true, value: "visible" }),
+  );
+  await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+  const pulled = await waitFor(async () => (await stubState()).list > 0, 10_000);
+  check("coming back pulls immediately", pulled);
+  await sleep(3000); // longer than that pull and the refresh behind it
+  const back = await snap();
+  check("and raises no outage notice", back.notices.length === 0, JSON.stringify(back.notices));
+  check("nor the stale marker", !back.stale, `stale=${back.stale}`);
+  check("with the rows still on screen", back.groups === good && good > 0, `${back.groups} vs ${good}`);
 } finally {
   await browser.close();
   await ctl("/__heal").catch(() => {});

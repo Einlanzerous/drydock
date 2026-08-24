@@ -200,7 +200,16 @@ const LIST_TIMEOUT_MS = 15_000;
  */
 export interface TicketPull {
   tickets: Ticket[];
-  stale?: { ageMs: number; error: string };
+  /**
+   * `reason` (DRY-84) is the daemon's own diagnosis: `failed` = a refresh threw,
+   * `stalled` = refreshes are being asked for and aren't landing. It is
+   * OPTIONAL because the shell and the daemon ship separately — the shell is an
+   * nginx image (DRY-91) and the daemon a systemd unit, so a browser holding a
+   * build older or newer than the daemon's is an ordinary Tuesday, not skew to
+   * be crashed on. The wording the desk shows comes from `error` either way;
+   * this is what a harness asserts on instead of prose.
+   */
+  stale?: { ageMs: number; error: string; reason?: "failed" | "stalled" };
 }
 
 export async function listTickets(

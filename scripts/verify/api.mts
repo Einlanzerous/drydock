@@ -116,7 +116,13 @@ export interface HistoryResponse {
  */
 export interface TicketsResponse {
   tickets: Ticket[];
-  stale?: { ageMs: number; error: string };
+  /**
+   * `reason` is the daemon's own diagnosis (DRY-84) — `failed` = a refresh
+   * threw, `stalled` = refreshes are being asked for and aren't landing. It is
+   * what a harness asserts on: the sentence in `error` is prose written for a
+   * person, and the two cases used to share one.
+   */
+  stale?: { ageMs: number; error: string; reason?: "failed" | "stalled" };
 }
 
 /** Read a workspace's windows as the desk shapes them. */

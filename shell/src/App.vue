@@ -359,6 +359,14 @@ function runTicketPull(force = false): Promise<void> {
  * corporate Jira every 20 seconds until morning. Coming back pulls immediately;
  * `onVisibility` owns that half.
  *
+ * That skip has a second consequence, and it was a bug for a while (DRY-84): the
+ * daemon's entry ages with nothing able to refresh it, and the daemon used to
+ * report anything old enough as an outage — so coming back to the desk raised
+ * "Tickets aren't refreshing" with nothing wrong and nothing even asked. The
+ * fix is daemon-side, in `tracker/cache.ts`, because the daemon is what knows
+ * whether anybody was asking; don't answer it here by making a hidden tab poll
+ * again, which is the thing this paragraph exists to prevent.
+ *
  * Every arming is driven from a SETTLED pull, never fired alongside one. Arming
  * beside the pull it just started reads the failure count from before that pull
  * landed, so the delay is always one cycle behind what it describes — and the

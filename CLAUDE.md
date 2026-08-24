@@ -146,7 +146,7 @@ tickets. The per-ticket detail is in the linked docs.
    five-minute sweep delay, a 20s cache TTL — every one of them is correct in
    prod and useless in a harness. Turn the knob down, and make the harness
    *refuse* to run above a threshold rather than pass by waiting.
-   (DRY-49, DRY-60, DRY-72, DRY-90)
+   (DRY-49, DRY-60, DRY-72, DRY-84, DRY-90)
 2. **An exit code is not a verdict.** Signalling a process exits it 129/137/143,
    so inferring failure from the number reports every deliberate stop as a crash.
    `failure` being SET, or `endReason`, is the only thing that means failed —
@@ -160,7 +160,7 @@ tickets. The per-ticket detail is in the linked docs.
 4. **A knob whose `0` means "off" goes through `msOrOff`, not `num()`.** `num()`
    rejects 0 deliberately — for a cap it's a typo — so a deliberate 0 silently
    restores the default and the off switch does nothing. Worst on a knob that
-   guards deletion. (DRY-60 t9, DRY-72 t6, DRY-90 t13)
+   guards deletion. (DRY-60 t9, DRY-72 t6, DRY-84 t5, DRY-90 t13)
 5. **Confirm a harness discriminates before trusting a green run.** Point it at
    the unpatched file (each README says how, and records the expected failure
    count). A harness that passes either way is worse than no harness — several
@@ -305,6 +305,7 @@ Tracker:
 | [tracker-provider-checklist](docs/decisions/tracker-provider-checklist.md) | the nine curls that qualify a Switchyard or Jira provider |
 | [dry-72-tracker-cache](docs/decisions/dry-72-tracker-cache.md) | stale-while-revalidate, deadlines, and the unbounded child-stats query |
 | [dry-61-tracker-deadline](docs/decisions/dry-61-tracker-deadline.md) | one budget for a whole pull, and why it has to be shorter than the browser's |
+| [dry-84-stale-notice](docs/decisions/dry-84-stale-notice.md) | why the "not refreshing" notice fired with nothing wrong — the age clock only runs while somebody is polling |
 | [dry-53-ticket-brief](docs/decisions/dry-53-ticket-brief.md) | the 10000-character cut, and why appending is the bug |
 | [dry-55-tracker-sidebar](docs/decisions/dry-55-tracker-sidebar.md) | the quietest failure the desk has |
 

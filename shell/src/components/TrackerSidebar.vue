@@ -1125,11 +1125,15 @@ const searchScope = computed(() => found.value.scope.join(", "));
       <span class="count">{{ filtered.length }}<template v-if="filtered.length !== augmented.length">/{{ augmented.length }}</template></span>
       <!-- The quiet half of DRY-55: these tickets are real, they're just not
            current. Worth a marker rather than a banner — the loud case is the
-           empty one below. -->
+           empty one below.
+           The title deliberately doesn't say "the last pull failed": since
+           DRY-84 the daemon distinguishes a refresh that threw from one that is
+           running and not landing, and `whyShort` is its sentence for whichever
+           it is — naming the wrong one contradicts the text after the dash. -->
       <span
         v-if="pullError && tickets.length"
         class="stale"
-        :title="`Last pull failed, so these may be out of date — ${whyShort}`"
+        :title="`These may be out of date — ${whyShort}`"
       >stale</span>
       <button
         class="refresh"
