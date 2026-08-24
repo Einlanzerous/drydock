@@ -93,9 +93,13 @@ export interface TicketComment {
  *
  * `thread` buys the comment history and the walk up to the epic, which cost
  * extra tracker round trips: up to two on Switchyard, whose single-ticket
- * endpoint hands back a bare parent UUID, plus a comment page on Jira. Only the
- * SessionStart brief reads any of it — the shell's ticket panel renders none of
- * it — so it is opt-in rather than a tax on every ticket click.
+ * endpoint hands back a bare parent UUID, plus a comment page on Jira. So it is
+ * opt-in rather than a tax on every ticket click — but the panel opts in now
+ * (DRY-76, `/api/tracker/ticket/<KEY>?thread=true`), because the human deciding
+ * whether to spawn an agent was reading a description the thread had already
+ * overtaken while the agent's own brief had the correction. The caller that
+ * still doesn't ask is the workspace drawer, which renders the description
+ * alone.
  */
 export interface TicketDetailOptions {
   thread?: boolean;
@@ -114,8 +118,9 @@ export interface TicketDetail extends Ticket {
    * providers return what they have.
    *
    * `commentCount` is the thread's TRUE length, which is not `comments.length`
-   * whenever a provider capped its fetch. The formatter needs the real number
-   * to tell the agent it's seeing a window rather than the whole record.
+   * whenever a provider capped its fetch. Both readers need the real number to
+   * say they are looking at a window rather than the whole record — the
+   * formatter to the agent, and since DRY-76 the ticket panel to the human.
    *
    * Optional on purpose: a provider that can't answer omits both, and the
    * formatter emits no activity section at all rather than an empty one that

@@ -68,6 +68,10 @@ watch(
     if (!key) return;
     loading.value = true;
     try {
+      // No `{thread: true}` (DRY-76), unlike the ticket panel: this drawer
+      // renders the description alone, and on Switchyard the thread drags the
+      // ancestry walk along with it — two extra GETs for something nothing here
+      // displays. Add the thread here and you must add the request for it.
       detail.value = await getTicket(key);
     } catch (e) {
       loadError.value = String(e);

@@ -1568,12 +1568,27 @@ const server = http.createServer(async (req, res) => {
     const ticketMatch = pathname.match(/^\/api\/tracker\/ticket\/([^/]+)$/);
     if (ticketMatch && req.method === "GET") {
       try {
-        // No `thread` (DRY-53): this serves the shell's ticket panel, which
-        // renders the description and nothing from the comment history or the
-        // epic walk. Asking for them here would put 2 extra Switchyard round
-        // trips behind every ticket click for data that goes straight in the
-        // bin.
-        const ticket = await tracker.getTicket(decodeURIComponent(ticketMatch[1]));
+        // `?thread=true` buys the comment thread and the walk up to the nearest
+        // epic (DRY-76). The panel asks for it: house style records decisions
+        // and corrections as comments, so the description a spawn is decided
+        // from can be the one document that has stopped being true — and the
+        // agent has read the thread since DRY-53 while the human could not.
+        //
+        // Per-request rather than always-on, because the two callers want
+        // different things. The workspace drawer (WorkspacePane) shows the
+        // description alone, and on Switchyard the thread drags the ancestry
+        // walk along with it — up to 2 extra GETs, since that endpoint hands
+        // back a bare parent UUID. Asking here for a caller that renders none
+        // of it is the tax the old comment on this line refused to pay.
+        //
+        // Still deliberately UNCACHED (DRY-72 left this route alone so the
+        // brief reads a live thread): a panel opened to check whether somebody
+        // corrected the ticket in the comments wants the same freshness, and
+        // this is a click, not a 20s poll.
+        const ticket = await tracker.getTicket(
+          decodeURIComponent(ticketMatch[1]),
+          url.searchParams.get("thread") === "true" ? { thread: true } : undefined,
+        );
         return send(res, 200, { ticket });
       } catch (err) {
         return send(res, 404, { error: `tracker: ${String(err)}` });

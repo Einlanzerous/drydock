@@ -306,6 +306,7 @@ Tracker:
 | [dry-72-tracker-cache](docs/decisions/dry-72-tracker-cache.md) | stale-while-revalidate, deadlines, and the unbounded child-stats query |
 | [dry-61-tracker-deadline](docs/decisions/dry-61-tracker-deadline.md) | one budget for a whole pull, and why it has to be shorter than the browser's |
 | [dry-53-ticket-brief](docs/decisions/dry-53-ticket-brief.md) | the 10000-character cut, and why appending is the bug |
+| [dry-76-ticket-thread](docs/decisions/dry-76-ticket-thread.md) | the same thread on the panel: what it costs, and the three facts that must not render as one sentence |
 | [dry-55-tracker-sidebar](docs/decisions/dry-55-tracker-sidebar.md) | the quietest failure the desk has |
 
 Harness rigs are in [scripts/verify/README.md](scripts/verify/README.md); prod

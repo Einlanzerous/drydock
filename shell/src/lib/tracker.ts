@@ -39,20 +39,24 @@ export interface TicketDetail extends Ticket {
   project: string;
   labels: string[];
   /**
-   * Comment thread, oldest first, and the thread's TRUE length (DRY-53) —
-   * `commentCount` differs from `comments.length` when the provider capped its
-   * fetch.
+   * Comment thread, oldest first, and the thread's TRUE length (DRY-53).
    *
-   * **`/api/tracker/ticket/<KEY>` does not populate these**, and neither is
-   * `epic` below. They cost extra tracker round trips (up to two on Switchyard,
-   * whose single-ticket endpoint hands back a bare parent UUID) and only the
-   * daemon's SessionStart brief reads them, so the daemon asks for them there
-   * and not on the path this panel uses. Rendering them here means teaching
-   * that route to pass `{thread: true}` first.
+   * `commentCount` is NOT `comments.length` — they differ whenever the provider
+   * capped its fetch, which is the whole reason both fields exist. Jira pages
+   * `comment` oldest-first and the provider re-fetches from the tail, so what
+   * arrives on a long thread is the NEWEST N of `commentCount`; anything
+   * rendering this has to say "showing 3 of 11" rather than imply it has the
+   * lot. (Switchyard counts what it kept, so there the two agree.)
+   *
+   * Populated only when the request asked: `getTicket(key, {thread: true})`
+   * sends `?thread=true` (DRY-76). They cost extra tracker round trips — up to
+   * two on Switchyard, whose single-ticket endpoint hands back a bare parent
+   * UUID and so drags the ancestry walk along — so the callers that render none
+   * of it (the workspace drawer) still open for one GET.
    */
   comments?: TicketComment[];
   commentCount?: number;
-  /** Nearest ancestor epic, when the provider could resolve one (DRY-53). */
+  /** Nearest ancestor epic, when the provider could resolve one (DRY-53). Needs `{thread: true}`. */
   epic?: { key: string; title?: string };
 }
 
@@ -312,9 +316,19 @@ export async function searchTickets(q: string, projects?: string[]): Promise<Tic
   return expectList(body.tickets, "tickets");
 }
 
-export async function getTicket(key: string): Promise<TicketDetail> {
+/**
+ * One ticket, with its body.
+ *
+ * `thread` adds the comment history and the resolved epic (DRY-76). It is a
+ * per-request choice because it costs the daemon extra tracker round trips and
+ * this route is deliberately uncached — see the fields on `TicketDetail`.
+ */
+export async function getTicket(
+  key: string,
+  opts?: { thread?: boolean },
+): Promise<TicketDetail> {
   const body = await getJson<{ ticket?: TicketDetail }>(
-    `${DAEMON_HTTP}/api/tracker/ticket/${encodeURIComponent(key)}`,
+    `${DAEMON_HTTP}/api/tracker/ticket/${encodeURIComponent(key)}${opts?.thread ? "?thread=true" : ""}`,
   );
   if (!body.ticket) throw new Error("ticket not found");
   return body.ticket;

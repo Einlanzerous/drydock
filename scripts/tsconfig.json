@@ -67,6 +67,7 @@
     "verify/spawn-layout.mts",
     "verify/surface.mts",
     "verify/sweep.mts",
+    "verify/ticket-panel.mts",
     "verify/tombstone.mts",
     "verify/tracker-cache.mts"
   ]
