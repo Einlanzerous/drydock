@@ -25,12 +25,14 @@ Three groups:
   `loadTickets` in `App.vue`. The scope row's backlog control has
   [a harness of its own](#the-backlog-control-dry-85) on the same rig — run
   both when touching which pulls a control is allowed to notice.
-- **The tracker cache (DRY-72)** —
+- **The tracker cache (DRY-72, DRY-84)** —
   [its own section](#the-tracker-cache-dry-72), with its own rig again (a
   counting stub tracker, since the claims are about upstream requests that
-  didn't happen). A browser, about a minute. Run it when touching
+  didn't happen). A browser, about a minute and a half. Run it when touching
   `daemon/src/tracker/cache.ts`, either provider's `attachChildStats`, or the
-  ticket poll's scheduling in `App.vue`. **Run `sidebar.mts` too** — the two
+  ticket poll's scheduling **or its visibility handling** in `App.vue` — DRY-84
+  made those two one subject, because whether an entry is called stale now
+  depends on whether anybody was polling it. **Run `sidebar.mts` too** — the two
   overlap on who reports a tracker outage, and DRY-72 moved that decision from
   the browser to the daemon. There is also an
   [in-process suite](#the-caches-own-semantics-in-process) for the cache's
@@ -310,7 +312,7 @@ bunx playwright install chromium             # once per machine; see "Running th
    DRYDOCK_TRACKER=switchyard DRYDOCK_SWITCHYARD_URL=http://127.0.0.1:4386 \
    DRYDOCK_TRACKER_PROJECTS=DRY \
    DRYDOCK_TRACKER_CACHE_MS=4000 DRYDOCK_TRACKER_CHILD_STATS_CACHE_MS=60000 \
-   DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS=3000 \
+   DRYDOCK_TRACKER_STALE_AFTER_MS=5000 DRYDOCK_TRACKER_REQUEST_TIMEOUT_MS=3000 \
    DRYDOCK_DATABASE_URL= DRYDOCK_STATE_FILE=/tmp/dry72-state.json \
    DRYDOCK_SESSIONS_DIR=/tmp/dry72-sessions node --import tsx src/index.ts &)
 (cd shell && VITE_DAEMON_URL=http://127.0.0.1:4385 bunx vite --port 5385 --strictPort &)
@@ -320,19 +322,30 @@ bunx playwright install chromium             # once per machine; see "Running th
 
 | harness | what it holds down |
 |---|---|
-| `tracker-cache.mts` | Six concurrent pulls cost ONE fan-out upstream, not six. The child-stats query — the unbounded half, since it spans every status — doesn't repeat with each list refresh. A 2500ms tracker doesn't make a 2500ms sidebar, while Refresh still overrules the cache and waits. A dead tracker leaves the daemon serving last-good with `stale` set (200, not 502) while a key it has never fetched still 502s. And the surface section re-proves DRY-55 end-to-end. |
+| `tracker-cache.mts` | Six concurrent pulls cost ONE fan-out upstream, not six. The child-stats query — the unbounded half, since it spans every status — doesn't repeat with each list refresh. A 2500ms tracker doesn't make a 2500ms sidebar, while Refresh still overrules the cache and waits. A dead tracker leaves the daemon serving last-good with `stale` set (200, not 502) while a key it has never fetched still 502s. Sections (j) and (l) add DRY-84: nine seconds of not refreshing is an outage or isn't depending on whether anybody was ASKING, and a tab that stops polling doesn't come back to a notice. And the surface sections re-prove DRY-55 end-to-end. |
 
 **Turn the TTLs down, and the harness insists on it.** 20s is the right default
 and a terrible test — the same trap DRY-49's timeout and DRY-60's sweep delay
 have — so section (c) measures the TTL it actually observes and fails if it took
-15s or more, rather than passing by waiting.
+15s or more, rather than passing by waiting. `DRYDOCK_TRACKER_STALE_AFTER_MS`
+(DRY-84) is the same story one knob over: the shipping window is 60s, the rig
+runs it at 5s, and section (j)'s second half is what fails if the rig left it at
+the default — a run that waited a minute out would prove nothing about either
+half of it.
+
+**Section (l) fakes the hidden tab; it must not background the real one.**
+Chromium throttles a background tab's timers to about once a minute, so hiding
+the headless page for real measures the browser's throttler rather than the
+poll (DRY-60 trap 1). It shadows `document.visibilityState` with a data property
+and fires `visibilitychange`, and it asserts the premise — zero upstream
+requests while hidden — rather than assuming the tab went quiet.
 
 The rig deliberately does NOT reuse `proxy-tracker.mts`. That one sits between
 the *browser* and the daemon, so it can break `/api/tracker/tickets` but can
 never see what the daemon does upstream — which is the only place any of these
 claims live. Different position, different question, different file.
 
-Sections (e), (g) and (j) are **guards, not discriminators**: they pass against
+Sections (e), (g) and (k) are **guards, not discriminators**: they pass against
 an uncached daemon too, because the contract they check is supposed to hold in
 both worlds. Don't read their green as evidence the cache works.
 
@@ -350,12 +363,20 @@ failed, that a flight throwing synchronously doesn't wedge its key forever.
 Through HTTP those are minute-long waits and races; here they're a stub fetch and
 TTLs in tens of milliseconds.
 
+**Read (g) and (l) as one test.** They are the same 200ms of a list not being
+refreshed; the only difference is whether the harness keeps calling `get`
+during it, and that has to be the difference between a notice and silence
+(DRY-84). Either section alone is satisfied by a cache that is simply wrong in
+the other direction — one that never reports, or one that reports on a clock
+nobody was watching.
+
 To confirm IT discriminates, revert a fix and watch the matching section fail:
 
 | revert | expect |
 |---|---|
 | in `refresh`, replace the `e.refreshing` block with a bare `return e.refreshing` | (c) `calls=2`, (d) `+0` — Refresh silently returns a pre-click snapshot |
 | in `start`, go back to `e.refreshing ??= (async () => { … finally { e.refreshing = undefined } })()` with `fetch()` called **directly inside** that IIFE | (h) `GEN-0` — the key never refreshes again |
+| in `staleReason`, measure the age from `e.at` instead of `e.watchedSince` (the pre-DRY-84 clock) | 2 failures in (l), and the first one prints the reported symptom verbatim: `no successful refresh in 202ms` over an entry nobody had asked about |
 
 **The second one has a trap in it, and it caught me.** Wrapping the *existing*
 `this.run(...)` in a try/finally does NOT reproduce the bug and section (h) passes
@@ -383,10 +404,22 @@ instead of never — the pre-DRY-72 daemon this recipe is supposed to reproduce
 would still be waiting, and (h) would report a different number than the one
 below.
 
-Expect **15 failures**, and expect the numbers to be the diagnosis: six pulls
-becoming `18 upstream requests`, one pull taking `7509ms against a 2500ms
+Expect **18 failures**, and expect the numbers to be the diagnosis: six pulls
+becoming `18 upstream requests`, one pull taking `7532ms against a 2500ms
 tracker`, and the hang case never answering at all (`0 after 30001ms` — the
-probe's own budget, which is why `pull()` carries one).
+probe's own budget, which is why `pull()` carries one). Three of the eighteen
+are section (j)'s stalled half, which has nothing to report when there is no
+cache to go stale — `never in 12s`.
+
+DRY-84 needs its own revert, because an uncached daemon can't reach the bug at
+all. In `staleReason` (`daemon/src/tracker/cache.ts`), measure the age from
+`e.at` rather than `e.watchedSince` and restart the daemon: expect **4
+failures** — (d), (j) and two in (l) — and expect the last of them to print the
+ticket's own screenshot back at you, `no successful refresh in 9s — the list on
+screen is 9s old`, over a tab that had simply stopped polling. Section (d) is in
+that list by accident and worth keeping there: it sleeps six seconds with nobody
+asking and then asserts nothing is stale, which is the same claim by a different
+route.
 
 ## The tracker pull's deadline (DRY-61)
 

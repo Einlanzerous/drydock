@@ -147,6 +147,12 @@ function uncaughtPolicy(raw: string | undefined): UncaughtPolicy {
 const PORT = Number(process.env.DRYDOCK_PORT ?? 4317);
 
 /**
+ * Hoisted out of CONFIG because the staleness window below is derived from it,
+ * and an object literal can't read its own sibling.
+ */
+const TICKET_CACHE_MS = msOrOff(process.env.DRYDOCK_TRACKER_CACHE_MS, 20_000);
+
+/**
  * How this daemon decides who is asking (DRY-27).
  *
  *   off    no credential is configured, so there is nothing to log in as and
@@ -638,7 +644,33 @@ export const CONFIG = {
        * `msOrOff`: through `num()` a deliberate 0 would silently restore the
        * default, and the off switch would do nothing (DRY-60's trap 9).
        */
-      ticketsMs: msOrOff(process.env.DRYDOCK_TRACKER_CACHE_MS, 20_000),
+      ticketsMs: TICKET_CACHE_MS,
+      /**
+       * When a list that hasn't refreshed is called stale even though nothing
+       * has failed (DRY-72 trap 3a, retimed by DRY-84).
+       *
+       * The cache removed a signal that used to be free: a tracker that is slow
+       * rather than broken used to trip the browser's own 12s budget and report,
+       * and now the browser is answered instantly from last-good and nothing
+       * fails, so without an age test an arbitrarily old list presents as live.
+       * Three TTLs, and never under a minute, so an ordinary refresh cycle is
+       * nowhere near it — a notice that flickers every poll is worse than none.
+       *
+       * What it does NOT measure, since DRY-84, is wall-clock age: the clock
+       * only runs while a client is actually polling the entry. The shell stops
+       * polling a hidden tab on purpose (DRY-72 trap 9), so counting that time
+       * turned "nobody was looking" into "the tracker is in trouble" on the
+       * first pull after coming back — the notice this ticket was opened over.
+       *
+       * Zero switches the age test OFF, leaving a FAILED refresh as the only
+       * thing that can raise `stale`, which is a coherent posture for a tracker
+       * known to be slow. Hence `msOrOff`: through `num()` that deliberate 0
+       * would silently restore the derived default (DRY-60's trap 9).
+       */
+      staleAfterMs: msOrOff(
+        process.env.DRYDOCK_TRACKER_STALE_AFTER_MS,
+        Math.max(TICKET_CACHE_MS * 3, 60_000),
+      ),
       /**
        * An epic's child counts (DRY-13), which are the unbounded half of a pull
        * — that query spans every status, so it grows with years of closed work

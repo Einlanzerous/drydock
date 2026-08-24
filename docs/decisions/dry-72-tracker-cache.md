@@ -51,7 +51,11 @@ outage. The traps:
    pull as well, which puts a ceiling on that N × it — but the age test is still
    what reports a tracker that is slow rather than broken, since a pull ending
    at its deadline leaves the last-good list in place and says only that a
-   refresh failed.)
+   refresh failed.) **The clock it runs on was wrong, and trap 9 below is why**
+   — see [dry-84-stale-notice](dry-84-stale-notice.md): it measured wall-clock
+   age, so the hidden tab that trap 9 stops polling aged an entry nothing could
+   refresh, and the first pull on coming back reported an outage. It measures
+   asked-for time now, and the slow-tracker case above is unchanged.
 3b. **Overlapping pulls in the SHELL are how the epoch guard becomes a silence.**
    A poll, a visibility wake and Refresh can all want one; two in flight means
    the older one's outcome is discarded on arrival, so if it was the one that

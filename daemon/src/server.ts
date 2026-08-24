@@ -74,7 +74,44 @@ auth.useSessions({
 // The sidebar's pull, cached and coalesced (DRY-72). One per daemon, keyed by
 // query, so every browser tab on the same scope shares one fan-out at the
 // tracker instead of each paying for its own.
-const ticketCache = new TicketListCache(CONFIG.tracker.cache.ticketsMs);
+const ticketCache = new TicketListCache(CONFIG.tracker.cache.ticketsMs, {
+  staleAfterMs: CONFIG.tracker.cache.staleAfterMs,
+  // The desk's tracker notice, in the daemon's own words (DRY-84). It fired
+  // against a corporate Jira with no outage behind it, and the two possible
+  // causes — a tab that had stopped polling, or refreshes that were failing or
+  // too slow to land — look identical in the browser and need opposite fixes.
+  // These lines are how you tell which one you are looking at after the fact,
+  // and `unwatched` is the only trace of the case that now raises nothing.
+  onDiagnose: (d) => {
+    // Seconds, and `undefined` where there is no number: `log`'s formatter drops
+    // an undefined field entirely, so an absent one reads as absent rather than
+    // as a zero somebody will later take for a measurement.
+    const sec = (ms: number | undefined): number | undefined =>
+      ms === undefined ? undefined : Math.round(ms / 1000);
+    const fields: LogFields = {
+      event: d.event,
+      ageSec: sec(d.ageMs),
+      watchedSec: sec(d.watchedMs),
+      runningSec: sec(d.runningMs),
+      lastRefreshSec: sec(d.lastRefreshMs),
+      unwatchedSec: sec(d.gapMs),
+      refreshes: d.refreshes,
+      failures: d.failures,
+      err: d.error,
+      query: d.key,
+    };
+    if (d.event === "failed" || d.event === "stalled") {
+      log.warn("tracker list is no longer current", fields);
+    } else if (d.event === "unwatched") {
+      // Not a warning: nothing is wrong. It says an entry aged past the
+      // staleness window with nobody asking for it, which before DRY-84 was
+      // reported to the desk as trouble.
+      log.info("tracker list aged with nobody polling it", fields);
+    } else {
+      log.info("tracker list is current again", fields);
+    }
+  },
+});
 
 // An autonomous run that reaches a terminal state leaves a handoff document
 // and (capability permitting) a tracker comment behind (DRY-49). Subscribed

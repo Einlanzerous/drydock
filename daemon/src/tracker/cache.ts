@@ -26,13 +26,38 @@ import type { Ticket, TicketQuery } from "./types.js";
  * distinction DRY-55 rests on.
  */
 
+/**
+ * Why a served list has stopped being current (DRY-84).
+ *
+ *  - `failed`   the last refresh threw. Something is wrong at the tracker, or
+ *               between here and it, and the error says what.
+ *  - `stalled`  nothing failed. Refreshes are being asked for and are not
+ *               landing — the slow-rather-than-broken tracker trap 3a exists
+ *               for — and the useful number is how long the current one has
+ *               been running, not how old the list is. Narrower than it sounds
+ *               since DRY-61 gave the whole pull a deadline: a merely slow
+ *               tracker now ends as `failed`, quoting that deadline, well
+ *               before a 60s window closes. What's left here is a refresh still
+ *               running when the window shuts — the operation deadline off
+ *               (a documented posture) or set longer than the window.
+ *
+ * There used to be no distinction on the wire: both arrived as a sentence built
+ * at read time, so "no successful refresh in 74s" was printed both for a
+ * refresh that had genuinely been running for 74s and for an entry nobody had
+ * asked about for 74s. Those are opposite diagnoses — a tracker to fix versus a
+ * clock that shouldn't have been running — and the desk's notice could not tell
+ * you which one you were looking at. The second case no longer reaches here at
+ * all (see `watchedSince`); this field is what separates the two that do.
+ */
+export type StaleReason = "failed" | "stalled";
+
 /** What a cached list answer carries back to the route. */
 export interface CachedTickets {
   tickets: Ticket[];
   /**
    * Set when what's being served has stopped being current — either a refresh
-   * FAILED, or none has succeeded in long enough that the list can't be passed
-   * off as live (see `staleAfterMs`).
+   * FAILED, or none has landed for long enough, WHILE SOMEBODY WAS ASKING, that
+   * the list can't be passed off as live (see `staleAfterMs`).
    *
    * This field is what keeps DRY-55 alive through the cache. Under
    * stale-while-revalidate the browser's `catch` stops firing for a tracker
@@ -44,9 +69,40 @@ export interface CachedTickets {
    * What must NOT raise it is ordinary aging: an entry is stale by design for
    * the moment between a poll noticing and the background refresh landing, and a
    * notice that flickers once every 20s is worse than none. Hence a threshold
-   * well clear of the TTL rather than the TTL itself.
+   * well clear of the TTL rather than the TTL itself — and, since DRY-84, a
+   * clock that only runs while a client is actually polling the entry.
    */
-  stale?: { ageMs: number; error: string };
+  stale?: { ageMs: number; error: string; reason: StaleReason };
+}
+
+/**
+ * An entry's own account of itself, for the log (DRY-84).
+ *
+ * The notice above the desk said "no successful refresh in Ns" against a
+ * corporate Jira with no outage behind it, and the two candidate causes — a tab
+ * that had stopped polling, versus refreshes that were failing or too slow to
+ * land — presented identically in the browser while calling for completely
+ * different fixes. The daemon knew which and did not say. Now it says, once per
+ * onset rather than once per poll, and `unwatched` is emitted for the case that
+ * no longer raises anything: it is the only evidence that cause (a) happened.
+ */
+export interface CacheDiagnostic {
+  /** The query key, i.e. which scope's list this is about. */
+  key: string;
+  event: StaleReason | "unwatched" | "clear";
+  /** Age of the list being served. */
+  ageMs: number;
+  /** How long it has been asked-for without a refresh landing. */
+  watchedMs: number;
+  /** How long the refresh in flight has been running, if one is. */
+  runningMs?: number;
+  /** How long the last COMPLETED refresh took — the number that says how close a slow tracker is to the request deadline. */
+  lastRefreshMs?: number;
+  refreshes: number;
+  failures: number;
+  /** `unwatched` only: how long nobody asked. */
+  gapMs?: number;
+  error?: string;
 }
 
 /**
@@ -66,6 +122,14 @@ function describe(err: unknown): string {
   return one.length > ERROR_MAX ? `${one.slice(0, ERROR_MAX - 1)}…` : one;
 }
 
+/**
+ * A duration somebody reads. Sub-second is spelled in ms rather than rounded to
+ * "0s": in prod every one of these is tens of seconds, but the harnesses run the
+ * whole window in 200ms, and a sentence that says a refresh has been running 0s
+ * reads as a broken field rather than as a fast clock.
+ */
+const dur = (ms: number): string => (ms < 1000 ? `${Math.round(ms)}ms` : `${Math.round(ms / 1000)}s`);
+
 interface Entry {
   /** Absent until the first successful fetch — see the cold path in `get`. */
   tickets?: Ticket[];
@@ -82,8 +146,31 @@ interface Entry {
   freshAfter?: number;
   /** At most one further refresh queued behind `refreshing` — see `refresh`. */
   queued?: Promise<void>;
-  /** Last time a client asked for this key; drives eviction only. */
+  /** Last time a client asked for this key. Drives eviction, and `watchedSince`. */
   readAt: number;
+  /**
+   * When the stretch began in which somebody has been asking for this entry and
+   * no refresh has landed — the clock the age test runs on, and the whole of
+   * DRY-84 (DRY-72's trap 3a runs it off `at`, which is wrong for the reason
+   * below).
+   *
+   * It is reset by a successful refresh, and ALSO by a read that arrives more
+   * than `watchedGapMs` after the previous one — a hole in the read stream,
+   * meaning nobody was there. Time nobody asked about is not time this list was
+   * allowed to rot: the shell deliberately stops polling a hidden tab (DRY-72
+   * trap 9), so a tab left open in the background ages an entry that nothing can
+   * refresh, and the first pull on coming back read as an outage when nothing
+   * had failed.
+   */
+  watchedSince: number;
+  /** Refreshes that landed, for the log line. */
+  refreshes: number;
+  /** Refreshes that threw since the last one that landed. */
+  failures: number;
+  /** How long the last COMPLETED refresh took, whichever way it ended. */
+  lastRefreshMs?: number;
+  /** What was last reported for this entry, so onset is logged once and not once per poll. */
+  reported?: StaleReason;
 }
 
 /**
@@ -106,25 +193,55 @@ interface Entry {
 export class TicketListCache {
   private readonly entries = new Map<string, Entry>();
   private readonly staleAfterMs: number;
+  private readonly watchedGapMs: number;
+  private readonly idleMs: number;
+  private readonly onDiagnose?: (d: CacheDiagnostic) => void;
 
   /**
    * @param ttlMs   how old a list may get before a refresh is kicked off. 0
    *                disables the cache entirely — a passthrough, not a
    *                zero-length TTL, since the latter would leave every answer
    *                permanently stale-and-refreshing rather than off.
-   * @param idleMs  how long an unread key survives. The key is the query, and
-   *                the scope chips (DRY-30) mean a client can mint new ones, so
-   *                without this the map grows for the daemon's lifetime.
    */
   constructor(
     private readonly ttlMs: number,
-    /**
-     * When to call an un-refreshed list stale even though nothing failed. 0 =
-     * derive it from the TTL, which is what the daemon does; it's a parameter at
-     * all so the property is testable in a second rather than in a minute.
-     */
-    staleAfterMs = 0,
-    private readonly idleMs = 600_000,
+    {
+      staleAfterMs,
+      idleMs = 600_000,
+      watchedGapMs,
+      onDiagnose,
+    }: {
+      /**
+       * When to call a list stale even though nothing failed.
+       *
+       * Undefined derives it from the TTL, which is what the daemon does with
+       * the knob unset. An explicit **0 switches the age test off**, leaving
+       * failures as the only thing that can raise `stale` — a real posture for a
+       * tracker that is honestly just slow. The two must not collide, which is
+       * why this is `?? ` on undefined and not `||` on 0: a knob whose zero
+       * means "off" landing on a default instead is DRY-60's trap 9, and the
+       * knob in front of this one goes through `msOrOff` for the same reason.
+       */
+      staleAfterMs?: number;
+      /**
+       * How long an unread key survives. The key is the query, and the scope
+       * chips (DRY-30) mean a client can mint new ones, so without this the map
+       * grows for the daemon's lifetime.
+       */
+      idleMs?: number;
+      /**
+       * The longest hole in the read stream that still counts as somebody
+       * watching (DRY-84) — see `watchedSince`. Half the staleness window by
+       * default, which at the shipping numbers is 30s against a shell that polls
+       * every 20s: comfortably more than one poll, comfortably less than the
+       * window itself, so an ordinary tab holds the clock running and a tab that
+       * has stopped polling doesn't. A parameter so the property is testable in
+       * a second rather than in a minute.
+       */
+      watchedGapMs?: number;
+      /** Where an entry's account of itself goes (DRY-84); the daemon logs it. */
+      onDiagnose?: (d: CacheDiagnostic) => void;
+    } = {},
   ) {
     // Well clear of the TTL, so a healthy refresh cycle never trips it: a normal
     // pull is seconds and this is a minute at the shipping default.
@@ -137,7 +254,12 @@ export class TicketListCache {
     // present an
     // arbitrarily old list as live, which is the exact dishonesty DRY-55 exists
     // to prevent.
-    this.staleAfterMs = staleAfterMs || Math.max(ttlMs * 3, 60_000);
+    this.staleAfterMs = staleAfterMs ?? Math.max(ttlMs * 3, 60_000);
+    // At least 1ms, so a caller who turns the window right down still has a gap
+    // test rather than one that rounds to "every read is a hole".
+    this.watchedGapMs = watchedGapMs ?? Math.max(Math.round(this.staleAfterMs / 2), 1);
+    this.idleMs = idleMs;
+    this.onDiagnose = onDiagnose;
   }
 
   /**
@@ -160,8 +282,26 @@ export class TicketListCache {
     this.evictIdle(now);
 
     let e = this.entries.get(key);
-    if (!e) this.entries.set(key, (e = { at: 0, readAt: now }));
+    const isNew = !e;
+    if (!e) {
+      this.entries.set(
+        key,
+        (e = { at: 0, readAt: now, watchedSince: now, refreshes: 0, failures: 0 }),
+      );
+    }
+    // Taken BEFORE the read is stamped: the hole between two reads is the only
+    // evidence the daemon has about whether anybody was there to be told (DRY-84).
+    const gapMs = now - e.readAt;
     e.readAt = now;
+    const unwatched = !isNew && gapMs > this.watchedGapMs;
+    // Whether the pre-DRY-84 daemon would have called this read an outage —
+    // taken before the clock restarts, because that is the whole measurement.
+    // Nothing about it reaches the client; it goes to the log, and it is the
+    // only evidence distinguishing "the tab stopped polling" from "the tracker
+    // stopped answering", which present identically at the desk.
+    const wouldHaveFlagged =
+      unwatched && !e.error && this.staleAfterMs > 0 && e.at > 0 && now - e.at >= this.staleAfterMs;
+    if (unwatched) e.watchedSince = now;
 
     if (force || now - e.at >= this.ttlMs) {
       const done = this.refresh(e, fetch, force ? now : 0);
@@ -178,20 +318,77 @@ export class TicketListCache {
       }
     }
 
-    const ageMs = Date.now() - e.at;
-    const why = this.staleReason(e, ageMs);
-    return { tickets: e.tickets!, ...(why ? { stale: { ageMs, error: why } } : {}) };
+    // `Date.now()` again rather than `now`: a cold key or a force waited on a
+    // fetch above, and the age has to be of the answer being returned.
+    const settled = Date.now();
+    const ageMs = settled - e.at;
+    if (wouldHaveFlagged) this.diagnose(e, "unwatched", key, ageMs, settled, gapMs);
+    const reason = this.staleReason(e, settled);
+    // Once per onset, not once per poll: at a 20s poll the alternative is 180
+    // identical lines an hour for one outage, which is how a log stops being read.
+    if (reason !== e.reported) {
+      this.diagnose(e, reason ?? "clear", key, ageMs, settled);
+      e.reported = reason;
+    }
+    return {
+      tickets: e.tickets!,
+      ...(reason
+        ? { stale: { ageMs, error: this.staleMessage(e, reason, settled), reason } }
+        : {}),
+    };
   }
 
   /** Why this answer isn't current, or undefined while it is. */
-  private staleReason(e: Entry, ageMs: number): string | undefined {
-    if (e.error) return describe(e.error);
-    if (ageMs >= this.staleAfterMs) {
-      // No failure to quote — the tracker is answering, just not in time to keep
-      // this list live. Say that rather than inventing an error.
-      return `no successful refresh in ${Math.round(ageMs / 1000)}s`;
-    }
+  private staleReason(e: Entry, now: number): StaleReason | undefined {
+    if (e.error) return "failed";
+    // Measured from `watchedSince`, not from `at` (DRY-84). An entry only counts
+    // as rotting while a client is actually asking for it: the age test exists
+    // because a slow tracker no longer trips anybody's budget (trap 3a), and a
+    // tab that has stopped polling is not a slow tracker. 0 turns the test off.
+    if (this.staleAfterMs > 0 && now - e.watchedSince >= this.staleAfterMs) return "stalled";
     return undefined;
+  }
+
+  /**
+   * The sentence that rides on the wire.
+   *
+   * The stalled wording quotes the REFRESH, not the list, and that is the
+   * distinction DRY-84 was opened over: "no successful refresh in 74s" was the
+   * sentence for a refresh that had been running 74s and for an entry nobody had
+   * looked at in 74s alike, so the notice above the desk read as a tracker
+   * outage in a case where the tracker was never asked anything. The second no
+   * longer produces a sentence at all; this one says what is actually happening.
+   */
+  private staleMessage(e: Entry, reason: StaleReason, now: number): string {
+    if (reason === "failed") return describe(e.error);
+    const running = e.refreshing && e.freshAfter ? now - e.freshAfter : 0;
+    return running
+      ? `a refresh has been running ${dur(running)} without landing`
+      : `no successful refresh in ${dur(now - e.at)}`;
+  }
+
+  /** Hand the entry's state to whoever is logging (DRY-84). Never on the hot path when nobody is. */
+  private diagnose(
+    e: Entry,
+    event: CacheDiagnostic["event"],
+    key: string,
+    ageMs: number,
+    now: number,
+    gapMs?: number,
+  ): void {
+    if (!this.onDiagnose) return;
+    this.onDiagnose({
+      key,
+      event,
+      ageMs,
+      watchedMs: now - e.watchedSince,
+      refreshes: e.refreshes,
+      failures: e.failures,
+      ...(e.refreshing && e.freshAfter ? { runningMs: now - e.freshAfter } : {}),
+      ...(e.lastRefreshMs === undefined ? {} : { lastRefreshMs: e.lastRefreshMs }),
+      ...(gapMs === undefined ? {} : { gapMs }),
+      ...(e.error ? { error: describe(e.error) } : {}),
+    });
   }
 
   /**
@@ -246,15 +443,24 @@ export class TicketListCache {
 
   /** One trip to the tracker. Never rejects; the outcome lands on the entry. */
   private async run(e: Entry, fetch: () => Promise<Ticket[]>): Promise<void> {
+    const started = Date.now();
     try {
       const tickets = await fetch();
       e.tickets = tickets;
       e.at = Date.now();
+      e.lastRefreshMs = e.at - started;
+      // Nothing is owed any more, so the age clock starts over from the data
+      // rather than from whenever somebody last asked (DRY-84).
+      e.watchedSince = e.at;
+      e.refreshes++;
+      e.failures = 0;
       e.error = undefined;
     } catch (err) {
       // Keep the last-good list and record why it stopped moving. Caching the
       // failure as data would blank a sidebar that was working, which DRY-55
       // is explicit is the worse of the two bugs.
+      e.lastRefreshMs = Date.now() - started;
+      e.failures++;
       e.error = err;
     }
   }
