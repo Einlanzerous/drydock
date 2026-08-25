@@ -1,5 +1,39 @@
 # Changelog
 
+## [1.8.0](https://github.com/Einlanzerous/drydock/compare/v1.7.0...v1.8.0) (2026-08-25)
+
+
+### Features
+
+* **daemon:** bound a whole tracker pull, not just its requests (DRY-61) ([713461d](https://github.com/Einlanzerous/drydock/commit/713461d901c07d9d5711582d30a794c170bf6eb4))
+* **daemon:** bound a whole tracker pull, not just its requests (DRY-61) ([ed8d06b](https://github.com/Einlanzerous/drydock/commit/ed8d06bd747e091c2cfea37ac3958320cd63a7a5))
+* **daemon:** expose a session's output at /api/sessions/:id/transcript (DRY-63) ([55c9696](https://github.com/Einlanzerous/drydock/commit/55c969686acf76b602fc6897317c4459e63a65b7))
+* **daemon:** expose a session's output at /api/sessions/:id/transcript (DRY-63) ([db9ad5c](https://github.com/Einlanzerous/drydock/commit/db9ad5c6dee4e8ef881c3276882a11f4be04f6e3))
+* make the agent's opening prompt host config (DRY-94) ([baa3b92](https://github.com/Einlanzerous/drydock/commit/baa3b920d58ace89a349ee02146650fd68dbc689))
+* make the agent's opening prompt host config (DRY-94) ([ec3a5c0](https://github.com/Einlanzerous/drydock/commit/ec3a5c0e7edcd3365b3b8c2dc9edd1fd6ac82f35))
+* show the comment thread in the ticket panel (DRY-76) ([#80](https://github.com/Einlanzerous/drydock/issues/80)) ([5b91511](https://github.com/Einlanzerous/drydock/commit/5b915113e671320d383ae8b52570bbbb5694660e))
+
+
+### Bug Fixes
+
+* address the CI review on the agent prompt (DRY-94) ([e620a4b](https://github.com/Einlanzerous/drydock/commit/e620a4b0771bd8655723dd2a556d57f9e9721a11))
+* **ci:** publish semver image tags from the release run (SERV-125) ([#79](https://github.com/Einlanzerous/drydock/issues/79)) ([34cd430](https://github.com/Einlanzerous/drydock/commit/34cd43006f9444ce1eb6dac22ad20fad28c0e058))
+* **daemon:** /transcript reports whether it has the whole run (DRY-63) ([26f4537](https://github.com/Einlanzerous/drydock/commit/26f453753e98eac248600b322d232ae746852fba))
+* **daemon:** a supervisor reports what its own ring dropped (DRY-63) ([94a132d](https://github.com/Einlanzerous/drydock/commit/94a132d8cf1081090bcd664619e2ed1a9b0f5f58))
+* **daemon:** give the pull deadline a name /healthz can use (DRY-61) ([c22dac3](https://github.com/Einlanzerous/drydock/commit/c22dac3c05cd4680ea576896ad7d9b56890e24db))
+* **daemon:** stop calling a list stale for time nobody asked (DRY-84) ([#81](https://github.com/Einlanzerous/drydock/issues/81)) ([a41fafa](https://github.com/Einlanzerous/drydock/commit/a41fafae58dfe6d6d010f282984af5caaa1f70a5))
+* **daemon:** the palette's search names itself, not "ticket list" (DRY-61) ([57c513e](https://github.com/Einlanzerous/drydock/commit/57c513ebcdad398b9433bf9a2eb38206856c47b2))
+* **shell:** spawn into the current layout instead of forcing float (DRY-93) ([8615822](https://github.com/Einlanzerous/drydock/commit/8615822bd9423de9496ecd29fd8954f2cad83965))
+* **shell:** spawn into the current layout instead of forcing float (DRY-93) ([6e7ee00](https://github.com/Einlanzerous/drydock/commit/6e7ee00ec5404611d5a8f79fc132409814bfc0f8))
+* **verify:** the new pull deadline reaches three other rigs (DRY-61) ([e931232](https://github.com/Einlanzerous/drydock/commit/e931232f4e280a08919dc361a7b8c7accf38949b))
+
+
+### Documentation
+
+* address the second CI review pass (DRY-94) ([de74ae1](https://github.com/Einlanzerous/drydock/commit/de74ae15bf54c7afb7df58941e015a58c22b2770))
+* **daemon:** say what an undefined fetch signal actually does (DRY-61) ([781d828](https://github.com/Einlanzerous/drydock/commit/781d828d1da4f97c0bf70a359049332980f03c3a))
+* **verify:** correct the cleanup order and the tile check's claim (DRY-93) ([dccd56b](https://github.com/Einlanzerous/drydock/commit/dccd56b79a433e4a6fa271e7716c7e1aa26df1ba))
+
 ## [1.7.0](https://github.com/Einlanzerous/drydock/compare/v1.6.0...v1.7.0) (2026-08-22)
 
 
