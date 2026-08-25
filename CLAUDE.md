@@ -204,10 +204,16 @@ restart it to test things.
   lands on `main`, which is now the **PR title and nothing else**. So the title
   must be `feat:` / `fix:` / `docs:` / `chore:` / `refactor:` (optionally
   scoped: `feat(daemon): …`) with the ticket in the subject tail — e.g.
-  `feat(daemon): resolve repo from Jira component (DRY-31)`. Breaking change →
-  `feat!:` or a `BREAKING CHANGE:` footer. A non-CC **title** is invisible to
-  release math however well-formed the branch's own commits are; keep those CC
-  too, but they are read by a reviewer, not by release-please.
+  `feat(daemon): resolve repo from Jira component (DRY-31)`. A breaking change
+  is `feat!:` **in the title**: the squash body is empty, so a `BREAKING
+  CHANGE:` footer written in a branch commit or the PR body never reaches
+  `main`, and release-please cuts a minor release for it with nothing reporting
+  the miss. That footer was equal advice until DRY-98 — under `COMMIT_MESSAGES`
+  the branch bodies were concatenated into the squash body and it did reach
+  release-please — and it only lands now if it is typed into the squash dialog
+  by hand at merge time. A non-CC **title** is invisible to release math however
+  well-formed the branch's own commits are; keep those CC too, but they are read
+  by a reviewer, not by release-please.
 - Tickets live in the DRY project (Switchyard at home; fixture data otherwise).
   When the tracker is reachable, attach the PR URL to its DRY ticket on open —
   the poller auto-closes the ticket on merge, so don't close it by hand.
