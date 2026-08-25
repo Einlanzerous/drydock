@@ -5,6 +5,7 @@ import {
   getTicket,
   tagColor,
   type Ticket,
+  type TicketComment,
   type TicketDetail,
 } from "../lib/tracker.js";
 import { removeWorktree, resolveRepoCwd, WorktreeNotSafe } from "../lib/daemon.js";
@@ -232,12 +233,35 @@ watch(
     if (panelEl.value) panelEl.value.scrollTop = 0;
     // Resolve the spawn cwd + worktree in parallel with the description fetch.
     void previewTarget(t);
+    // Is this still the ticket on screen? Checked after the await below, and in
+    // the catch and finally beside it — which is why it is declared out here.
+    //
+    // The race predates DRY-76 — click one ticket, then another before the
+    // first replies, and the first reply wins the assignment — but this ticket
+    // widens it and sharpens it. Widens: a Switchyard open is 3 upstream GETs
+    // where it was 1, with the walk's own 6s budget on top. Sharpens: the
+    // losing payload now carries a comment thread and an epic, so a stale
+    // answer is no longer an out-of-date description under the right title, it
+    // is a THREAD under the wrong ticket — on the one panel whose whole premise
+    // is telling you whether the description in front of you is still true.
+    const mine = (): boolean => props.ticket === t;
     try {
-      detail.value = await getTicket(t.key);
+      // `{thread: true}` (DRY-76): the comment thread and the resolved epic,
+      // which the agent's brief has had since DRY-53 and this panel had not.
+      // It rides the same request as the description rather than following it,
+      // because the extra cost is small where it exists at all — on Jira the
+      // thread is a FIELD of the issue GET (usually no extra request), and on
+      // Switchyard the comments are inlined too, leaving only the bounded
+      // ancestry walk. A second request behind the description would spend a
+      // whole extra ticket GET to save that walk.
+      const loaded = await getTicket(t.key, { thread: true });
+      if (mine()) detail.value = loaded;
     } catch (e) {
-      loadError.value = String(e);
+      if (mine()) loadError.value = String(e);
     } finally {
-      loading.value = false;
+      // Only the request the panel is still waiting on may clear the spinner —
+      // otherwise a superseded reply lands "loaded" on a ticket still fetching.
+      if (mine()) loading.value = false;
     }
   },
   { immediate: true },
@@ -335,6 +359,151 @@ async function resetWorktree(force = false): Promise<void> {
     resetting.value = false;
   }
 }
+
+// --- the comment thread (DRY-76) ---
+
+/**
+ * The description, rendered once per ticket rather than once per frame.
+ *
+ * Same argument as `RenderedComment` below: `v-html="renderMarkdown(...)"` in
+ * the template runs inside the render function, so dragging the panel reparsed
+ * the whole body on every mousemove. That was true before this ticket and cheap
+ * enough to miss at one parse — a long description measures ~0.7ms through
+ * `marked` alone, before DOMPurify — but nothing in the template should be
+ * deriving from `detail` per frame now that the thread has made the cost of the
+ * pattern visible.
+ */
+const descHtml = computed(() => renderMarkdown(detail.value?.description ?? ""));
+
+/**
+ * What the panel is entitled to say about the thread.
+ *
+ * Four states rather than a list and a count, because "nobody has commented",
+ * "there are eleven and none arrived" and "the tracker didn't answer that
+ * question" are three different facts — and a panel that renders them
+ * identically is the quiet failure DRY-55 spent a ticket removing one surface
+ * over. The daemon's brief makes the same distinction in `windowLine`
+ * (tracker/context.ts); this is the rendered half of it.
+ */
+type Thread =
+  | { kind: "silent" }
+  | { kind: "empty" }
+  | { kind: "lost"; total: number }
+  | { kind: "shown"; comments: RenderedComment[]; total: number };
+
+/**
+ * A comment with its markdown ALREADY rendered.
+ *
+ * Rendered here rather than as `v-html="renderMarkdown(c.body)"` in the
+ * template, because that call would sit inside the `v-for` and so inside the
+ * render function — re-running marked + DOMPurify once per comment on every
+ * reactive change this panel has, not just when the ticket does. Two live ones
+ * in this very component: `onDragMove` writes `pos` on every mousemove and
+ * `pos` feeds `.panel`'s `:style`, and the prompt/cwd/branch inputs re-render
+ * on every keystroke. That was one parse before DRY-76 and is up to forty
+ * after it. The computed re-runs only when `detail` is replaced.
+ *
+ * `when` is in here for the same reason and is not the cheap half: `whenText`
+ * builds an `Intl` format per call, so forty of them left in the template cost
+ * ~2ms of every dragged frame — more than the description's markdown. Anything
+ * else this panel derives per comment belongs on this type rather than beside
+ * the `v-for`.
+ */
+type RenderedComment = TicketComment & { html: string; when: string };
+
+/**
+ * NEWEST FIRST — the one ordering decision here worth arguing about.
+ *
+ * Providers hand the thread over oldest-first and the brief keeps that order,
+ * because an agent reads the whole thing. A human reads the top of a box and
+ * scrolls if something looks interesting, and the comment that decides whether
+ * this ticket still says what it says is the LAST one. Rendered in reading
+ * order under a description long enough to need scrolling, that comment is the
+ * one furthest from the eye. So the panel reverses, says it reverses on the
+ * line above the first card, and badges the newest.
+ */
+const thread = computed<Thread | null>(() => {
+  const d = detail.value;
+  if (!d) return null;
+  // Neither field set = the provider couldn't answer, which is NOT zero
+  // comments (see the contract on TicketDetail.comments). Reachable: a Jira
+  // whose issue GET returns no `comment` field at all.
+  if (!d.comments && d.commentCount === undefined) return { kind: "silent" };
+  const list = d.comments ?? [];
+  // `commentCount` is the thread's true length and `list` may be a window of it
+  // (Jira's tail fetch). Never let the window exceed the total it is a window
+  // of — a provider disagreeing with itself must not produce "showing 20 of 3".
+  const total = Math.max(d.commentCount ?? list.length, list.length);
+  if (!total) return { kind: "empty" };
+  if (!list.length) return { kind: "lost", total };
+  return {
+    kind: "shown",
+    comments: [...list]
+      .reverse()
+      .map((c) => ({ ...c, html: renderMarkdown(c.body), when: whenText(c.createdAt) })),
+    total,
+  };
+});
+
+/** The thread's true length, for the jump pill. 0 when there is nothing to jump to. */
+const threadTotal = computed(() => {
+  const t = thread.value;
+  return t && (t.kind === "shown" || t.kind === "lost") ? t.total : 0;
+});
+
+/**
+ * How much of the record is on screen, always stated. `commentCount` is not
+ * `comments.length` whenever the provider capped its fetch — on Jira a long
+ * thread arrives as its newest N — and implying otherwise is how a reader
+ * concludes there is nothing after the comment they can see.
+ */
+const threadLine = computed(() => {
+  const t = thread.value;
+  if (!t) return "";
+  if (t.kind === "silent") return "The tracker returned no comment thread for this ticket.";
+  if (t.kind === "empty") return "No comments.";
+  if (t.kind === "lost") {
+    return `This ticket has ${count(t.total, "comment")}, but none could be retrieved — the description above may be out of date.`;
+  }
+  const shown = t.comments.length;
+  if (shown >= t.total) return `${count(t.total, "comment")}, newest first.`;
+  return `Showing the ${shown} most recent of ${t.total} comments, newest first.`;
+});
+
+function count(n: number, noun: string): string {
+  return `${n} ${noun}${n === 1 ? "" : "s"}`;
+}
+
+/**
+ * A comment's timestamp, for a reader rather than for a parser.
+ *
+ * Best-effort by contract: providers hand over whatever they wrote —
+ * Switchyard `2026-07-01 10:00:00+00`, Jira `…+0000` — so an unparseable stamp
+ * renders verbatim, and the raw string stays in the `title` either way.
+ *
+ * A stamp carrying NO zone is also shown verbatim rather than converted.
+ * `new Date("2026-07-28 17:12:35")` is read as the BROWSER's local time, so
+ * formatting it as local silently moves the comment by the viewer's offset —
+ * the same trap tracker/context.ts documents on the daemon side, where it moved
+ * a comment five hours. Neither provider emits that form today; one that does
+ * gets its own words back instead of a confident lie.
+ */
+function whenText(raw?: string): string {
+  if (!raw) return "";
+  const t = raw.trim();
+  if (!/(Z|[+-]\d{2}:?(\d{2})?)$/.test(t)) return t;
+  const d = new Date(t);
+  if (Number.isNaN(d.getTime())) return t;
+  return d.toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+// The thread lives at the bottom of the description's scrollport, so on a long
+// ticket it opens below the fold — the exact case this feature is for. The pill
+// beside the title is what says it's there, and this is what it does.
+const threadEl = ref<HTMLElement | null>(null);
+function jumpToThread(): void {
+  threadEl.value?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
 </script>
 
 <template>
@@ -360,11 +529,60 @@ async function resetWorktree(force = false): Promise<void> {
       <span class="tag">{{ ticket.tag }}</span>
     </div>
 
+    <!-- What the ancestry walk paid for, now that the panel asks for it
+         (DRY-76): the epic this hangs off, and a count of the thread below.
+         The pill is the only thing above the fold that says the thread is
+         there at all — on a long description it is a scroll away. -->
+    <div class="metarow" v-if="detail?.epic || threadTotal">
+      <span v-if="detail?.epic" class="epic" :title="detail.epic.title ?? detail.epic.key">
+        <span class="elabel">Epic</span>
+        <span class="ekey">{{ detail.epic.key }}</span>
+        <span class="etitle">{{ detail.epic.title }}</span>
+      </span>
+      <button
+        v-if="threadTotal"
+        class="cjump"
+        title="Jump to the comment thread"
+        @click="jumpToThread"
+      >
+        {{ threadTotal }} comment{{ threadTotal === 1 ? "" : "s" }}
+      </button>
+    </div>
+
     <div class="desc">
       <p v-if="loading" class="muted">Loading ticket…</p>
       <p v-else-if="loadError" class="muted err">Couldn't load description: {{ loadError }}</p>
-      <!-- Rendered + sanitized markdown (DRY-35); shared .mdbody pipeline. -->
-      <div v-else class="mdbody" v-html="renderMarkdown(detail?.description ?? '')"></div>
+      <template v-else>
+        <!-- Rendered + sanitized markdown (DRY-35); shared .mdbody pipeline. -->
+        <div class="mdbody" v-html="descHtml"></div>
+
+        <!-- The comment thread (DRY-76). Inside the description's scrollport on
+             purpose: `.desc` is the only region DRY-74 allows to give way, so a
+             forty-comment ticket scrolls here instead of pushing Spawn Agent
+             off the bottom of the panel. -->
+        <section v-if="thread" ref="threadEl" class="thread">
+          <h3 class="thead">Activity</h3>
+          <p class="twindow" :class="{ warn: thread.kind === 'lost' || thread.kind === 'silent' }">
+            {{ threadLine }}
+          </p>
+          <template v-if="thread.kind === 'shown'">
+            <article v-for="(c, i) in thread.comments" :key="i" class="comment">
+              <div class="cmeta">
+                <span class="cauthor">{{ c.author || "unknown" }}</span>
+                <span class="cwhen" :title="c.createdAt">{{ c.when }}</span>
+                <span v-if="i === 0 && thread.comments.length > 1" class="cnew">newest</span>
+              </div>
+              <!-- `.comment-body` is not decoration: a comment carries its own
+                   markdown headings (`## What the design adds` is a real one on
+                   this project's tickets) and under the shared .mdbody scale an
+                   h1 inside a comment outranks the panel's own title. The rules
+                   that flatten them live in style.css, because scoped CSS does
+                   not reach v-html content. -->
+              <div class="mdbody comment-body" v-html="c.html"></div>
+            </article>
+          </template>
+        </section>
+      </template>
     </div>
 
     <label class="plabel">Working directory</label>
@@ -638,6 +856,113 @@ async function resetWorktree(force = false): Promise<void> {
 }
 .err {
   color: #d6a651;
+}
+/* --- epic + thread-count row (DRY-76) --- */
+.metarow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 7px;
+  min-width: 0;
+}
+.epic {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.elabel {
+  font-size: 9.5px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #5a636f;
+}
+.ekey {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 11px;
+  color: #8b7fd6; /* the epic tag colour (lib/tracker.ts TAG_COLOR) */
+}
+.etitle {
+  font-size: 11px;
+  color: #6b7682;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cjump {
+  flex: 0 0 auto;
+  margin-left: auto;
+  background: #131c26;
+  border: 1px solid #2a3744;
+  border-radius: 999px;
+  color: #9cc6ec;
+  font-size: 10.5px;
+  padding: 2px 9px;
+  cursor: pointer;
+}
+.cjump:hover {
+  background: #1b2531;
+  border-color: #3d6fa6;
+}
+/* --- comment thread (DRY-76) --- */
+.thread {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid #ffffff12;
+}
+.thead {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #7a8696;
+}
+.twindow {
+  margin: 4px 0 0;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: #6b7682;
+}
+/* A thread that exists and didn't arrive is amber, like every other kept-or-
+   missing state in this panel — the reader has to be able to tell it from
+   "nobody has commented", which is the same sentence in a different colour. */
+.twindow.warn {
+  color: #d6a651;
+}
+.comment {
+  margin-top: 9px;
+  background: #0f151c;
+  border: 1px solid #ffffff0d;
+  border-left: 2px solid #33506e;
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.cmeta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+.cauthor {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #9cc6ec;
+}
+.cwhen {
+  font-size: 10.5px;
+  color: #5a636f;
+}
+.cnew {
+  margin-left: auto;
+  flex: 0 0 auto;
+  font-size: 9px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: #7fb59a;
+  border: 1px solid #7fb59a44;
+  border-radius: 999px;
+  padding: 1px 6px;
 }
 .plabel {
   font-size: 11px;

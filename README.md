@@ -409,11 +409,19 @@ if you deliberately give them the same workspace name.
 
 ## Ticket-driven sessions
 
-Picking a ticket (sidebar or `Ctrl K`) opens its description; the panel shows
-the resolved **working directory** (editable — projects with no repo default to
-`$HOME`, which you can override). **Send to agent** spawns `claude` there and the
-ticket rides into the agent's context via a `SessionStart` hook (`curl →
+Picking a ticket (sidebar or `Ctrl K`) opens its description, **its comment
+thread and the epic it hangs off** (DRY-76); the panel shows the resolved
+**working directory** (editable — projects with no repo default to `$HOME`,
+which you can override). **Send to agent** spawns `claude` there and the ticket
+rides into the agent's context via a `SessionStart` hook (`curl →
 /hook/sessionstart`) — not typed into the prompt.
+
+The thread is on the panel for the same reason it is in the brief: a correction
+recorded in the comments is invisible in a description that still says the old
+thing, and until DRY-76 the agent read that correction and the human choosing to
+spawn it did not. Comments are newest-first, and the panel says how much of the
+record it is showing ("showing the 20 most recent of 63") rather than implying
+it has the lot.
 
 The brief is the description **plus the comment thread and the nearest epic's
 key** (DRY-53). Comments matter because that's where decisions, design reviews

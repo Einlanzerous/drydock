@@ -56,6 +56,14 @@ import { AsyncLocalStorage } from "node:async_hooks";
  * list budget sized against a 20s sidebar poll would cut briefs a slow tracker
  * is still delivering, to fix an accumulation that path doesn't have: a brief
  * is one spawn, not a poll.
+ *
+ * It has a SECOND caller since DRY-76 — the ticket panel, which now asks for
+ * the same thread and so takes the same decorations — and the conclusion is
+ * unchanged for the same reason: a panel open is a click. Neither caller
+ * repeats on a clock, so neither can pile pulls on top of pulls, which is the
+ * failure this file exists to end. What both rely on instead is that the
+ * decorations degrade rather than block: the walk's own budget costs the epic
+ * line, not the description and the comments.
  */
 
 /**

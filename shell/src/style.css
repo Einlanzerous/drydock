@@ -247,3 +247,34 @@ body {
 .mdbody img {
   max-width: 100%;
 }
+
+/* A comment body inside the ticket panel's thread (DRY-76).
+   Same pipeline, deliberately smaller voice. Comment bodies carry their OWN
+   markdown headings — `## What the design adds` is a real one on this project's
+   tickets — and under the rules above an h1 inside a comment renders LARGER
+   than the panel's own 16px title and an h2 all but matches it, so one comment
+   restyles the panel around it and reads as a section OF the ticket rather than
+   as somebody talking. The brief solves
+   the same problem with `<comment author= at=>` tags (daemon tracker/context.ts,
+   trap 4 of DRY-53); a rendered surface can't use a delimiter, so every heading
+   level inside a comment collapses to one subordinate size and the byline above
+   it stays the most senior thing in the block.
+   Global rather than scoped to TicketDetail.vue because Vue's scoped CSS never
+   reaches `v-html` content — the same reason .mdbody itself lives here. */
+.mdbody.comment-body h1,
+.mdbody.comment-body h2,
+.mdbody.comment-body h3,
+.mdbody.comment-body h4 {
+  margin: 0.7em 0 0.3em;
+  font-size: 1em;
+  font-weight: 600;
+  color: #c3ccd6;
+  border-bottom: none;
+  padding-bottom: 0;
+}
+/* Same argument for a horizontal rule: a `---` in a comment would otherwise
+   draw the same weight of line as the thread's own divider above it. */
+.mdbody.comment-body hr {
+  margin: 0.7em 0;
+  border-top-color: #ffffff0d;
+}

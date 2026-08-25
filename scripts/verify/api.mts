@@ -17,9 +17,9 @@
 import type { DaemonHealth, Readiness } from "../../daemon/src/health.js";
 import type { SessionInfo } from "../../daemon/src/protocol.js";
 import type { SessionRecord, WorkspaceState } from "../../daemon/src/state/types.js";
-import type { Ticket } from "../../daemon/src/tracker/types.js";
+import type { Ticket, TicketDetail } from "../../daemon/src/tracker/types.js";
 
-export type { SessionInfo, SessionRecord, Ticket, WorkspaceState };
+export type { SessionInfo, SessionRecord, Ticket, TicketDetail, WorkspaceState };
 
 /**
  * The trailing argument every harness's `check()` takes: the diagnosis printed

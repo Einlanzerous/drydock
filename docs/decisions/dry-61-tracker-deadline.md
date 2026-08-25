@@ -71,7 +71,11 @@ README. The traps:
    for its optional decorations that degrade a line rather than the brief, and
    the caller waiting on it is a `curl -s -m 25` with no retry. Sizing it
    against a 20s sidebar poll would cut briefs a slow tracker is still
-   delivering, to fix an accumulation one spawn doesn't have.
+   delivering, to fix an accumulation one spawn doesn't have. **DRY-76 gave it
+   a second caller** — the ticket panel asks for the same thread now, so it
+   takes the same decorations — and the conclusion holds unchanged: a panel open
+   is a click, so neither caller repeats on a clock and neither can pile pulls
+   on top of pulls.
 8. **A blown deadline must cost the refresh, not the sidebar.** With a list in
    hand the cache keeps it and marks it `stale` (200, DRY-72 trap 4 / DRY-55's
    rule); only a COLD key 502s. A deadline that blanked a working sidebar would

@@ -118,6 +118,14 @@ Three groups:
   minute; no daemon config beyond a spare port. Run it when touching
   `GatePanel.vue`, or the rail's `measureGateRoom` / anything that changes the
   panel's width, height or anchoring.
+- **The ticket panel's comment thread (DRY-76)** —
+  [its own section](#the-ticket-panels-comment-thread-dry-76). Two harnesses:
+  `ticket-thread.mts` (its own stub tracker and its own daemons, no browser,
+  ~15 seconds) for what the route hands over from **both** providers, and
+  `ticket-panel.mts` (a browser, about a minute) for what the panel then says.
+  Run both when touching `/api/tracker/ticket/<KEY>`, `getTicket` in
+  `shell/src/lib/tracker.ts`, or the thread block in `TicketDetail.vue`; run the
+  first when touching either provider's `getTicket`.
 - **The terminal's clipboard keys (DRY-71)** —
   [its own section](#the-terminals-clipboard-keys-dry-71). A browser, about
   30 seconds; no daemon config beyond a spare port. Run it when touching
@@ -2069,6 +2077,81 @@ which carries the recipe): against the pre-fix tree it fails **26 of 80**. The
 float round is not among them, honestly — the removed call was already a no-op
 there, which is the whole reason this shipped unnoticed — so those 21 checks are
 a guard on what must not regress rather than evidence of the fix.
+
+## The ticket panel's comment thread (DRY-76)
+
+Two harnesses, because the claim has two halves and neither can see the other's
+failure. `ticket-thread.mts` is about what the daemon HANDS OVER, on both
+providers; `ticket-panel.mts` is about what the panel then SAYS about it.
+
+```sh
+(cd daemon && node --import tsx ../scripts/verify/ticket-thread.mts)
+```
+
+Self-contained: it starts a stub tracker that speaks both wire shapes on one
+origin (`:4376`) and a throwaway daemon per provider (`:4377`), needs no
+credentials and no network, and takes about fifteen seconds. Override
+`STUB_PORT` / `DAEMON_PORT` if either is busy.
+
+| harness | what it holds down |
+|---|---|
+| `ticket-thread.mts` | `?thread=true` reaches the provider, from a real daemon, on Jira and on Switchyard. The thread arrives ending at the NEWEST comment (Jira pages `comment` oldest-first, so the inline page is the wrong end of it), `commentCount` survives as the tracker's total rather than the window's length, a Switchyard tombstone is neither shown nor counted, and the epic comes back with it. Also what it COSTS — one upstream GET without the flag, three with — and that two opens in a row both reach the tracker, because this route is deliberately uncached. |
+
+Why a real daemon rather than the providers in-process, which
+`tracker-getticket.mts` already does: `createTracker` **falls back to the
+fixture provider** when a live provider is selected but unconfigured, and says
+so only in a log line. A harness that trusted `DRYDOCK_TRACKER=jira` would
+assert against fixture data with no Jira in the picture — so every round checks
+`/api/tracker/info` first and asserts only on bytes the stub could have
+produced. It is also the only rig here that can catch `?thread=true` being
+dropped between the browser and the provider, which is the one thing the route
+change can get wrong.
+
+The browser half needs a rig — the lightest one in this file, since nothing is
+spawned:
+
+```sh
+bunx playwright install chromium             # once per machine; see "Running these"
+
+(cd daemon && DRYDOCK_PORT=4384 DRYDOCK_HOST=127.0.0.1 DRYDOCK_TRACKER=fixture \
+   DRYDOCK_STATE_FILE=/tmp/dry76-state.json DRYDOCK_SESSIONS_DIR=/tmp/dry76-sessions \
+   node --import tsx src/index.ts &)
+(cd shell && VITE_DAEMON_URL=http://127.0.0.1:4384 bunx vite --port 5384 --strictPort &)
+
+(cd daemon && node --import tsx ../scripts/verify/ticket-panel.mts)
+```
+
+| harness | what it holds down |
+|---|---|
+| `ticket-panel.mts` | The panel renders the thread, newest first, and says how much of the record it is showing. Round 1 is the whole path unfaked (real daemon, fixture provider, real `?thread=true`) on ARGY-89 — the fixture ticket whose second comment cancels a feature its description still describes. Rounds 2-6 fulfil the route in the browser for the four shapes a fixture tracker cannot produce; round 7 holds DRY-74's line (forty comments scroll inside `.desc` instead of pushing **Spawn Agent** off the panel); round 8 switches tickets mid-flight, with the FIRST request held 3s so the reply order is guaranteed wrong rather than raced. |
+
+Three of those rounds exist to keep three different facts from rendering as the
+same sentence: "no comments", "63 comments and none of them arrived", and "the
+tracker never answered that question". Rendered identically, the last two read
+as the first — DRY-55's failure on a second surface, and the reason the panel
+warns in amber on two of the three.
+
+**`VITE_DAEMON_URL` is the only override that works.** `page.addInitScript`
+setting `window.__DRYDOCK__` is overwritten by dev's own `public/config.js`,
+which loads after it — silently pointing the page at :4317, the LIVE daemon.
+
+Discrimination (see [the section below](#making-sure-a-harness-still-discriminates)):
+against the unpatched tree `ticket-thread.mts` fails **21 of 37** — revert the
+`{thread: true}` argument in `server.ts`'s ticket route — and `ticket-panel.mts`
+fails **31 of 40** with the three shell files (`TicketDetail.vue`, `lib/tracker.ts`,
+`style.css`) at `main`, which vite hot-reloads without restarting anything.
+Both report rather than throw, so the count is readable off one run.
+
+Round 8 has a narrower recipe worth keeping, because the race it covers is older
+than the feature: drop the three `if (mine())` guards in `TicketDetail.vue`'s
+ticket watcher and it fails **2 of 40** — the superseded reply repaints the
+panel's description and its thread — while every other round stays green.
+
+The handful that pass either way are negative assertions — "no cards are
+invented", "no pill to jump to nothing" — and each is paired with a positive one
+in the same round that does not (`the heading rendered as a heading at all`
+guards the font-size comparison beside it, which reads 0 vs 0 when nothing
+rendered).
 
 ## Workspace store: why a proxy and not `docker stop`
 
