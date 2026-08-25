@@ -363,6 +363,19 @@ async function resetWorktree(force = false): Promise<void> {
 // --- the comment thread (DRY-76) ---
 
 /**
+ * The description, rendered once per ticket rather than once per frame.
+ *
+ * Same argument as `RenderedComment` below: `v-html="renderMarkdown(...)"` in
+ * the template runs inside the render function, so dragging the panel reparsed
+ * the whole body on every mousemove. That was true before this ticket and cheap
+ * enough to miss at one parse — a long description measures ~0.7ms through
+ * `marked` alone, before DOMPurify — but nothing in the template should be
+ * deriving from `detail` per frame now that the thread has made the cost of the
+ * pattern visible.
+ */
+const descHtml = computed(() => renderMarkdown(detail.value?.description ?? ""));
+
+/**
  * What the panel is entitled to say about the thread.
  *
  * Four states rather than a list and a count, because "nobody has commented",
@@ -389,8 +402,14 @@ type Thread =
  * `pos` feeds `.panel`'s `:style`, and the prompt/cwd/branch inputs re-render
  * on every keystroke. That was one parse before DRY-76 and is up to forty
  * after it. The computed re-runs only when `detail` is replaced.
+ *
+ * `when` is in here for the same reason and is not the cheap half: `whenText`
+ * builds an `Intl` format per call, so forty of them left in the template cost
+ * ~2ms of every dragged frame — more than the description's markdown. Anything
+ * else this panel derives per comment belongs on this type rather than beside
+ * the `v-for`.
  */
-type RenderedComment = TicketComment & { html: string };
+type RenderedComment = TicketComment & { html: string; when: string };
 
 /**
  * NEWEST FIRST — the one ordering decision here worth arguing about.
@@ -419,7 +438,9 @@ const thread = computed<Thread | null>(() => {
   if (!list.length) return { kind: "lost", total };
   return {
     kind: "shown",
-    comments: [...list].reverse().map((c) => ({ ...c, html: renderMarkdown(c.body) })),
+    comments: [...list]
+      .reverse()
+      .map((c) => ({ ...c, html: renderMarkdown(c.body), when: whenText(c.createdAt) })),
     total,
   };
 });
@@ -533,7 +554,7 @@ function jumpToThread(): void {
       <p v-else-if="loadError" class="muted err">Couldn't load description: {{ loadError }}</p>
       <template v-else>
         <!-- Rendered + sanitized markdown (DRY-35); shared .mdbody pipeline. -->
-        <div class="mdbody" v-html="renderMarkdown(detail?.description ?? '')"></div>
+        <div class="mdbody" v-html="descHtml"></div>
 
         <!-- The comment thread (DRY-76). Inside the description's scrollport on
              purpose: `.desc` is the only region DRY-74 allows to give way, so a
@@ -548,7 +569,7 @@ function jumpToThread(): void {
             <article v-for="(c, i) in thread.comments" :key="i" class="comment">
               <div class="cmeta">
                 <span class="cauthor">{{ c.author || "unknown" }}</span>
-                <span class="cwhen" :title="c.createdAt">{{ whenText(c.createdAt) }}</span>
+                <span class="cwhen" :title="c.createdAt">{{ c.when }}</span>
                 <span v-if="i === 0 && thread.comments.length > 1" class="cnew">newest</span>
               </div>
               <!-- `.comment-body` is not decoration: a comment carries its own

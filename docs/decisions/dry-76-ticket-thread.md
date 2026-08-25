@@ -127,6 +127,19 @@ Numbered because each is a bug that either shipped or was one commit away.
    the argument was passed. CLAUDE.md's recurring trap 7, and worth noting that
    the shell's copy was accurate enough to name the fix.
 
+10. **Anything the template derives from `detail` is derived once per FRAME.**
+    `pos` feeds `.panel`'s `:style` and `onDragMove` writes it on every
+    mousemove, so a drag re-runs the whole render function; so does a keystroke
+    in the prompt box. `v-html="renderMarkdown(c.body)"` inside the `v-for`
+    therefore ran marked + DOMPurify forty times per mousemove — caught in
+    review, not by me. The same trap has two quieter halves: `whenText` builds
+    an `Intl` format per call (~2ms per frame at forty comments, *more* than the
+    markdown), and the description's own `renderMarkdown` had been in the
+    template since DRY-35, cheap enough to miss at one parse (~0.7ms through
+    `marked` before DOMPurify). All three now resolve in computeds keyed on
+    `detail`, which is replaced once per ticket. The rule this leaves behind:
+    the panel's template renders strings, it does not make them.
+
 ## Verifying it
 
 `scripts/verify/ticket-thread.mts` (route, both providers, its own stub tracker
