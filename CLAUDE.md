@@ -193,12 +193,27 @@ restart it to test things.
 
 - Branch `dry-NN-short-slug` off `main`; PR to `main` on
   `Einlanzerous/drydock` (public).
-- **Conventional Commits** (DRY-38): release-please computes versions from
-  them, so commit subjects must be `feat:` / `fix:` / `docs:` / `chore:` /
-  `refactor:` (optionally scoped: `feat(daemon): …`) with the ticket in the
-  subject tail — e.g. `feat(daemon): resolve repo from Jira component (DRY-31)`.
-  Breaking change → `feat!:` or a `BREAKING CHANGE:` footer. Non-CC subjects
-  are invisible to release math.
+- **Squash is the merge button** (DRY-98). Merge commits are disabled on the
+  repo, and a squash lands the **PR title** as the subject with an empty body
+  (`PR_TITLE` + `BLANK`, matching switchyard and argosy). Under merge commits
+  every PR reached the changelog twice — the merge commit's body was the PR
+  title, so release-please parsed it and then parsed the branch commit saying
+  the same thing — and a review fix made inside a PR shipped as a released bug
+  fix for a bug that never existed outside that branch.
+- **Conventional Commits** (DRY-38): release-please computes versions from what
+  lands on `main`, which is now the **PR title and nothing else**. So the title
+  must be `feat:` / `fix:` / `docs:` / `chore:` / `refactor:` (optionally
+  scoped: `feat(daemon): …`) with the ticket in the subject tail — e.g.
+  `feat(daemon): resolve repo from Jira component (DRY-31)`. A breaking change
+  is `feat!:` **in the title**: the squash body is empty, so a `BREAKING
+  CHANGE:` footer written in a branch commit or the PR body never reaches
+  `main`, and release-please cuts a minor release for it with nothing reporting
+  the miss. That footer was equal advice until DRY-98 — under `COMMIT_MESSAGES`
+  the branch bodies were concatenated into the squash body and it did reach
+  release-please — and it only lands now if it is typed into the squash dialog
+  by hand at merge time. A non-CC **title** is invisible to release math however
+  well-formed the branch's own commits are; keep those CC too, but they are read
+  by a reviewer, not by release-please.
 - Tickets live in the DRY project (Switchyard at home; fixture data otherwise).
   When the tracker is reachable, attach the PR URL to its DRY ticket on open —
   the poller auto-closes the ticket on merge, so don't close it by hand.
