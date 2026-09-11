@@ -16,7 +16,7 @@ RUN bun install --frozen-lockfile --ignore-scripts
 COPY shell/ shell/
 RUN bun run --filter '@drydock/shell' build
 
-FROM nginx:1.27-alpine
+FROM nginx:1.30-alpine
 COPY shell/docker/nginx.conf /etc/nginx/conf.d/default.conf
 COPY shell/docker/20-drydock-config.sh /docker-entrypoint.d/20-drydock-config.sh
 RUN chmod +x /docker-entrypoint.d/20-drydock-config.sh
