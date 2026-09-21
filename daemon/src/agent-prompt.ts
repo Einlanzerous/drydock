@@ -27,11 +27,15 @@ export type AgentPromptKey = (typeof AGENT_PROMPT_KEYS)[number];
 // in three. Read `DEFAULT_AGENT_PROMPT` for why each half of it is the way it is.
 const LEAD = "Work ticket {key}. Its full description is attached as context";
 const REVIEW_LOOP =
-  "open a PR, attach it to the ticket, and address the CI reviewer's comments until it " +
-  "reports nothing blocking. Bound that loop: at most 3 review rounds, and stop waiting " +
-  "if none has landed 20 minutes after a push — the reviewer is advisory and declines " +
-  "most re-reviews, so comment \"@claude review\" on the PR if you want another.";
-const HAND_BACK = "Then hand back with whatever is still outstanding.";
+  "open a PR, attach it to the ticket, then watch it: wait for its CI (gh pr checks) and " +
+  "the reviewer's comments, fix every failing check, address each blocking or important " +
+  "comment, and fix each nit or reply with why not, then push and watch again. Bound that " +
+  "loop: at most 3 review rounds, and stop waiting 20 minutes after a push whatever is " +
+  "still pending — the reviewer is advisory and declines most re-reviews, so comment " +
+  "\"@claude review\" on the PR if you want another.";
+const HAND_BACK =
+  "Hand back only when every check is green and every comment answered, or that bound is " +
+  "hit — and say exactly what is still red, pending or unanswered.";
 
 /**
  * The built-in default: implement the ticket, then see the change through
@@ -60,11 +64,24 @@ const HAND_BACK = "Then hand back with whatever is still outstanding.";
  *     and posts the tracker comment (`session.ts`). Telling it to stop waiting
  *     is telling it to produce those artefacts.
  *
+ * **What it watches, and when it may say done (DRY-99 follow-up).** The loop first
+ * named only "the CI reviewer's comments, until it reports nothing blocking", and
+ * agents kept handing back with the PR still red: a failing test or typecheck is
+ * not a review comment, an "important" finding is not always "blocking", and a nit
+ * is neither. So it now names all three — CI checks, blocking-or-important
+ * comments, nits (fix, or reply saying why not) — and the hand-back is
+ * CONDITIONAL: green and answered, or the bound is hit, saying what is not. The
+ * bound is unchanged and is still the only thing that ends a loop on a PR that
+ * never turns green; widening what the loop watches without it would be the
+ * unbounded loop again.
+ *
  * This is typed into a supervised composer too, where a human reads it before
  * pressing return (DRY-88 trap 3: the paths differ by the RETURN, not by the
- * text), so it stays four sentences and ~485 characters — something a person
- * can scan before sending rather than a wall. If you reword it, keep it that
- * order of size; a prompt nobody reads is one nobody edits before launching.
+ * text), so it has to stay something a person can scan before sending rather
+ * than a wall: 728 characters, up from 485 when it named only the reviewer. That
+ * growth was chosen, not drift — it is what stops an agent calling a red PR done
+ * — but it is where to stop. A prompt nobody reads is one nobody edits before
+ * launching, so if you add to it, cut something.
  *
  * **One line, deliberately.** A `.env` is parsed line by line (`env.ts` skips
  * any line without an `=`), so a two-line default is one an operator copies in
@@ -86,11 +103,10 @@ export const DEFAULT_AGENT_PROMPT = `${LEAD} — implement it, then see it throu
 //
 // Each still resolves to ONE line, for the reason given on `DEFAULT_AGENT_PROMPT`:
 // an operator copies it into a `.env` to reword it, and a second line would be
-// silently lost — and the second line is where the bound lives. They are longer
-// than the four-sentence original (727 and 804 characters for `decision` and
-// `full`, against 485) because the plan clause is real policy; the composer is
-// still something a person can read before pressing return, but that is the
-// ceiling, not a starting point.
+// silently lost — and the second line is where the bound lives. `decision` and
+// `full` are 970 characters and `evidence` 728, because the plan clause and the
+// CI clause are real policy; the composer is still something a person can read
+// before pressing return, but that is the ceiling, not a starting point.
 //
 // **All of them STOP; none of them wait.** A run that idles on an approval under
 // `manual`/`acceptEdits` is failed by its own gate timeout (DRY-96), and a session
@@ -133,8 +149,8 @@ export const DEFAULT_AGENT_PROMPTS: Record<AgentPromptMode, string> = {
   // the mode is FOR, said out loud: sign-off is asked for, not assumed.
   full:
     `${LEAD}. ${PLAN_FIRST} Once it is approved, implement it and see it through review: ${REVIEW_LOOP} ` +
-    "Do not merge it: when it is ready, ask me to sign off on the merge, then stop and hand back " +
-    "with whatever is still outstanding.",
+    "Do not merge it: once it is green and answered — or that bound is hit, saying what is " +
+    "not — ask me to sign off on the merge, then stop and hand back.",
   // Switchyard's own rule for an unset mode: ask, never assume — "unset is not
   // evidence". Every ticket in a project with no `default_review_mode` lands here
   // (DRY's is null), which is a behaviour change for those tickets and is why it

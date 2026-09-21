@@ -71,6 +71,28 @@ const expand = (template: string, key: string) => template.replaceAll("{key}", k
 const times = (hay: string, needle: string): number => hay.split(needle).length - 1;
 
 /**
+ * What the review loop must say in every prompt that runs to a PR (the DRY-99
+ * follow-up), as tripwires rather than an expectation about wording: a rewrite
+ * that drops one should fail HERE and be re-argued, not sail past.
+ *
+ * The reason it exists: the loop first named only "the CI reviewer's comments
+ * until it reports nothing blocking", and agents kept ending their turn saying
+ * they were done with the PR still red — a failing check is not a review comment,
+ * an "important" finding is not always "blocking", and a nit is neither. And the
+ * BOUND must survive the widening, or the loop is the unbounded one again.
+ *
+ * `ends` is the tail that makes the hand-back conditional, which differs for `full`
+ * (whose sign-off request waits on the same condition).
+ */
+function loopChecks(label: string, raw: string, ends: string): void {
+  const x = despace(raw);
+  check(`${label}: watches CI, not only the reviewer`, x.includes("ghprchecks") && x.includes("everyfailingcheck"));
+  check(`${label}: nits are fixed or answered, not skipped`, x.includes("eachnitorreplywithwhynot"));
+  check(`${label}: the bound survives, and covers a check still pending`, x.includes("atmost3reviewrounds") && x.includes("whateverisstillpending"));
+  check(`${label}: it does not hand back on red`, x.includes(ends));
+}
+
+/**
  * What the agent pane's terminal is showing, with whitespace removed — the rows
  * are read rather than the socket because "it arrived" is a claim about the CLI.
  * Despaced because a TUI paints with cursor-positioning where a line has spaces
@@ -214,6 +236,10 @@ console.log("\n   …and the policy each one carries");
   // A thing said in prose that the agent has to be able to DO: the plan tools
   // are Switchyard's, and named so a respawn checks whether it is approved.
   check("the plan clause names the tools", d.includes("get_plan") && d.includes("open_plan_draft") && d.includes("submit_plan"));
+  // `evidence` is a short override in this rig (it has to differ from the ordinary
+  // prompt), so ITS built-in loop is checked in round 5, on a daemon with nothing set.
+  loopChecks("decision", perMode.decision, "Handbackonlywheneverycheckisgreenandeverycommentanswered");
+  loopChecks("full", perMode.full, "onceitisgreenandanswered");
 }
 
 // --- 2. a mode that changed after the sidebar cached the list -----------------
@@ -402,6 +428,8 @@ try {
   check("no variables: every mode has a built-in prompt", ["evidence", "decision", "full", "unclassified"].every((m) => !!p(none)[m]));
   check("…and the ordinary prompt is the evidence one (a host that never sees a mode is unchanged)", a(none) === p(none).evidence);
   check("…the four are four different sentences", new Set(Object.values(p(none))).size === 4);
+  // The built-in `evidence` prompt — the DEFAULT, and the one the follow-up changed.
+  loopChecks("built-in evidence", p(none).evidence, "Handbackonlywheneverycheckisgreenandeverycommentanswered");
 
   const base = booted.base;
   check("DRYDOCK_AGENT_PROMPT still sets the ordinary prompt", a(base) === CUSTOM, JSON.stringify(a(base)));

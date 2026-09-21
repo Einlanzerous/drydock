@@ -1895,7 +1895,7 @@ printf '#!/bin/sh\nexec node --import %s/daemon/node_modules/tsx/dist/loader.mjs
    node --import tsx src/index.ts &)
 (cd shell && VITE_DAEMON_URL=http://127.0.0.1:4389 bunx vite --port 5389 --strictPort &)
 
-(cd daemon && node --import tsx ../scripts/verify/review-mode-prompt.mts)   # 56 checks
+(cd daemon && node --import tsx ../scripts/verify/review-mode-prompt.mts)   # 68 checks
 ```
 
 Three lines of that rig are load-bearing. The harness REFUSES (exit 2) on the first
@@ -2368,35 +2368,51 @@ git checkout <that commit>~1 -- shell/src/App.vue
 (cd daemon && node --import tsx ../scripts/verify/spawn-layout.mts)  # expect 26 failures of 80
 git checkout HEAD -- shell/src/App.vue
 
-# DRY-99 the prompt follows the ticket's review mode. Seven single mutations, each
+# DRY-99 the prompt follows the ticket's review mode. Eight single mutations, each
 # copied back with `cp` (NOT `git checkout`, which leaves the revert staged) and
-# each measured against the 56 checks. Counts are what a run observed; the shell
+# each measured against the 68 checks. Counts are what a run observed; the shell
 # ones are picked up by Vite immediately, the daemon ones need the rig daemon
 # restarted (rounds 4-5 boot their own from the tree and do not).
 #
 # a. the shell ignores the mode — the pre-DRY-99 behaviour exactly. Only the
 #    absent-key ticket still passes, which is correct: it SHOULD get the ordinary one.
 perl -0pi -e 's/pickAgentPrompt\(props\.agentPrompt, props\.agentPrompts, mode\)/(props.agentPrompt ?? "")/' \
-  shell/src/components/TicketDetail.vue                                  # expect 16 of 56
+  shell/src/components/TicketDetail.vue                                  # expect 16 of 68
 # b. the panel trusts the sidebar row rather than its own fresh fetch
 perl -0pi -e 's/detail\.value \? detail\.value\.reviewMode : t\.reviewMode/t.reviewMode/' \
-  shell/src/components/TicketDetail.vue                                  # expect 2 of 56
+  shell/src/components/TicketDetail.vue                                  # expect 2 of 68
 # c. a late-arriving mode overwrites a prompt somebody is typing
 perl -0pi -e 's/    if \(prompt\.value !== filledPrompt\.value\) return;\n    prompt\.value = filledPrompt\.value = defaultPrompt\(props\.ticket\);\n  \},\n\);/    prompt.value = filledPrompt.value = defaultPrompt(props.ticket);\n  },\n);/' \
-  shell/src/components/TicketDetail.vue                                  # expect 3 of 56
+  shell/src/components/TicketDetail.vue                                  # expect 3 of 68
 # d. absent reads as `null` AND an unknown mode reads as absent — both halves at once
 perl -0pi -e 's/if \(raw === undefined\) return undefined;/if (raw === undefined) return null;/; s/\? raw : null;/? raw : undefined;/' \
-  daemon/src/tracker/switchyard.ts                                       # expect 14 of 56 (restart the rig daemon)
+  daemon/src/tracker/switchyard.ts                                       # expect 14 of 68 (restart the rig daemon)
 # e. DRYDOCK_AGENT_PROMPT speaks for EVERY mode, not just evidence
 perl -0pi -e 's/\(mode === "evidence" \? base : undefined\)/base/' \
-  daemon/src/agent-prompt.ts                                             # expect 1 of 56
+  daemon/src/agent-prompt.ts                                             # expect 1 of 68
 # f. the boot check validates only the first template
 perl -0pi -e 's/of AGENT_PROMPTS\.sources\)/of AGENT_PROMPTS.sources.slice(0, 1))/' \
-  daemon/src/config.ts                                                   # expect 4 of 56
+  daemon/src/config.ts                                                   # expect 4 of 68
 # g. a daemon that serves no per-mode prompts leaves the panel with nothing —
 #    the older-daemon fallback broken, without touching the absent-key path
 perl -0pi -e 's/if \(own\) return own;/return own ?? "WRONG";/' \
-  shell/src/lib/agent-prompt.ts                                          # expect 1 of 56
+  shell/src/lib/agent-prompt.ts                                          # expect 1 of 68
+# h. the review loop as DRY-94 first wrote it, before it named CI or nits. By hand
+#    rather than a perl over two multi-line constants, and NOT by naming a commit —
+#    a branch commit stops being reachable once the PR is squashed, which is how
+#    the recipes above rotted. In daemon/src/agent-prompt.ts set
+#      REVIEW_LOOP = `open a PR, attach it to the ticket, and address the CI
+#        reviewer's comments until it reports nothing blocking. Bound that loop: at
+#        most 3 review rounds, and stop waiting if none has landed 20 minutes after
+#        a push — the reviewer is advisory and declines most re-reviews, so comment
+#        "@claude review" on the PR if you want another.`
+#      HAND_BACK   = `Then hand back with whatever is still outstanding.`
+#    (and `full`'s "Do not merge it: …" tail, which is stated in the same terms).
+#    Copy the file aside first and restore with `cp`.                     # expect 12 of 68
+#    (restart the rig daemon). Exactly the twelve `loopChecks` tripwires — CI, nits,
+#    the bound covering a pending check, and the conditional hand-back, for the
+#    decision, full and built-in evidence prompts. Nothing else fails, which is the
+#    point: they are the only checks that read the loop's WORDS.
 ```
 
 The prefill recipe is the fourth to rot, and its own comment says so a line

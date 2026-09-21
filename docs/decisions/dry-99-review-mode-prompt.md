@@ -11,9 +11,9 @@ choosing.
 
 | `review_mode` | the prompt tells the agent to |
 |---|---|
-| `evidence` | today's DRY-94 default, **byte-for-byte** (485 chars): implement, PR, bounded review loop, hand back |
-| `decision` | plan first and put the decisions it needs to a human, then stop; once the plan is approved, implement and run through as for `evidence` (727 chars) |
-| `full` | as `decision`, and do not merge — ask for sign-off on the merge, then stop (804 chars) |
+| `evidence` | the DRY-94 default, with the loop widened (see [below](#the-loop-watches-ci-and-the-hand-back-is-conditional)): implement, PR, watch CI and the reviewer, fix red checks and nits, bounded, hand back green-and-answered (728 chars) |
+| `decision` | plan first and put the decisions it needs to a human, then stop; once the plan is approved, implement and run through as for `evidence` (970 chars) |
+| `full` | as `decision`, and do not merge — ask for sign-off on the merge, then stop (970 chars) |
 | `null` | Switchyard's rule for an unset mode — *ask, never assume; unset is not evidence*: say so, and ask which mode applies before changing anything (365 chars) |
 | absent | the host's ordinary prompt, unchanged. A tracker with no such concept is not an unclassified ticket |
 
@@ -96,6 +96,43 @@ person firing off a spawn will notice. Three ways back to fire-and-forget:
 classify the tickets, set the project's `default_review_mode` (a human action —
 lowering it is a 403 for agent tokens), or set `DRYDOCK_AGENT_PROMPT_UNCLASSIFIED`.
 
+## The loop watches CI, and the hand-back is conditional
+
+As first written the loop said "address the CI reviewer's comments until it
+reports nothing blocking", and agents kept ending their turn saying they were done
+while the PR sat red — failing tests, "important" findings, nits — for a person to
+find on their return. Three separate gaps, all in that one sentence: a failing
+**check** is not a review comment; an **important** finding is not always
+"blocking"; and a **nit** is neither. The shared loop now names all three (CI via
+`gh pr checks`, blocking-or-important comments, nits — *fix, or reply on the PR
+with why not*), and the closing sentence is conditional: hand back only when every
+check is green and every comment is answered, **or the bound is hit**, and then say
+exactly what is still red, pending or unanswered. `full`'s sign-off request waits
+on the same condition.
+
+What did **not** change is the bound: at most 3 review rounds, and stop waiting 20
+minutes after a push, whatever is still pending (it used to say "if none has
+landed", which read as the reviewer only). It is the one thing that ends a loop on
+a PR that never turns green, and widening what the loop watches without it would
+restore the unbounded run DRY-94 exists to prevent. If three rounds turns out to be
+too few for a red-CI-then-review-then-nits sequence, that is the knob to turn —
+each round is a push plus a full watch — not the conditional hand-back.
+
+Watching CI also means more `gh` calls per round, so the exposure DRY-94 and DRY-96
+describe grows with it: the wait is safe under `auto` / `bypassPermissions` /
+`dontAsk` (or with `Bash` on "Always allow"), and under `manual` / `acceptEdits`
+every `gh pr checks` raises a gate that an unattended run will not answer. The fix
+is still the posture, not a bigger number.
+
+The cost is length: `evidence` is 728 characters (was 485) and `decision`/`full`
+970, in a composer a person reads before pressing return. That is the ceiling;
+`agent-prompt.ts` says to cut something before adding more.
+
+Like every claim in this file, the loop's *text* is verified and its *effect* is
+not: the harness proves these words reach the CLI, not that an agent behaves
+differently for them. Whether it stops handing back red PRs is measured by using
+it.
+
 ## The mode comes from the fresh fetch when there is one
 
 The sidebar's row is up to a poll stale (the daemon caches the list, DRY-72), and a
@@ -121,10 +158,12 @@ arrives half a second after they started typing.
    have thrown a temporal-dead-zone error on the first import — from a comment
    that claimed the function existed to avoid exactly that. Caught by reading it
    back, before anything ran. The shared parts now sit *above* the prompts.
-2. **The evidence default was checked, not trusted, to be unchanged.** It is built
-   from shared parts now, so "I didn't touch the sentence" is a claim about a
-   refactor. It was compared against `main`'s exported string: identical, 485
-   characters. Do the same if you split it further.
+2. **A refactor of the default was checked, not trusted, to be a refactor.** The
+   first commit rebuilt the DRY-94 sentence from shared parts, so "I didn't touch
+   the sentence" was a claim about a split. It was compared against `main`'s
+   exported string: identical, 485 characters. (The follow-up below then changed
+   the sentence on purpose, so that equality no longer holds — and no longer
+   should.) Do the same if you split it further.
 3. **A rig in a long directory cannot spawn.** `DRYDOCK_SESSIONS_DIR` inside a
    deep scratch path put the session socket at 115 bytes, over the ~100-byte unix
    limit, and the spawn failed with a message that named the fix. Round 1 timed
@@ -153,7 +192,7 @@ arrives half a second after they started typing.
 
 `scripts/verify/review-mode-prompt.mts`, rig in
 [the README](../../scripts/verify/README.md#the-prompt-follows-the-tickets-review-mode-dry-99).
-56 checks, every one on what *arrived* at the PTY (CLAUDE.md trap 3) or on what a
+68 checks, every one on what *arrived* at the PTY (CLAUDE.md trap 3) or on what a
 daemon started a particular way *serves*. It covers both tracker providers (a
 Switchyard-shaped stub, and the fixture). Of the two skew directions, round 4
 measures **new shell, older daemon** by relaying that daemon's real config minus
@@ -165,10 +204,11 @@ Discrimination, one mutation at a time (recipes in the README):
 
 | mutation | fails |
 |---|---|
-| shell ignores the mode (pre-DRY-99) | **16 of 56** — everything but the absent-key ticket, which correctly still passes |
-| panel trusts the sidebar row over its own fetch | 2 of 56 |
-| a late mode overwrites an edit in progress | 3 of 56 |
-| absent reads as `null` *and* unknown reads as absent | 14 of 56 |
-| `DRYDOCK_AGENT_PROMPT` speaks for every mode | 1 of 56 |
-| boot check validates only the first template | 4 of 56 |
-| a daemon serving no per-mode prompts leaves the panel with nothing | 1 of 56 |
+| shell ignores the mode (pre-DRY-99) | **16 of 68** — everything but the absent-key ticket, which correctly still passes |
+| panel trusts the sidebar row over its own fetch | 2 of 68 |
+| a late mode overwrites an edit in progress | 3 of 68 |
+| absent reads as `null` *and* unknown reads as absent | 14 of 68 |
+| `DRYDOCK_AGENT_PROMPT` speaks for every mode | 1 of 68 |
+| boot check validates only the first template | 4 of 68 |
+| a daemon serving no per-mode prompts leaves the panel with nothing | 1 of 68 |
+| the review loop as DRY-94 first wrote it (no CI, no nits, hand back unconditionally) | 12 of 68 — exactly the `loopChecks` tripwires, the only checks that read the loop's words |
