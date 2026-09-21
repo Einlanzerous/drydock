@@ -15,6 +15,7 @@
 // Run from `daemon/`, where tsx resolves (DRY-80):
 //   (cd daemon && node --import tsx ../scripts/verify/roam.mts)
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
+import { TOAST } from "./toast-dom.mjs";
 import {
   deskWindows,
   type Detail,
@@ -72,7 +73,7 @@ const onScreen = (page: Page): Promise<number[]> =>
     els.map((e) => Math.round(e.getBoundingClientRect().x)).sort((a, b) => a - b),
   );
 
-const noticed = (page: Page) => page.locator(".notice").count().then((n) => n > 0);
+const noticed = (page: Page) => page.locator(TOAST.notice).count().then((n) => n > 0);
 
 async function waitFor(
   label: string,

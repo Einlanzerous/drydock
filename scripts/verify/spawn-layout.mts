@@ -70,6 +70,7 @@
 // daemon can ever find — CLAUDE.md says so from having done it.
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import type { Detail, SessionsResponse, WorkspaceResponse } from "./api.mjs";
+import { TOAST } from "./toast-dom.mjs";
 
 const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5393";
 const DAEMON = process.env.DAEMON ?? "http://127.0.0.1:4393";
@@ -455,7 +456,7 @@ async function arrangedRig(
   await page.route("**/api/workspace", (route) => route.abort());
   await page.goto(SHELL);
   await page.waitForSelector(".topbar", { timeout: 15000 });
-  await page.waitForSelector(".notice", { timeout: 15000 });
+  await page.waitForSelector(TOAST.notice, { timeout: 15000 });
   await waitFrames(page, 2);
   return { ctx, page };
 }

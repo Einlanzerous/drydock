@@ -24,6 +24,7 @@
 //   (cd daemon && node --import tsx ../scripts/verify/surface.mts)
 import { chromium, type Browser, type BrowserContext, type Page } from "playwright";
 import type { Detail, HealthResponse, SessionsResponse } from "./api.mjs";
+import { TOAST } from "./toast-dom.mjs";
 
 const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5370";
 const DAEMON = process.env.DAEMON ?? "http://127.0.0.1:4370"; // past the proxy — ground truth
@@ -39,7 +40,7 @@ const check = (n: string, ok: boolean, d: Detail = "") => {
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${n}${d ? ` — ${d}` : ""}`);
   if (!ok) failures++;
 };
-const noticed = (page: Page) => page.locator(".notice").count();
+const noticed = (page: Page) => page.locator(TOAST.notice).count();
 const geo = (page: Page): Promise<number[]> =>
   page.$$eval(".frame", (els) =>
     els.map((e) => Math.round(e.getBoundingClientRect().x)).sort((a, b) => a - b),

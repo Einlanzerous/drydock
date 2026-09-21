@@ -400,11 +400,12 @@ const cardEls = new Map<string, HTMLElement>();
  *
  * A number rather than a CSS length because neither expression of it is right:
  * `100%` resolves against the panel's containing block, which is this 98px
- * rail, and a `100vh` calc would have to subtract the topbar AND whichever of
- * App.vue's notices are in the flex column above the desk at the time — they
- * are in the flow and push it down, so the figure moves with a tracker outage.
- * Same error the panel's own `max-width: calc(100vw - 40px)` made on the other
- * axis.
+ * rail, and a `100vh` calc would have to subtract the topbar AND whatever else
+ * sits in the flex column above the desk at the time — the number is a fact
+ * about the desk, not the window. (App.vue's notices were the thing that moved
+ * it, until DRY-100 made them toasts that take no space; the property is the
+ * same and its harness now grows the topbar to exercise it.) Same error the
+ * panel's own `max-width: calc(100vw - 40px)` made on the other axis.
  *
  * Derived from `deskHeight` rather than measured here: App.vue already observes
  * the desk and publishes its size to the window manager, so a second observer
