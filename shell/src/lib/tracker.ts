@@ -12,11 +12,20 @@ export type TicketCategory =
   | "blocked"
   | "done";
 
+/** What an agent may finish alone on a ticket (DRY-99). See daemon/src/tracker/types.ts. */
+export type ReviewMode = "evidence" | "decision" | "full";
+
 export interface Ticket {
   key: string;
   title: string;
   status: { category: TicketCategory; label: string };
   repo: string;
+  /**
+   * THREE states, and `undefined` is not `null` (DRY-99): absent means the
+   * tracker has no such concept, `null` means it does and this ticket isn't
+   * classified. The daemon's copy of this field says why they must not be merged.
+   */
+  reviewMode?: ReviewMode | null;
   type?: string;
   /** Parent ticket (DRY-13). See daemon/src/tracker/types.ts for why the title rides along. */
   parent?: { key: string; title?: string; type?: string };

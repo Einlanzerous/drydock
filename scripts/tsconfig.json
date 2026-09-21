@@ -62,6 +62,7 @@
     "verify/hang.mts",
     "verify/prefill.mts",
     "verify/race.mts",
+    "verify/review-mode-prompt.mts",
     "verify/roam.mts",
     "verify/sidebar.mts",
     "verify/spawn-layout.mts",

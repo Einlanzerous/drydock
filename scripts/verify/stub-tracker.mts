@@ -21,6 +21,9 @@
 //   POST /__latency?ms=N          every response delayed by N ms
 //   POST /__reset                 zero the counters (not the mode)
 //   GET  /__state                 {mode, latencyMs, list, epicList, children, lookup, total}
+//   POST /__review_mode?key=K&value=V   set ticket K's `review_mode` on the wire (DRY-99):
+//                                 V is evidence|decision|full|null, or `absent` to drop
+//                                 the key altogether, or anything else to send it verbatim
 //
 // STUB_DORMANT_EPIC=1 adds a second epic whose children are ALL in the backlog
 // bucket (DRY-83) — the shape the sidebar's pull renders as an epic with nothing
@@ -28,12 +31,19 @@
 // because every epic in the set costs one more child-stats request and
 // `tracker-cache.mts` asserts on those counts exactly.
 //
+// STUB_REVIEW_MODES=1 adds six tickets (DRY-21..26), one per thing a Switchyard
+// can say about `review_mode` (DRY-99): each of the three modes, `null`
+// (unclassified), the key ABSENT (a server older than the field), and a mode this
+// build has never heard of. OFF by default for the same reason as the epic above —
+// every extra row is a row somebody else's counts include.
+//
 // Run from `daemon/`, where tsx resolves (DRY-80):
 //   (cd daemon && node --import tsx ../scripts/verify/stub-tracker.mts)
 import http from "node:http";
 
 const PORT = Number(process.env.STUB_PORT ?? 4386);
 const DORMANT_EPIC = process.env.STUB_DORMANT_EPIC === "1";
+const REVIEW_MODES = process.env.STUB_REVIEW_MODES === "1";
 
 /**
  * A row as Switchyard's API returns it — not `TicketDetail`, which is the
@@ -48,6 +58,13 @@ interface StubTicket {
   status: { category: string; display_name: string };
   parent_id?: string;
   parent?: { key: string; title: string };
+  /**
+   * `null` is "not classified" and the key being absent is a server older than
+   * the field — two different answers on the wire, which is the point of DRY-99
+   * and why this is optional-and-nullable rather than one or the other. A
+   * `string` because a real server can send a mode this build has never heard of.
+   */
+  review_mode?: string | null;
 }
 
 /**
@@ -192,6 +209,22 @@ const DORMANT: StubTicket[] = [
 ];
 if (DORMANT_EPIC) TICKETS.push(...DORMANT);
 
+// One per thing `review_mode` can be on the wire (DRY-99). All `in_progress` so
+// the sidebar's open pull lists them without anybody flipping the backlog toggle.
+// DRY-25 has NO `review_mode` key at all — `undefined`, not `null` — and DRY-26
+// carries a mode a later Switchyard might add. Built with a spread, not an
+// assignment, so the absent one is genuinely absent from the JSON.
+const inProgress = { category: "in_progress", display_name: "In Progress" };
+const REVIEW: StubTicket[] = [
+  { id: "r21", key: "DRY-21", title: "Evidence ticket", type: "task", status: inProgress, review_mode: "evidence" },
+  { id: "r22", key: "DRY-22", title: "Decision ticket", type: "task", status: inProgress, review_mode: "decision" },
+  { id: "r23", key: "DRY-23", title: "Full ticket", type: "task", status: inProgress, review_mode: "full" },
+  { id: "r24", key: "DRY-24", title: "Unclassified ticket", type: "task", status: inProgress, review_mode: null },
+  { id: "r25", key: "DRY-25", title: "Older-server ticket", type: "task", status: inProgress },
+  { id: "r26", key: "DRY-26", title: "Future-mode ticket", type: "task", status: inProgress, review_mode: "vibes" },
+];
+if (REVIEW_MODES) TICKETS.push(...REVIEW);
+
 const PROJECT = { key: "DRY", name: "Drydock", repo_url: null };
 const withProject = (t: StubTicket) => ({ ...t, project: PROJECT, labels: [] });
 
@@ -226,6 +259,17 @@ const server = http.createServer(async (req, res) => {
   if (url.pathname === "/__state") {
     const state: StubState = { mode, latencyMs, inflight, ...counts };
     return json(200, state);
+  }
+  // Rewrite one ticket's `review_mode` mid-run (DRY-99). What it exists to make
+  // possible is a ticket whose mode CHANGED after the sidebar cached its list —
+  // the panel's own detail fetch then disagrees with the row it was opened from.
+  if (url.pathname === "/__review_mode") {
+    const t = TICKETS.find((x) => x.key === url.searchParams.get("key"));
+    if (!t) return json(404, { error: "no such ticket" });
+    const v = url.searchParams.get("value") ?? "null";
+    if (v === "absent") delete t.review_mode;
+    else t.review_mode = v === "null" ? null : v;
+    return json(200, { key: t.key, review_mode: "review_mode" in t ? t.review_mode : "(absent)" });
   }
 
   // --- the tracker itself ---

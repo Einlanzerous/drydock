@@ -1863,6 +1863,66 @@ and read `paintedAfterMs` / `waitedMs` off the daemon's `typing initial prompt`
 line against the table in `docs/decisions/dry-88-initial-prompt.md`. A stub whose numbers have drifted from the
 CLI's is a harness asserting against last year's terminal.
 
+## The prompt follows the ticket's review mode (DRY-99)
+
+`review-mode-prompt.mts`, and it needs THREE things running rather than prefill's
+two: `stub-tracker.mts` (Switchyard-shaped, and it is what carries `review_mode`
+on the wire), a daemon whose tracker is that stub, and a shell. Run it when
+touching `toReviewMode` in `daemon/src/tracker/switchyard.ts`,
+`daemon/src/agent-prompt.ts`, `pickAgentPrompt` / `defaultPrompt`, or the
+`agentPrompts` block of `/api/config`.
+
+```sh
+# The same stub-CLI shim as the rig above — reuse it if it is still there.
+# NB the loader path: it is under daemon/node_modules in a bun workspace install,
+# not the root one the prefill rig's printf assumes.
+mkdir -p /tmp/dry99-bin /tmp/dry99-repos/dry
+printf '#!/bin/sh\nexec node --import %s/daemon/node_modules/tsx/dist/loader.mjs %s/scripts/verify/stub-cli.mts "$@"\n' \
+  "$PWD" "$PWD" > /tmp/dry99-bin/claude && chmod +x /tmp/dry99-bin/claude
+
+(cd daemon && STUB_PORT=4381 STUB_REVIEW_MODES=1 node --import tsx ../scripts/verify/stub-tracker.mts &)
+
+# DRYDOCK_SESSIONS_DIR must be SHORT — a unix-socket path is capped near 100
+# bytes, and a spawn from a long directory fails with a message that says so.
+(cd daemon && PATH="/tmp/dry99-bin:$PATH" \
+   DRYDOCK_PORT=4389 DRYDOCK_HOST=127.0.0.1 DRYDOCK_SESSIONS_DIR=/tmp/d99 \
+   DRYDOCK_STATE_FILE=/tmp/dry99-state.json DRYDOCK_TRACKER=switchyard \
+   DRYDOCK_SWITCHYARD_URL=http://127.0.0.1:4381 DRYDOCK_SWITCHYARD_TOKEN=stub \
+   DRYDOCK_TRACKER_CACHE_MS=60000 DRYDOCK_REPO_PATHS=dry=/tmp/dry99-repos/dry \
+   DRYDOCK_WORKTREE_REAP_MS=0 \
+   DRYDOCK_AGENT_PROMPT='Ordinary prompt for {key}.' \
+   DRYDOCK_AGENT_PROMPT_EVIDENCE='Evidence prompt for {key}.' \
+   node --import tsx src/index.ts &)
+(cd shell && VITE_DAEMON_URL=http://127.0.0.1:4389 bunx vite --port 5389 --strictPort &)
+
+(cd daemon && node --import tsx ../scripts/verify/review-mode-prompt.mts)   # 56 checks
+```
+
+Three lines of that rig are load-bearing. The harness REFUSES (exit 2) on the first
+two rather than pass on a rig that cannot tell the answers apart; the third it
+does not check, so a run without it fails round 2 confusingly rather than refusing:
+
+- **The two prompt variables must differ.** A ticket from a Switchyard with no
+  `review_mode` key takes `DRYDOCK_AGENT_PROMPT`; an `evidence` ticket takes the
+  evidence one. With the defaults those are the same sentence, so a build that
+  read an absent key as `evidence` would pass — the very distinction this ticket
+  keeps (`undefined` is a tracker with no modes, `null` is one that has them and
+  a ticket nobody classified).
+- **`STUB_REVIEW_MODES=1`** adds DRY-21..26: each mode, `null`, the key absent, and
+  a mode this build has never heard of. Off by default, because every row is a row
+  other harnesses' counts include.
+- **`DRYDOCK_TRACKER_CACHE_MS=60000`**, so the sidebar's row stays as it was when
+  round 2 changes the ticket's mode underneath it.
+
+Rounds 5 and 6 boot their OWN daemons (a fixture tracker, `DRYDOCK_*` stripped
+first — CLAUDE.md on why), in parallel, from the tree, so they need no rig restart
+after an edit under `daemon/src/`. Rounds 0-1 do: the rig daemon is not `--watch`.
+
+**Teardown is a real step**, as it is for every rig here: the rounds spawn agents,
+and a killed daemon leaves its detached supervisors behind (DRY-57). Kill those
+FIRST, filtered on the sessions dir AND the exe as CLAUDE.md describes, and only
+then remove `/tmp/d99`.
+
 ## Is the daemon suspect? (DRY-48)
 
 `/healthz` was `{ok:true, sessions:N}` from a handler that could not fail, so a
@@ -2220,6 +2280,7 @@ tiers** — the file store is what a fresh clone runs.
 | `epic-children.mts` | DRY-83. An epic with nothing under it in the pull expands to its open children, without widening the pull, without fanning out under a filter, and without the rows blinking out when Refresh re-pulls them. |
 | `health.mts` | DRY-48. `/healthz` has an opinion: a real uncaught exception is counted and reported as `degraded` without ever reading as `down`, a broken store or tracker or log sink never un-readies the daemon, and the three postures of `DRYDOCK_EXIT_ON_UNCAUGHT` do what they say — including `idle`, which must stay up while a session runs and exit once none does. |
 | `spawn-layout.mts` | DRY-93. A spawn adds a window to the desk you are on: the layout mode is untouched — on the header AND on the daemon — and the new window is visible in that mode's own terms (a cell of the grid in tile, the large pane in focus). All three spawn paths, all three modes, plus the flag DRY-28's conflict rule reads: a spawn must not count as somebody arranging this desk, and a switcher click still must. |
+| `review-mode-prompt.mts` | DRY-99. A ticket spawns the prompt for ITS Switchyard `review_mode`, asserted on what arrives at the PTY: each mode, `null` (unclassified), an absent key (an older server or a tracker with no modes — a different answer from `null`), and a mode this build has never heard of (read as `null`). The panel's own fetch beats a stale sidebar row and never overwrites an edit in progress; a daemon that serves no per-mode prompts (older than DRY-99) falls back to the ordinary one; `DRYDOCK_AGENT_PROMPT` speaks for `evidence` only; a blank per-mode variable is unset; `\n` decodes; a bad placeholder in ANY per-mode template refuses to boot naming the variable. |
 | `desk-chrome.mts` | DRY-82. One spawn control on the header and a palette that carries what the two removed buttons did; a layout switcher centred on the window rather than on the slack its siblings leave; `key=value` filter pills that cost the tracker nothing and say when they name something this pull cannot contain; and a term the pull cannot contain found through `/api/tracker/search`, debounced. |
 
 Each exits non-zero on failure and prints one line per check.
@@ -2306,6 +2367,36 @@ git checkout HEAD -- shell/src/App.vue shell/src/lib/tracker.ts \
 git checkout <that commit>~1 -- shell/src/App.vue
 (cd daemon && node --import tsx ../scripts/verify/spawn-layout.mts)  # expect 26 failures of 80
 git checkout HEAD -- shell/src/App.vue
+
+# DRY-99 the prompt follows the ticket's review mode. Seven single mutations, each
+# copied back with `cp` (NOT `git checkout`, which leaves the revert staged) and
+# each measured against the 56 checks. Counts are what a run observed; the shell
+# ones are picked up by Vite immediately, the daemon ones need the rig daemon
+# restarted (rounds 4-5 boot their own from the tree and do not).
+#
+# a. the shell ignores the mode — the pre-DRY-99 behaviour exactly. Only the
+#    absent-key ticket still passes, which is correct: it SHOULD get the ordinary one.
+perl -0pi -e 's/pickAgentPrompt\(props\.agentPrompt, props\.agentPrompts, mode\)/(props.agentPrompt ?? "")/' \
+  shell/src/components/TicketDetail.vue                                  # expect 16 of 56
+# b. the panel trusts the sidebar row rather than its own fresh fetch
+perl -0pi -e 's/detail\.value \? detail\.value\.reviewMode : t\.reviewMode/t.reviewMode/' \
+  shell/src/components/TicketDetail.vue                                  # expect 2 of 56
+# c. a late-arriving mode overwrites a prompt somebody is typing
+perl -0pi -e 's/    if \(prompt\.value !== filledPrompt\.value\) return;\n    prompt\.value = filledPrompt\.value = defaultPrompt\(props\.ticket\);\n  \},\n\);/    prompt.value = filledPrompt.value = defaultPrompt(props.ticket);\n  },\n);/' \
+  shell/src/components/TicketDetail.vue                                  # expect 3 of 56
+# d. absent reads as `null` AND an unknown mode reads as absent — both halves at once
+perl -0pi -e 's/if \(raw === undefined\) return undefined;/if (raw === undefined) return null;/; s/\? raw : null;/? raw : undefined;/' \
+  daemon/src/tracker/switchyard.ts                                       # expect 14 of 56 (restart the rig daemon)
+# e. DRYDOCK_AGENT_PROMPT speaks for EVERY mode, not just evidence
+perl -0pi -e 's/\(mode === "evidence" \? base : undefined\)/base/' \
+  daemon/src/agent-prompt.ts                                             # expect 1 of 56
+# f. the boot check validates only the first template
+perl -0pi -e 's/of AGENT_PROMPTS\.sources\)/of AGENT_PROMPTS.sources.slice(0, 1))/' \
+  daemon/src/config.ts                                                   # expect 4 of 56
+# g. a daemon that serves no per-mode prompts leaves the panel with nothing —
+#    the older-daemon fallback broken, without touching the absent-key path
+perl -0pi -e 's/if \(own\) return own;/return own ?? "WRONG";/' \
+  shell/src/lib/agent-prompt.ts                                          # expect 1 of 56
 ```
 
 The prefill recipe is the fourth to rot, and its own comment says so a line

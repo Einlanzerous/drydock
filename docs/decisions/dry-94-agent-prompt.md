@@ -1,5 +1,11 @@
 # The agent's opening prompt, and where a run stops (DRY-94)
 
+> **Since DRY-99 this is the `evidence` prompt**, not the only one: the desk picks
+> by the ticket's Switchyard `review_mode`, and `DRYDOCK_AGENT_PROMPT` remains the
+> prompt for `evidence` and for a tracker with no review modes at all. Everything
+> below about the bound, the one-line rule and the placeholders still holds for
+> every mode. See [dry-99-review-mode-prompt](dry-99-review-mode-prompt.md).
+
 Two halves. The prompt a ticket spawn pre-fills is host config now
 (`DRYDOCK_AGENT_PROMPT`, served over `/api/config`, expanded by the desk); and
 the built-in default tells the agent to see a change through REVIEW rather than

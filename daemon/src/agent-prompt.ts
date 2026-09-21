@@ -20,6 +20,19 @@
 export const AGENT_PROMPT_KEYS = ["key", "repo"] as const;
 export type AgentPromptKey = (typeof AGENT_PROMPT_KEYS)[number];
 
+// The parts every built-in prompt is made of. Here, above the prompts, because a
+// `const` is not readable before its declaration — and separate at all (DRY-99)
+// because they carry the BOUND on the review loop, which is the one thing that
+// must not exist in four copies: a bound in four places is one somebody tightens
+// in three. Read `DEFAULT_AGENT_PROMPT` for why each half of it is the way it is.
+const LEAD = "Work ticket {key}. Its full description is attached as context";
+const REVIEW_LOOP =
+  "open a PR, attach it to the ticket, and address the CI reviewer's comments until it " +
+  "reports nothing blocking. Bound that loop: at most 3 review rounds, and stop waiting " +
+  "if none has landed 20 minutes after a push — the reviewer is advisory and declines " +
+  "most re-reviews, so comment \"@claude review\" on the PR if you want another.";
+const HAND_BACK = "Then hand back with whatever is still outstanding.";
+
 /**
  * The built-in default: implement the ticket, then see the change through
  * review rather than stopping at "opened a PR".
@@ -60,13 +73,138 @@ export type AgentPromptKey = (typeof AGENT_PROMPT_KEYS)[number];
  * on the surface where nobody is reading the composer. A prompt that wants real
  * newlines writes `\n`; see `normalizeAgentPrompt`.
  */
-export const DEFAULT_AGENT_PROMPT =
-  "Work ticket {key}. Its full description is attached as context — implement it, " +
-  "then see it through review: open a PR, attach it to the ticket, and address the " +
-  "CI reviewer's comments until it reports nothing blocking. Bound that loop: at most " +
-  "3 review rounds, and stop waiting if none has landed 20 minutes after a push — the " +
-  "reviewer is advisory and declines most re-reviews, so comment \"@claude review\" on " +
-  "the PR if you want another. Then hand back with whatever is still outstanding.";
+export const DEFAULT_AGENT_PROMPT = `${LEAD} — implement it, then see it through review: ${REVIEW_LOOP} ${HAND_BACK}`;
+
+// --- One prompt per review mode (DRY-99) ---------------------------------------
+//
+// Switchyard says, per ticket, what an agent may finish alone (`review_mode`),
+// and one host-wide sentence cannot honour that: it launched a `decision` ticket
+// with instructions to run it to completion. So the default is now a small set,
+// chosen by the desk from the ticket it is about to spawn. `evidence` IS the
+// prompt above, unchanged — a host that never sees a mode behaves exactly as
+// before.
+//
+// Each still resolves to ONE line, for the reason given on `DEFAULT_AGENT_PROMPT`:
+// an operator copies it into a `.env` to reword it, and a second line would be
+// silently lost — and the second line is where the bound lives. They are longer
+// than the four-sentence original (727 and 804 characters for `decision` and
+// `full`, against 485) because the plan clause is real policy; the composer is
+// still something a person can read before pressing return, but that is the
+// ceiling, not a starting point.
+//
+// **All of them STOP; none of them wait.** A run that idles on an approval under
+// `manual`/`acceptEdits` is failed by its own gate timeout (DRY-96), and a session
+// that never hands its turn back is one DRY-60's sweep never clears. "Stop and
+// hand back" ends the TURN, which is what fires `markIdle` and writes the handoff
+// — so asking a human for a decision is expressed as ending the turn with the
+// question, and the decision arrives as a new spawn (or, supervised, as the
+// person typing in the pane they are already looking at).
+
+/**
+ * Plan before code, and put the human's decisions IN the plan.
+ *
+ * `get_plan` first, so a respawn after the plan was approved implements it rather
+ * than opening a second draft: a Switchyard plan is approved only by a person (an
+ * agent cannot approve its own, and cannot lower the ticket's mode either), which
+ * makes "is it approved yet" the one fact this prompt has to make the agent go and
+ * read rather than assume. Names Switchyard's plan tools because `review_mode` is
+ * a Switchyard field — no other provider reaches this text (see
+ * `Ticket.reviewMode`).
+ */
+const PLAN_FIRST =
+  "Plan first: check the ticket's plan (get_plan). If none is approved, write one " +
+  "(open_plan_draft, then submit_plan) that sets out every decision you need from me, " +
+  "then stop and hand back — write no code until it is approved.";
+
+/**
+ * Which prompt a ticket gets. `unclassified` is Switchyard's `review_mode: null`,
+ * and is NOT the same as a provider that has no modes at all — see
+ * `Ticket.reviewMode`; that case takes the host's ordinary prompt and never
+ * reaches this table.
+ */
+export const AGENT_PROMPT_MODES = ["evidence", "decision", "full", "unclassified"] as const;
+export type AgentPromptMode = (typeof AGENT_PROMPT_MODES)[number];
+
+export const DEFAULT_AGENT_PROMPTS: Record<AgentPromptMode, string> = {
+  evidence: DEFAULT_AGENT_PROMPT,
+  decision: `${LEAD}. ${PLAN_FIRST} Once it is approved, implement it and see it through review: ${REVIEW_LOOP} ${HAND_BACK}`,
+  // `full` is `decision` plus the merge. The agent never merges under any mode —
+  // the human presses the button — so this is less a new restriction than the one
+  // the mode is FOR, said out loud: sign-off is asked for, not assumed.
+  full:
+    `${LEAD}. ${PLAN_FIRST} Once it is approved, implement it and see it through review: ${REVIEW_LOOP} ` +
+    "Do not merge it: when it is ready, ask me to sign off on the merge, then stop and hand back " +
+    "with whatever is still outstanding.",
+  // Switchyard's own rule for an unset mode: ask, never assume — "unset is not
+  // evidence". Every ticket in a project with no `default_review_mode` lands here
+  // (DRY's is null), which is a behaviour change for those tickets and is why it
+  // has a knob of its own.
+  unclassified:
+    `${LEAD}. It has no review mode, so nothing says how much you may do alone: read it and ` +
+    "tell me what you would do, then ask which applies — evidence (run it through unattended), " +
+    "decision (plan first, and I decide before any code) or full (I stay in the loop, merge " +
+    "included) — and change nothing until I answer.",
+};
+
+/** The env var that overrides each mode's prompt. */
+export const AGENT_PROMPT_ENV: Record<AgentPromptMode, string> = {
+  evidence: "DRYDOCK_AGENT_PROMPT_EVIDENCE",
+  decision: "DRYDOCK_AGENT_PROMPT_DECISION",
+  full: "DRYDOCK_AGENT_PROMPT_FULL",
+  unclassified: "DRYDOCK_AGENT_PROMPT_UNCLASSIFIED",
+};
+
+export interface ResolvedAgentPrompts {
+  /** The ordinary prompt: a tracker with no review modes, and any shell older than DRY-99. */
+  agentPrompt: string;
+  agentPrompts: Record<AgentPromptMode, string>;
+  /** Every effective template and what to call it in a boot error — see config.ts. */
+  sources: { name: string; template: string }[];
+}
+
+/**
+ * Read the host's prompt config out of `env`.
+ *
+ * Precedence, and it is deliberate that it is asymmetric:
+ *
+ *   1. `DRYDOCK_AGENT_PROMPT_<MODE>` — an explicit word about that mode.
+ *   2. `DRYDOCK_AGENT_PROMPT`, for `evidence` ONLY. It has always meant "the
+ *      run-it-through prompt", and an operator who wrote one wrote it for that.
+ *      It also stays the prompt for a tracker with no review modes, which is what
+ *      keeps a host that set it exactly as it was.
+ *   3. The built-in default for the mode.
+ *
+ * It does NOT stand in for `decision`/`full`/`unclassified`. Those exist to make
+ * an agent stop for a human, and a run-it-through prompt applied to them would
+ * put back the failure DRY-99 is fixing — silently, for exactly the hosts that
+ * customised the knob. The cost is that such an operator's tickets in those modes
+ * get the built-in text rather than theirs; `.env.example` says so.
+ *
+ * `||`-style reads, not `??`: a blank value is a knob somebody half-commented out
+ * (DRY-94 trap 4), and it must mean "unset", not "spawn with an empty composer".
+ */
+export function resolveAgentPrompts(env: NodeJS.ProcessEnv): ResolvedAgentPrompts {
+  const set = (name: string): string | undefined => env[name]?.trim() || undefined;
+  const base = set("DRYDOCK_AGENT_PROMPT");
+
+  const agentPrompt = normalizeAgentPrompt(base ?? DEFAULT_AGENT_PROMPT);
+  const sources = [
+    { name: base ? "DRYDOCK_AGENT_PROMPT" : "the built-in default prompt", template: agentPrompt },
+  ];
+
+  const agentPrompts = {} as Record<AgentPromptMode, string>;
+  for (const mode of AGENT_PROMPT_MODES) {
+    const own = set(AGENT_PROMPT_ENV[mode]);
+    const raw = own ?? (mode === "evidence" ? base : undefined) ?? DEFAULT_AGENT_PROMPTS[mode];
+    const template = normalizeAgentPrompt(raw);
+    agentPrompts[mode] = template;
+    // `evidence` without its own knob is the ordinary prompt, already listed —
+    // reporting it twice would name one bad placeholder under two variables.
+    if (own) sources.push({ name: AGENT_PROMPT_ENV[mode], template });
+    else if (mode !== "evidence") sources.push({ name: `the built-in ${mode} default`, template });
+  }
+  return { agentPrompt, agentPrompts, sources };
+}
 
 /**
  * `{{name}}` — a literal `{name}` — or `{name}`, a placeholder.

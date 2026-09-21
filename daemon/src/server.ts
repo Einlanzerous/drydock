@@ -852,9 +852,14 @@ const server = http.createServer(async (req, res) => {
         // pre-fills a spawn's prompt with, `{key}`/`{repo}` unexpanded. The
         // desk expands it, because the supervised half of that spawn is a
         // human reading the sentence before pressing return.
+        //
+        // `agentPrompts` (DRY-99) is the same template once per review mode, and
+        // `agentPrompt` is deliberately still here: it is what a ticket from a
+        // tracker with no review modes gets, and all an older shell reads.
         desk: {
           clearFinishedAfterMs: CONFIG.desk.clearFinishedAfterMs,
           agentPrompt: CONFIG.desk.agentPrompt,
+          agentPrompts: CONFIG.desk.agentPrompts,
         },
       });
     }
