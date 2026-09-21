@@ -20,7 +20,7 @@ import {
   signedIn,
 } from "./lib/auth.js";
 import { chordLetter } from "./lib/keys.js";
-import { LEGACY_AGENT_PROMPT } from "./lib/agent-prompt.js";
+import { LEGACY_AGENT_PROMPT, type AgentPrompts } from "./lib/agent-prompt.js";
 import { openGates, startGateStream, stopGateStream } from "./composables/gateStore.js";
 import { askToNotify, notifyGate, useAttention } from "./composables/attention.js";
 import { isFinished, runState } from "./composables/runState.js";
@@ -93,6 +93,12 @@ const clearFinishedAfterMs = ref(300_000);
  * it existed, and that is the prompt it expects. See lib/agent-prompt.ts.
  */
 const agentPrompt = ref(LEGACY_AGENT_PROMPT);
+/**
+ * The same template once per review mode (DRY-99). Empty until the daemon says
+ * otherwise, and a daemon older than the field never does — every ticket then
+ * takes `agentPrompt` above, which is what it always did.
+ */
+const agentPrompts = ref<AgentPrompts>({});
 
 // Tracker pull scope (DRY-30). Host defaults come from /api/tracker/info
 // (DRYDOCK_TRACKER_PROJECTS — fixed chips); user-added keys and the backlog
@@ -1760,6 +1766,9 @@ async function startDesk() {
     // Absent on a daemon older than DRY-94; the panel keeps the pre-DRY-94
     // sentence rather than this build's idea of a good default.
     if (c?.desk?.agentPrompt) agentPrompt.value = c.desk.agentPrompt;
+    // Absent on a daemon older than DRY-99; `pickAgentPrompt` then falls back to
+    // the ordinary prompt for every ticket, which is what that daemon expects.
+    if (c?.desk?.agentPrompts) agentPrompts.value = c.desk.agentPrompts;
   });
   await runTicketPull();
   // Restore the saved arrangement before the first poll. reconcile() then keeps
@@ -2108,6 +2117,7 @@ onBeforeUnmount(stopDesk);
       :z="ticketZ"
       :host-mode="hostRunMode"
       :agent-prompt="agentPrompt"
+      :agent-prompts="agentPrompts"
       @focus="ticketZ = wm.allocZ()"
       @send="onSendTicket"
       @close="selectedTicket = null"

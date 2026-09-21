@@ -22,11 +22,44 @@ export type TicketCategory =
   | "blocked"
   | "done";
 
+/**
+ * What an agent may finish alone on a ticket (DRY-99) — Switchyard's
+ * `review_mode`, named the same on purpose so a grep across both repos finds
+ * both ends.
+ *
+ *   evidence  run it to completion unattended and open the PR
+ *   decision  write the plan, then STOP — a human decides before any code exists
+ *   full      not finished alone: the human is in the loop, merge included
+ *
+ * "Not classified" is not a member: it is `null` on `Ticket.reviewMode`, because
+ * it is a different KIND of answer — see there.
+ */
+export type ReviewMode = "evidence" | "decision" | "full";
+
 /** Normalized ticket shape the sidebar/palette render. Provider-agnostic. */
 export interface Ticket {
   key: string; // e.g. "ARGY-89"
   title: string;
   status: { category: TicketCategory; label: string };
+  /**
+   * How much an agent may do with this ticket unattended (DRY-99). THREE states,
+   * and collapsing any two of them is the bug:
+   *
+   *   undefined  the provider has no such concept (Jira, the fixture) — or an
+   *              older Switchyard that predates the field. Nothing was said, so
+   *              the host's ordinary prompt applies.
+   *   null       the tracker HAS the concept and this ticket is not classified.
+   *              Switchyard's rule is "ask, never assume — unset is not
+   *              evidence", so this must not be treated as `undefined`: doing
+   *              so runs an unclassified ticket unattended, which is the exact
+   *              failure the field exists to prevent.
+   *   a mode     stated on the ticket.
+   *
+   * Optional and absent from the JSON for `undefined`, present as `null` for
+   * unclassified — `JSON.stringify` keeps the two apart, which is what carries
+   * the distinction to the shell.
+   */
+  reviewMode?: ReviewMode | null;
   /** Grouping bucket for the sidebar (repo name, or project key as fallback). */
   repo: string;
   /** Ticket type, when the provider exposes it (epic / task / bug / …). */

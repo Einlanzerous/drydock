@@ -8,6 +8,7 @@
  * refuses one with an unfillable placeholder at boot — see
  * `daemon/src/agent-prompt.ts`, which this file is the other half of.
  */
+import type { ReviewMode } from "./tracker.js";
 
 /**
  * `{{name}}` — a literal `{name}` — or `{name}`, a placeholder.
@@ -43,6 +44,42 @@ export interface AgentPromptVars {
  */
 export const LEGACY_AGENT_PROMPT =
   "Work ticket {key}. Its full description is attached as context — implement it.";
+
+/**
+ * The key a ticket's review mode looks its prompt up under (DRY-99). `null` —
+ * Switchyard's "not classified" — is `unclassified`, a prompt of its own.
+ */
+export type AgentPromptMode = ReviewMode | "unclassified";
+export type AgentPrompts = Partial<Record<AgentPromptMode, string>>;
+
+/**
+ * Which template a ticket is spawned from (DRY-99).
+ *
+ * `undefined` and `null` are different questions and must stay so. `undefined`
+ * is a tracker with no review modes — Jira, the fixture, a Switchyard older than
+ * the field — and takes the host's ordinary prompt, exactly as before. `null` is
+ * a tracker that HAS them and a ticket nobody classified; Switchyard's rule for
+ * that is "ask, never assume", so it gets its own prompt and never the
+ * run-it-unattended one. Merging the two either makes every Jira spawn
+ * interrogate you or runs an unclassified ticket alone.
+ *
+ * Falls back to the ordinary prompt when the daemon doesn't serve a mode's
+ * template: that daemon is older than DRY-99, and the honest thing for it to be
+ * handed is what it has always served — the same reasoning as
+ * `LEGACY_AGENT_PROMPT` below, one level up. A NEW policy is deliberately not
+ * invented here: the daemon owns it, and a browser copy would drift.
+ */
+export function pickAgentPrompt(
+  ordinary: string | undefined,
+  perMode: AgentPrompts | undefined,
+  reviewMode: ReviewMode | null | undefined,
+): string {
+  if (reviewMode !== undefined) {
+    const own = perMode?.[reviewMode ?? "unclassified"];
+    if (own) return own;
+  }
+  return ordinary || LEGACY_AGENT_PROMPT;
+}
 
 /**
  * Fill in `{key}` / `{repo}`.

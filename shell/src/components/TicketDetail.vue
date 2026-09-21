@@ -12,7 +12,7 @@ import { removeWorktree, resolveRepoCwd, WorktreeNotSafe } from "../lib/daemon.j
 import type { PermissionMode, SessionVisibility } from "../lib/protocol.js";
 import { isMultiUser } from "../lib/auth.js";
 import { renderMarkdown } from "../lib/markdown.js";
-import { expandAgentPrompt, LEGACY_AGENT_PROMPT } from "../lib/agent-prompt.js";
+import { expandAgentPrompt, pickAgentPrompt, type AgentPrompts } from "../lib/agent-prompt.js";
 
 // Ticket detail panel (DRY-9 ticket-spawn). Opened when a ticket is picked from
 // the sidebar or Ctrl+K palette: shows the full description for *you* to read,
@@ -37,6 +37,12 @@ const props = defineProps<{
    * falling back to the pre-DRY-94 sentence for an older daemon.
    */
   agentPrompt?: string;
+  /**
+   * The same template once per review mode (DRY-99), which `defaultPrompt`
+   * picks from by the ticket's `reviewMode`. Optional for the same reason as
+   * the field above; without it every ticket takes `agentPrompt`.
+   */
+  agentPrompts?: AgentPrompts;
 }>();
 // DRY-15: a ticket spawn can isolate into a git worktree. `worktree` is the path
 // to use, or `false` to run directly in `cwd`; `branch` overrides the branch name.
@@ -173,9 +179,16 @@ const resetRefused = ref<string | null>(null);
  * was baked into the image. Only the ticket's identity is substituted: the
  * description, thread and epic already reach the agent through DRY-53's brief,
  * against a budget this must not spend.
+ *
+ * Which template is the ticket's review mode's call (DRY-99). The mode comes from
+ * the freshly fetched detail when there is one and from the sidebar's copy until
+ * then: the sidebar's is up to a poll stale, and a ticket lifted into `decision`
+ * in that gap should not be spawned under the old prompt. `detail` is reset to
+ * null on every ticket change, so a non-null one is always this ticket's.
  */
 function defaultPrompt(t: Ticket): string {
-  return expandAgentPrompt(props.agentPrompt || LEGACY_AGENT_PROMPT, {
+  const mode = detail.value ? detail.value.reviewMode : t.reviewMode;
+  return expandAgentPrompt(pickAgentPrompt(props.agentPrompt, props.agentPrompts, mode), {
     key: t.key,
     repo: t.repo ?? "",
   });
@@ -267,10 +280,12 @@ watch(
   { immediate: true },
 );
 
-// The host template landing after this panel opened (see `filledPrompt`).
-// Untouched box only — never over an edit in progress.
+// The host template landing after this panel opened (see `filledPrompt`), or the
+// ticket's review mode arriving with the detail fetch (DRY-99) — either can
+// change which sentence the box should hold. Untouched box only — never over an
+// edit in progress.
 watch(
-  () => props.agentPrompt,
+  () => [props.agentPrompt, props.agentPrompts, detail.value?.reviewMode] as const,
   () => {
     if (prompt.value !== filledPrompt.value) return;
     prompt.value = filledPrompt.value = defaultPrompt(props.ticket);

@@ -3,6 +3,7 @@ import { requestSignal, withDeadline } from "./deadline.js";
 import { TrackerHttpError } from "./types.js";
 import type {
   Project,
+  ReviewMode,
   Ticket,
   TicketCategory,
   TicketComment,
@@ -57,6 +58,14 @@ interface SwitchyardTicket {
   project?: { key?: string; name?: string; repo_url?: string | null };
   labels?: { name: string }[];
   assignee?: { id?: string; name?: string } | null;
+  /**
+   * What an agent may finish alone (DRY-99). Present on both the list and the
+   * single-ticket payloads; `null` is "not classified", and the key being ABSENT
+   * altogether is a Switchyard that predates the field. Typed `string` rather
+   * than the union because this is the wire, and `toReviewMode` is where an
+   * unrecognised value is dealt with.
+   */
+  review_mode?: string | null;
   // The LIST endpoint inlines the parent as {id, key, title} alongside the raw
   // `parent_id`, so the epic rollup needs no second fetch. No `type` here,
   // which is why the sidebar falls back to the CHILD's type to decide whether
@@ -153,6 +162,25 @@ function repoOf(t: SwitchyardTicket): string {
   return (t.project?.key ?? t.key.split("-")[0]).toLowerCase();
 }
 
+/**
+ * The wire's `review_mode` → `Ticket.reviewMode` (DRY-99).
+ *
+ * Three answers kept apart, because the caller acts differently on each:
+ * `undefined` for a key that isn't there (an older Switchyard — nothing was
+ * said), `null` for "not classified", and the mode itself.
+ *
+ * **A value this build has never heard of becomes `null`, not `undefined`.**
+ * Switchyard could grow a fourth mode, and the safe reading of a mode we can't
+ * interpret is the one Switchyard gives an unset one — ask — rather than the
+ * permissive one. Falling through to `undefined` would spawn it under the host's
+ * run-it-unattended prompt, which is the failure this whole field is about, and
+ * would do it silently on the day the server upgraded before Drydock did.
+ */
+function toReviewMode(raw: string | null | undefined): ReviewMode | null | undefined {
+  if (raw === undefined) return undefined;
+  return raw === "evidence" || raw === "decision" || raw === "full" ? raw : null;
+}
+
 function toTicket(t: SwitchyardTicket): Ticket {
   const category = mapCategory(t.status?.category, t.status?.display_name);
   return {
@@ -161,6 +189,7 @@ function toTicket(t: SwitchyardTicket): Ticket {
     status: { category, label: t.status?.display_name ?? CATEGORY_LABEL[category] },
     repo: repoOf(t),
     type: t.type,
+    reviewMode: toReviewMode(t.review_mode),
     parent: t.parent?.key ? { key: t.parent.key, title: t.parent.title } : undefined,
     tag: t.labels?.[0]?.name,
     assignee: t.assignee?.name ? { id: t.assignee.id, name: t.assignee.name } : undefined,

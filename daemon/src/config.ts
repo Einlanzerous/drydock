@@ -1,8 +1,7 @@
 import * as os from "node:os";
 import {
   AGENT_PROMPT_KEYS,
-  DEFAULT_AGENT_PROMPT,
-  normalizeAgentPrompt,
+  resolveAgentPrompts,
   unknownAgentPromptKeys,
 } from "./agent-prompt.js";
 // Arithmetic only — `cache.ts` imports nothing but its own types, so this
@@ -178,6 +177,14 @@ const TICKET_STALE_AFTER_MS = msOrOff(
   deriveStaleAfterMs(TICKET_CACHE_MS),
 );
 const TICKET_WATCH_GAP_MS = optionalNum(process.env.DRYDOCK_TRACKER_WATCH_GAP_MS);
+
+/**
+ * The agent-prompt templates (DRY-94, per review mode since DRY-99), resolved
+ * once. Hoisted for the same reason as the cache window above: the boot check at
+ * the foot of this file needs every EFFECTIVE template, and an object literal
+ * can't be asked for its own derived siblings.
+ */
+const AGENT_PROMPTS = resolveAgentPrompts(process.env);
 
 /**
  * Whether the staleness window and the watch gap can both do their jobs (DRY-84).
@@ -662,12 +669,20 @@ export const CONFIG = {
      * reading before overriding it: it tells the agent to see a change through
      * REVIEW, not just to open a PR. See `agent-prompt.ts`.
      */
-    agentPrompt: normalizeAgentPrompt(
-      // `||`, not `??`: an empty DRYDOCK_AGENT_PROMPT is a knob somebody
-      // half-commented out, the same case msOrOff() treats as unset. An agent
-      // spawned with no prompt at all sits at an empty composer forever.
-      process.env.DRYDOCK_AGENT_PROMPT?.trim() || DEFAULT_AGENT_PROMPT,
-    ),
+    // `||`-style reads inside `resolveAgentPrompts`, not `??`: an empty
+    // DRYDOCK_AGENT_PROMPT is a knob somebody half-commented out, the same case
+    // msOrOff() treats as unset. An agent spawned with no prompt at all sits at
+    // an empty composer forever.
+    agentPrompt: AGENT_PROMPTS.agentPrompt,
+
+    /**
+     * One prompt per review mode (DRY-99), chosen by the desk from the ticket
+     * it is about to spawn. `agentPrompt` above stays as it was: it is what a
+     * tracker with NO review modes gets (Jira, the fixture), and what a shell
+     * older than this field reads. Precedence, and why it is asymmetric, is on
+     * `resolveAgentPrompts`.
+     */
+    agentPrompts: AGENT_PROMPTS.agentPrompts,
   },
 
   /**
@@ -850,10 +865,15 @@ export const CONFIG = {
  * every daemon on the first boot rather than only the hosts that override it.
  */
 {
-  const unknown = unknownAgentPromptKeys(CONFIG.desk.agentPrompt);
-  if (unknown.length) {
+  // Every effective template, not just DRYDOCK_AGENT_PROMPT (DRY-99): a typo in
+  // the `full` one must refuse to boot, not first fail on the day somebody
+  // spawns a `full` ticket — and the built-ins are included, so a placeholder
+  // added to one without being added to AGENT_PROMPT_KEYS fails every daemon.
+  for (const { name, template } of AGENT_PROMPTS.sources) {
+    const unknown = unknownAgentPromptKeys(template);
+    if (!unknown.length) continue;
     CONFIG_ERRORS.push(
-      `DRYDOCK_AGENT_PROMPT has ${unknown.length === 1 ? "a placeholder" : "placeholders"} ` +
+      `${name} has ${unknown.length === 1 ? "a placeholder" : "placeholders"} ` +
         `nothing can fill: ${unknown.map((k) => `{${k}}`).join(", ")}.\n` +
         `  Known: ${AGENT_PROMPT_KEYS.map((k) => `{${k}}`).join(", ")}.\n` +
         `  This is refused rather than expanded to nothing, because a prompt that\n` +

@@ -1,4 +1,5 @@
 import type { PermissionMode, SessionInfo, SessionVisibility } from "./protocol.js";
+import type { AgentPrompts } from "./agent-prompt.js";
 import { authFetch, withStreamToken } from "./auth.js";
 
 // Where the daemon is now lives in ./daemonUrl.ts — see the note there for why
@@ -242,6 +243,12 @@ export interface DaemonConfig {
      * that shipped with that daemon (`LEGACY_AGENT_PROMPT`).
      */
     agentPrompt?: string;
+    /**
+     * The same template once per review mode (DRY-99), chosen by the panel from
+     * the ticket's `reviewMode`. Optional for the usual reason: a daemon older
+     * than the field doesn't send it, and every ticket then takes `agentPrompt`.
+     */
+    agentPrompts?: AgentPrompts;
   };
 }
 
