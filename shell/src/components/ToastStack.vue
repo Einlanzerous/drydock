@@ -1,11 +1,31 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import type { Toast } from "../composables/toasts.js";
+// The SAME source RunRail's own panel reads (`panelGates` is `orphanGates`
+// verbatim), not a prop threaded down from it — so this can't drift from
+// "is the panel actually showing" the way a second answer would. See `gateUp`
+// below for what it's for.
+import { orphanGates } from "../composables/gateStore.js";
 
 // The desk's status messages, overlaid rather than in the flow (DRY-100). What
 // each one MEANS — condition or event, who clears it — is decided in
 // `composables/toasts.ts`; this only draws the result and reports a ✕.
 defineProps<{ toasts: Toast[] }>();
 const emit = defineEmits<{ (e: "dismiss", key: string): void }>();
+
+/**
+ * A pending gate is showing in the rail's panel (mirrors RunRail's own
+ * `v-if="activeGate"` condition exactly, since `activeGate` is drawn from this
+ * same list).
+ *
+ * Only a Z-ORDER switch, never a size or position one — see the CSS. Sizing the
+ * stack around the panel's reach would make a toast's width depend on gate
+ * state, which is the DRY-100 bug in a new costume: something that isn't a
+ * toast arriving or clearing would resize one. `toast-stack.mts`'s geometry
+ * assertions stay valid either way, because z-index doesn't move anything
+ * `getBoundingClientRect` can see.
+ */
+const gateUp = computed(() => orphanGates.value.length > 0);
 </script>
 
 <template>
@@ -16,7 +36,7 @@ const emit = defineEmits<{ (e: "dismiss", key: string): void }>();
 
        `role` carries the two meanings: an error is `alert` (assertive), a note
        or a notice is `status` (polite). Nothing here takes focus, ever. -->
-  <div class="toasts">
+  <div class="toasts" :class="{ 'behind-gate': gateUp }">
     <div
       v-for="t in toasts"
       :key="t.key"
@@ -67,6 +87,20 @@ const emit = defineEmits<{ (e: "dismiss", key: string): void }>();
   /* The stack is click-through — it spans a strip of the desk that has
      terminals under it — and each toast takes pointer events back. */
   pointer-events: none;
+}
+/* A lifted GatePanel can reach within 8px of the desk's top (`LIFT_MARGIN` in
+   RunRail.vue) and, on a narrow-enough desk, nearly its full width — so on a
+   sub-~1300px window the panel's box and this one's can genuinely intersect.
+   Nothing here is repositioned to dodge it (that would put the panel's width
+   back in charge of this stack's layout, reversed — the same bug this ticket
+   removed, aimed the other way). Instead the panel simply wins the paint order
+   while it's up: this drops BELOW the rail's 9000, so a gate — "a decision
+   blocking a run" in RunRail's own words for the `.offline` banner — is never
+   the thing a status message sits on top of. The cost lands on the toast, not
+   the gate: in the rare case they do overlap, the toast is the one partly
+   hidden, and it's the one that's dismissible. */
+.toasts.behind-gate {
+  z-index: 8000;
 }
 .toast {
   pointer-events: auto;

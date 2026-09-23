@@ -180,10 +180,11 @@ async function measureRow(page: Page): Promise<RowMeasure> {
     if (!panel) return { error: `no ${sel}` };
     const p = panel.getBoundingClientRect();
     // The DESK's rect, not the viewport's. `.desk` is what clips — it starts
-    // below a 54px topbar — and below more than that whenever anything grows
-    // the header, which is what the last scenario forces — so a panel whose top is at y=20 is comfortably on screen and entirely
-    // cut off. Measuring the clip against the window is the same error the
-    // panel's own `max-width: calc(100vw - 40px)` made on the other axis.
+    // below a 54px topbar, and below more than that whenever anything grows the
+    // header, which is what the last scenario forces — so a panel whose top is
+    // at y=20 is comfortably on screen and entirely cut off. Measuring the clip
+    // against the window is the same error the panel's own
+    // `max-width: calc(100vw - 40px)` made on the other axis.
     const deskEl = document.querySelector(".desk");
     const desk = deskEl ? deskEl.getBoundingClientRect() : null;
     // The line naming the tool in full. It is measured because it is what makes

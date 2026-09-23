@@ -20,6 +20,8 @@ import { deskWindows, type Detail, type SessionsResponse, type WorkspaceResponse
 // The proxy's own declaration of what it serves, rather than a copy of it here
 // (DRY-80). `import type` erases, so this does not start a second proxy.
 import type { ProxyHttpState } from "./proxy-http.mjs";
+// The shared toast selectors (DRY-100) — see its header for why one module.
+import { TOAST } from "./toast-dom.mjs";
 
 const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5370";
 const DAEMON = process.env.DAEMON ?? "http://127.0.0.1:4370";
@@ -39,7 +41,7 @@ const check = (n: string, ok: boolean, d: Detail = "") => {
   console.log(`  ${ok ? "PASS" : "FAIL"}  ${n}${d ? ` — ${d}` : ""}`);
   if (!ok) failures++;
 };
-const noticed = (page: Page) => page.locator(".notice").count().then((n) => n > 0);
+const noticed = (page: Page) => page.locator(TOAST.notice).count().then((n) => n > 0);
 
 /** Window x-positions keyed by id, as one side or the other holds them. */
 type Desk = Record<string, number>;

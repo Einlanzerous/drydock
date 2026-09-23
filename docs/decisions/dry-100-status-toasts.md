@@ -64,6 +64,28 @@ what each one *means*.
    where a toast actually is. Top-*centre* would cover the status tag ("Your
    turn"), which is worse. If this turns out to bite, the fix is to inset the
    stack past the window controls, not to move it to the bottom.
+
+   **It also, on a narrow-enough desk, covers "a pending gate" itself** — a
+   review caught this, and item 3 says not to. `GatePanel` is anchored `left:
+   12px` and can reach within `LIFT_MARGIN` (8px) of the desk's top and, on a
+   short-enough viewport, nearly the desk's full width (its own `max-width` is
+   relative to the rail, not fixed), so below roughly 1300px of desk+sidebar
+   width the panel's box and the stack's genuinely intersect. There is no
+   position for the stack that structurally avoids this at the extreme — the
+   panel can occupy nearly the whole desk when both tall and wide — so the fix
+   is not spatial: `ToastStack` reads `orphanGates` (the exact list that decides
+   whether `GatePanel` renders at all, imported directly rather than threaded
+   down as a prop) and drops its OWN z-index below the rail's while a gate is
+   up, so the panel always paints on top when they do intersect. Deliberately
+   NOT a size or position change — sizing the stack around the panel's reach
+   would make a toast's width depend on gate state, which is this ticket's bug
+   in a new costume (something that isn't a toast arriving or clearing would
+   resize one). A z-index swap moves nothing `getBoundingClientRect` can see, so
+   `toast-stack.mts`'s geometry assertions are unaffected by it. Verified by eye
+   (a throwaway rig with a lifted gate panel and a forced toast, screenshotted)
+   rather than by a permanent harness — building one needs a rig with both gate
+   and fault-injection capability, which no existing harness combines, and that
+   was judged disproportionate to a non-blocking overlap.
 7. **Never steal focus, and that includes the ✕.** Raising a toast leaves
    `document.activeElement` alone (DRY-58). A mouse click on ✕ would move focus
    onto the button, which is removed a moment later and drops focus to `<body>` —

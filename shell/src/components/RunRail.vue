@@ -372,8 +372,10 @@ const CHOOSER_W = 320;
  * Note the two readers disagree about which edge, and only `gateRoom` has it
  * right. The chooser's lift test in measure() compares a VIEWPORT coordinate
  * against this, so it treats the window's top as the limit when the real one is
- * the desk's — 54px of topbar lower, plus any notice in the flex column above
- * it. The chooser can therefore still be lifted into a band the desk clips.
+ * the desk's — 54px of topbar lower, plus whatever else sits in the flex column
+ * above the desk at the time (App.vue's notices did, until DRY-100 made them
+ * toasts that take no space). The chooser can therefore still be lifted into a
+ * band the desk clips.
  * That predates DRY-78 and is left alone deliberately: it is the chooser's
  * anchoring (DRY-73's surface), nothing here covers it, and correcting it
  * quietly at the end of a review pass is how an untested regression ships.

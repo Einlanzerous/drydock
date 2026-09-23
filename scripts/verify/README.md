@@ -2286,17 +2286,20 @@ is raised and when it clears.
 
 ### The selectors live in one place
 
-`toast-dom.mts` exports them, and seven harnesses import it: `sidebar`,
-`tracker-cache`, `roam`, `surface`, `hang`, `spawn-layout` and
-`worktree-reap-ui`. They used to select on `.notice`, `.error` and `p.note`,
-class names other components also use, and several assert a **zero** count, which
-a selector matching nothing passes for the wrong reason (trap 5).
-`toast-stack.mts` is what proves each constant sees a real toast of its kind, so
-run it first after touching the markup.
+`toast-dom.mts` exports them, and nine harnesses import it: the eight ticketed
+ones — `sidebar`, `tracker-cache`, `roam`, `surface`, `hang`, `spawn-layout` and
+`worktree-reap-ui` — plus `race.mts` and `sweep.mts`, which also read `.notice`
+and were missed on the first pass (a review caught them: they kept matching by
+coincidence, not by contract — `ToastStack` puts `t.kind` on the element as a
+class too, so the bare selector never went dark). They used to select on
+`.notice`, `.error` and `p.note`, class names other components also use, and
+several assert a **zero** count, which a selector matching nothing passes for
+the wrong reason (trap 5). `toast-stack.mts` is what proves each constant sees a
+real toast of its kind, so run it first after touching the markup.
 
-The eighth of the ticket's harnesses, `gate-actions.mts`, does not select on a
-toast at all: it raised a notice as a **lever**, to make the desk shorter than
-the window, and needed a new lever rather than a new selector. See the DRY-78
+The one harness this ticket touches that does NOT select on a toast,
+`gate-actions.mts`: it raised a notice as a **lever**, to make the desk shorter
+than the window, and needed a new lever rather than a new selector. See the DRY-78
 section.
 
 ### Making sure this one still discriminates
