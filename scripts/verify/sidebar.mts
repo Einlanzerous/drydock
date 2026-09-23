@@ -24,6 +24,7 @@ import { chromium, type Page } from "playwright";
 // (DRY-80). `import type` erases, so this does not start a second proxy.
 import type { ProxyTrackerState } from "./proxy-tracker.mjs";
 import type { Detail } from "./api.mjs";
+import { TOAST } from "./toast-dom.mjs";
 
 const SHELL = process.env.SHELL_URL ?? "http://127.0.0.1:5375";
 const PROXY = process.env.PROXY ?? "http://127.0.0.1:4375";
@@ -85,8 +86,8 @@ interface Snapshot {
  * was meant to start checking. Repetition is the cheaper price.
  */
 function snap(page: Page): Promise<Snapshot> {
-  return page.evaluate((): Snapshot => {
-    const notices = [...document.querySelectorAll(".notice")].map((n) =>
+  return page.evaluate((sel): Snapshot => {
+    const notices = [...document.querySelectorAll(sel.notice)].map((n) =>
       (n.textContent ?? "").trim(),
     );
     const stale = document.querySelector(".sidebar .stale");
@@ -115,9 +116,9 @@ function snap(page: Page): Promise<Snapshot> {
       // and, worse, a run with zero tracker notices and one unrelated one would
       // pass it.
       trackerNotices: notices.filter((t) => /Tickets aren't (loading|refreshing)/.test(t)),
-      errors: [...document.querySelectorAll(".error")].map((n) => (n.textContent ?? "").trim()),
+      errors: [...document.querySelectorAll(sel.error)].map((n) => (n.textContent ?? "").trim()),
     };
-  });
+  }, { notice: TOAST.notice, error: TOAST.error });
 }
 
 const browser = await chromium.launch();

@@ -55,6 +55,7 @@
 import { chromium } from "playwright";
 import * as fs from "node:fs";
 import { addWorktree, assertDaemonRoot, buildFixture, git } from "./git-fixture.mjs";
+import { TOAST } from "./toast-dom.mjs";
 
 const SHELL = "http://127.0.0.1:5390";
 const DAEMON = "http://127.0.0.1:4390";
@@ -134,8 +135,8 @@ const frames = async (n: number, ms = 12_000): Promise<number> => {
 const dump = async (label: string) => {
   if (!VERBOSE) return;
   const titles = await page.locator(".frame .title").allTextContents();
-  const err = await page.locator("p.error").allTextContents();
-  const note = await page.locator("p.note").allTextContents();
+  const err = await page.locator(TOAST.error).allTextContents();
+  const note = await page.locator(TOAST.note).allTextContents();
   console.log(`    [dom ${label}] frames=${JSON.stringify(titles)} error=${JSON.stringify(err)} note=${JSON.stringify(note)}`);
 };
 await page.goto(SHELL);
@@ -154,7 +155,7 @@ check("the window went", (await frames(0)) === 0);
 await page.waitForTimeout(2000);
 await dump("after close");
 check("the worktree is gone", !fs.existsSync(WT("demo-DRY-3")), WT("demo-DRY-3"));
-const noteText = await page.locator("p.note").first().textContent().catch(() => null);
+const noteText = await page.locator(TOAST.note).first().textContent().catch(() => null);
 check("and the desk says so", !!noteText && /worktree/i.test(noteText), (noteText ?? "(no banner)").trim());
 check(
   "and names the branch it kept",
@@ -163,7 +164,7 @@ check(
 );
 const branches = git(fixture.repo, "branch", "--list", "agent/DRY-3");
 check("the branch survived", branches.includes("agent/DRY-3"), branches || "(gone)");
-await page.locator("p.note .banner-x").first().click().catch(() => {});
+await page.locator(`${TOAST.note} ${TOAST.dismiss}`).first().click().catch(() => {});
 
 // --- C: the automatic sweep must NOT reap ------------------------------------
 //
@@ -181,7 +182,7 @@ check("the sweep took the window", cWindows === 0, `${cWindows} window(s)`);
 const gone = (await (await fetch(`${DAEMON}/api/sessions`)).json()) as { sessions: { id: string }[] };
 check("…and the session", !gone.sessions.some((s) => s.id === cId), JSON.stringify(gone.sessions.map((s) => s.id)));
 check("the worktree is STILL THERE", fs.existsSync(WT("demo-DRY-3")), WT("demo-DRY-3"));
-const sweptNote = await page.locator("p.note").count();
+const sweptNote = await page.locator(TOAST.note).count();
 check("and nothing claimed otherwise", sweptNote === 0, `${sweptNote} note banner(s)`);
 
 // --- A: Reset refuses, then discards on demand -------------------------------

@@ -11,6 +11,7 @@
 //   (cd daemon && node --import tsx ../scripts/verify/hang.mts)
 import { chromium, type Page } from "playwright";
 import { deskWindows, type Detail, type SessionsResponse, type WorkspaceResponse } from "./api.mjs";
+import { TOAST } from "./toast-dom.mjs";
 // The proxy's own declaration of what it serves, rather than a copy of it here
 // (DRY-80). `import type` erases, so this does not start a second proxy.
 import type { ProxyHttpState } from "./proxy-http.mjs";
@@ -42,7 +43,7 @@ const stored = async (): Promise<Desk> => {
   const { workspace } = await j<WorkspaceResponse>(`${DAEMON}/api/workspace`);
   return Object.fromEntries(deskWindows(workspace).map((w) => [w.id, Math.round(w.x)]));
 };
-const noticed = (page: Page) => page.locator(".notice").count().then((n) => n > 0);
+const noticed = (page: Page) => page.locator(TOAST.notice).count().then((n) => n > 0);
 async function waitFor(fn: () => Promise<boolean>, ms = 60000): Promise<number | null> {
   const t0 = Date.now();
   while (Date.now() - t0 < ms) {

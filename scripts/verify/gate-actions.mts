@@ -180,10 +180,11 @@ async function measureRow(page: Page): Promise<RowMeasure> {
     if (!panel) return { error: `no ${sel}` };
     const p = panel.getBoundingClientRect();
     // The DESK's rect, not the viewport's. `.desk` is what clips — it starts
-    // below a 54px topbar plus whatever notices are in the flex column above it
-    // — so a panel whose top is at y=20 is comfortably on screen and entirely
-    // cut off. Measuring the clip against the window is the same error the
-    // panel's own `max-width: calc(100vw - 40px)` made on the other axis.
+    // below a 54px topbar, and below more than that whenever anything grows the
+    // header, which is what the last scenario forces — so a panel whose top is
+    // at y=20 is comfortably on screen and entirely cut off. Measuring the clip
+    // against the window is the same error the panel's own
+    // `max-width: calc(100vw - 40px)` made on the other axis.
     const deskEl = document.querySelector(".desk");
     const desk = deskEl ? deskEl.getBoundingClientRect() : null;
     // The line naming the tool in full. It is measured because it is what makes
@@ -266,7 +267,7 @@ function assertRow(tag: string, m: RowMeasure): void {
   // you can no longer read, which is worse than a button you can't reach.
   //
   // Against the DESK's top, not the viewport's: the desk starts 54px down and
-  // lower still with a notice up, so `top >= 0` passes for a panel with its
+  // lower still when the header grows, so `top >= 0` passes for a panel with its
   // header already cut. The first version of this check made exactly that
   // mistake and would have passed against the bug it was written for.
   if (m.desk) {
@@ -336,49 +337,53 @@ try {
   }
 
   // --- the desk's height changing WITHOUT the viewport's --------------------
-  // The height cap is derived from the desk, and App.vue's notices are in the
-  // flex column above it — they push it down. That is the case a `100vh` calc
-  // would have got wrong, and the only one that separates "reads the desk" from
-  // "reads the window", so every viewport above passes either way.
+  // The height cap is derived from the desk (DRY-78), not from the window. That
+  // is the case a `100vh` calc would have got wrong, and the only one that
+  // separates "reads the desk" from "reads the window", so every viewport above
+  // passes either way.
   //
-  // A real tracker outage raises it, via the path App.vue actually uses. (The
-  // sidebar is deliberately NOT varied: `sidebarOpen` is a `ref(true)` nothing
-  // toggles, so the app cannot vary it either — and the fix made the panel's
-  // width relative to the rail, which is why the sidebar stopped mattering.)
-  await page.route("**/api/tracker/tickets*", (r) => r.fulfill({ status: 502, body: "{}" }));
+  // This used to be raised by a real tracker outage, because a notice sat in the
+  // flex column above the desk and pushed it down. Notices are toasts now
+  // (DRY-100) and take no space, so nothing the app does makes the desk shorter
+  // than the window any more — which is the point of that ticket, and which
+  // leaves this property with no product trigger. It still needs guarding, so
+  // the lever is now explicit: grow the topbar. That is scaffolding and says so;
+  // what it exercises is unchanged, because the panel's cap reads `deskHeight`
+  // off the same ResizeObserver whatever made the desk shorter.
+  //
+  // (The sidebar is deliberately NOT varied: `sidebarOpen` is a `ref(true)`
+  // nothing toggles, so the app cannot vary it either — and the fix made the
+  // panel's width relative to the rail, which is why the sidebar stopped
+  // mattering.)
   await page.setViewportSize({ width: 900, height: 560 });
-  await page.waitForFunction(() => !!document.querySelector(".notice"), null, { timeout: 40000 });
+  await page.addStyleTag({ content: ".topbar { height: 134px !important; }" });
   await page.waitForTimeout(400);
-  // Asserted geometrically rather than as a before/after delta: a notice raised
-  // earlier in the run (the poll fails on its own schedule) makes "before"
-  // already-shortened, and the round then reports itself unarmed while being
-  // perfectly armed. That the desk's top meets the notice's bottom is the
-  // property either way — it is what makes the desk shorter than the window.
+  // Asserted geometrically rather than as a before/after delta, as before: that
+  // the desk starts well below where an ordinary topbar would put it is the
+  // property, and it is what makes the desk shorter than the window.
   const armed = await page.evaluate(() => {
-    const n = [...document.querySelectorAll(".notice")].pop();
     const d = document.querySelector(".desk");
-    if (!n || !d) return null;
-    const nb = n.getBoundingClientRect(), db = d.getBoundingClientRect();
+    if (!d) return null;
     return {
-      gap: Math.abs(db.top - nb.bottom),
-      pushed: db.top - 55, // .topbar is 54px + 1px border
-      text: (n.textContent ?? "").trim().slice(0, 60),
+      pushed: d.getBoundingClientRect().top - 55, // .topbar is 54px + 1px border
+      deskH: d.getBoundingClientRect().height,
+      windowH: window.innerHeight,
     };
   });
   check(
-    "notice sits above the desk and shortens it",
-    !!armed && armed.gap <= 1 && armed.pushed > 0,
-    armed ? `desk pushed ${armed.pushed.toFixed(0)}px below the topbar — "${armed.text}"` : "no notice",
+    "the desk is shorter than the window by more than the topbar",
+    !!armed && armed.pushed > 0 && armed.deskH < armed.windowH - 55,
+    armed ? `desk pushed ${armed.pushed.toFixed(0)}px below an ordinary topbar; ${armed.deskH.toFixed(0)}px tall in a ${armed.windowH}px window` : "no desk",
   );
 
-  const noticeFlight = raiseGate(sessionId, TOOLS[2].name, TOOLS[2].command);
+  const tallHeaderFlight = raiseGate(sessionId, TOOLS[2].name, TOOLS[2].command);
   await page.waitForSelector(`${PANEL} .actions button`, { timeout: 15000 });
   await page.click(`${PANEL} .truncation button:has-text("Show all")`);
   await page.waitForTimeout(350);
-  assertRow("900x560 notice-up mcp+blob", await measureRow(page));
+  assertRow("900x560 tall-topbar mcp+blob", await measureRow(page));
   await page.click(`${PANEL} .actions button:has-text("Approve")`);
   await page.waitForSelector(PANEL, { state: "detached", timeout: 15000 });
-  await noticeFlight;
+  await tallHeaderFlight;
 } finally {
   if (sessionId) {
     await api(`/api/sessions/${sessionId}/kill`, { method: "POST" }).catch(() => {});

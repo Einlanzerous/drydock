@@ -12,13 +12,21 @@
 //                  working, just not the way you'd assume, and the thing that
 //                  noticed will notice again when it stops being true.
 //
-// Which makes the behaviour fall out: notices are NOT dismissible — there is
-// nothing to acknowledge, the condition either holds or it doesn't — and they
-// never steal focus. The failure they exist for is the quiet one. The layout
-// store degrading used to be a `console.warn` and nothing else, which is how
-// you discover at the worst possible moment that your desk stopped roaming;
-// DRY-55's tracker outage is the same shape (an empty sidebar that says nothing
-// is wrong) and is meant to land here too rather than invent a second surface.
+// Which makes the behaviour fall out: they never steal focus, and whoever
+// raised one is the one who ends it. The failure they exist for is the quiet
+// one. The layout store degrading used to be a `console.warn` and nothing else,
+// which is how you discover at the worst possible moment that your desk stopped
+// roaming; DRY-55's tracker outage is the same shape (an empty sidebar that says
+// nothing is wrong) and is meant to land here too rather than invent a second
+// surface.
+//
+// They were NOT dismissible until DRY-100 — a ✕ would only hide a fact that is
+// still true — and they are now, deliberately: a toast that only its owner may
+// remove is one you can't get out of the way of the window under it. The hide is
+// remembered until `clearNotice`, not merely until the next `setNotice`, because
+// `setNotice` is idempotent and retry loops re-call it; forgetting on the re-call
+// would resurrect the toast a moment after it was closed. That memory lives in
+// `toasts.ts` — this module still knows nothing about being seen.
 import { computed, reactive } from "vue";
 
 export interface Notice {
@@ -31,12 +39,14 @@ export interface Notice {
 const byKey = reactive<Record<string, Notice>>({});
 
 /**
- * Longest `detail` worth showing inline. A notice is one quiet line above the
- * desk, and `String(err)` is not always a sentence: a 503 carrying the
- * migration-drift message (`state store: Error: migration 001_workspace.sql
- * changed after it was applied (ledger …, file …). An applied migration is
- * history: …`) is a paragraph, and a paragraph in a 12px strip pushes the desk
- * down and reads as an alarm. The console line keeps the whole thing.
+ * Longest `detail` worth showing inline. A notice is a quiet aside, and
+ * `String(err)` is not always a sentence: a 503 carrying the migration-drift
+ * message (`state store: Error: migration 001_workspace.sql changed after it
+ * was applied (ledger …, file …). An applied migration is history: …`) is a
+ * paragraph, and a paragraph in a toast covers the desk and reads as an alarm.
+ * A toast can wrap since DRY-100 — it no longer pushes anything down — but the
+ * cap stands for the second reason alone. The console line keeps the whole
+ * thing.
  */
 const DETAIL_MAX = 140;
 

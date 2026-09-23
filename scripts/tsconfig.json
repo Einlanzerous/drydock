@@ -69,6 +69,7 @@
     "verify/surface.mts",
     "verify/sweep.mts",
     "verify/ticket-panel.mts",
+    "verify/toast-stack.mts",
     "verify/tombstone.mts",
     "verify/tracker-cache.mts"
   ]

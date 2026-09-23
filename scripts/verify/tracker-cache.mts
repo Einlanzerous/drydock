@@ -32,6 +32,7 @@
 //   (cd daemon && node --import tsx ../scripts/verify/tracker-cache.mts)
 import { chromium } from "playwright";
 import type { Detail, TicketsResponse } from "./api.mjs";
+import { TOAST } from "./toast-dom.mjs";
 // The stub's own declaration of what it serves (DRY-80) — `import type`
 // erases, so this does not start a second stub.
 import type { StubState } from "./stub-tracker.mjs";
@@ -328,16 +329,16 @@ try {
   // loudly against an uncached daemon; see README.md for the numbers.
   const page = await browser.newPage({ viewport: { width: 1400, height: 900 } });
   const snap = (): Promise<SidebarSnap> =>
-    page.evaluate(() => ({
+    page.evaluate((notice) => ({
       // Repo groups render collapsed, so `.row` counts nothing — same trap as
       // sidebar.mts. Assert on `.grp`.
       groups: document.querySelectorAll(".sidebar .grp").length,
       stale: !!document.querySelector(".sidebar .stale"),
       unreachable: document.querySelector(".sidebar .unreachable-head")?.textContent?.trim() ?? null,
-      notices: [...document.querySelectorAll(".notice")]
+      notices: [...document.querySelectorAll(notice)]
         .map((n) => (n.textContent ?? "").trim())
         .filter((t) => /Tickets aren't (loading|refreshing)/.test(t)),
-    }));
+    }), TOAST.notice);
   const waitFor = async (fn: () => Promise<boolean>, ms = 20_000): Promise<boolean> => {
     const t = Date.now();
     while (Date.now() - t < ms) {

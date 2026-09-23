@@ -24,6 +24,8 @@
 //   (cd daemon && node --import tsx ../scripts/verify/sweep.mts)
 import { chromium, type Page } from "playwright";
 import type { ConfigResponse, HealthResponse, SessionInfo, SessionsResponse, SpawnResponse } from "./api.mjs";
+// The shared toast selectors (DRY-100) — see its header for why one module.
+import { TOAST } from "./toast-dom.mjs";
 
 const DAEMON = process.env.DRY60_DAEMON ?? "http://127.0.0.1:4360";
 const SHELL = process.env.DRY60_SHELL ?? "http://127.0.0.1:5360";
@@ -88,10 +90,12 @@ console.log(`tier: ${KEEPS_HISTORY ? "postgres (history kept)" : "file (no histo
 
 /** The DRY-58 notice line, if the desk is holding one about session history. */
 const historyNotice = (page: Page): Promise<string | undefined> =>
-  page.evaluate(() =>
-    [...document.querySelectorAll(".notice")]
-      .map((n) => (n.textContent ?? "").trim())
-      .find((t) => t.includes("aren't being recorded")),
+  page.evaluate(
+    (sel) =>
+      [...document.querySelectorAll(sel)]
+        .map((n) => (n.textContent ?? "").trim())
+        .find((t) => t.includes("aren't being recorded")),
+    TOAST.notice,
   );
 
 /**

@@ -1018,11 +1018,26 @@ the clamped blob is 104px and never the problem.
 **The two shortest viewports are not more of the same.** Above ~500px of height
 the panel fits however the row is arranged, so every assertion passes with or
 without the height cap's `overflow` backstop — 430px and 380px are where that
-backstop is the only thing between the action row and the rail. The `notice-up`
-round is the other half: it fails a tracker pull so App.vue raises a notice,
-which is in the flex column ABOVE the desk and shortens it *without touching the
-viewport*. That is the one case separating "reads the desk" from "reads the
-window", and it asserts the desk really did shrink before trusting the round.
+backstop is the only thing between the action row and the rail. The
+`tall-topbar` round is the other half: it grows `.topbar` by injected style, which
+shortens the desk *without touching the viewport*. That is the one case
+separating "reads the desk" from "reads the window", and it asserts the desk
+really did shrink before trusting the round.
+
+Confirmed to discriminate (DRY-100): in `RunRail.vue`, replace `props.deskHeight`
+in `gateRoom` with a resize-tracked `window.innerHeight - 55` — the "reads the
+window" mistake, exact for an ordinary topbar — and exactly **1 of 540**
+assertions fails, `900x560 tall-topbar mcp+blob · panel top not clipped`, 30px
+above the desk. Every ordinary viewport passes it, which is the point of the
+round. It must be reactive to resize: with a bare `window.innerHeight` the
+computed evaluates once at the first viewport and never again, and the run then
+reports 10 failures across nine rounds that say nothing about the property.
+
+It was a `notice-up` round until DRY-100: a tracker outage raised a notice that
+sat in the flex column above the desk and pushed it down. Notices are toasts now
+and take no space, so nothing the app does shortens the desk any more — which is
+what that ticket was for — and the property lost its product trigger, not just
+its selector. The lever is scaffolding now, and the harness says so.
 
 The sidebar is deliberately NOT varied, though it was the reason `100vw` was the
 wrong reference: `sidebarOpen` is a `ref(true)` that nothing toggles, so the app
@@ -2212,6 +2227,96 @@ invented", "no pill to jump to nothing" — and each is paired with a positive o
 in the same round that does not (`the heading rendered as a heading at all`
 guards the font-size comparison beside it, which reads 0 vs 0 when nothing
 rendered).
+
+## Status toasts (DRY-100)
+
+The desk's four status surfaces — the poll's error, a failed action, a
+non-failure outcome, and every notice — are an overlay rather than rows in the
+flex column, so raising or clearing one moves nothing. The claim is geometric, so
+`toast-stack.mts` **measures** it: `getBoundingClientRect` on `.body` and on every
+`.term` (the element `TerminalPane`'s `ResizeObserver` watches) before a toast is
+raised, with it up, and after it clears. That a toast rendered is never the
+assertion — it was true of the in-flow version too.
+
+Each surface is raised through the shell's own code, by failing the network calls
+it makes: `GET /api/sessions` → the poll's `error`; the sidebar's Refresh against
+a tracker that 502s with a paragraph → a notice; `POST …/kill` → `actionError`;
+and closing a window whose worktree is reapable → `actionNote`, where the REAL
+daemon reaps it and the harness only holds the request so a baseline can be taken
+with the window gone and the note not yet up.
+
+Four terminals, and a rig of its own — the same shape as DRY-90's, on different
+ports so the two can run at once. Started from inside a Drydock session, strip
+`DRYDOCK_*` from the daemon's environment (CLAUDE.md, "Real env wins"):
+
+```sh
+(cd daemon && STUB_PORT=4367 node --import tsx ../scripts/verify/stub-tracker.mts)
+
+cd daemon
+DRYDOCK_PORT=4365 DRYDOCK_HOST=127.0.0.1 \
+  DRYDOCK_SESSIONS_DIR=/tmp/dry100-sessions/sessions-4365 \
+  DRYDOCK_STATE_FILE=/tmp/dry100-state.json \
+  DRYDOCK_WORKTREES_ROOT=/tmp/dry100/wt \
+  DRYDOCK_REPO_PATHS=demo=/tmp/dry100/demo,dry=/tmp/dry100/demo \
+  DRYDOCK_WORKTREE_REAP_MS=0 \
+  DRYDOCK_TRACKER=switchyard DRYDOCK_SWITCHYARD_URL=http://127.0.0.1:4367 \
+  DRYDOCK_SWITCHYARD_TOKEN=stub node --import tsx src/index.ts
+
+(cd shell && VITE_DAEMON_URL=http://127.0.0.1:4365 bunx vite --port 5365 --strictPort)
+
+(cd daemon && node --import tsx ../scripts/verify/toast-stack.mts)
+```
+
+`DRYDOCK_WORKTREE_REAP_MS=0` turns the scheduled reaper off, so the note is
+provably the close gesture's and not a timer's. Afterwards: `rm -rf /tmp/dry100
+/tmp/dry100-sessions`, and kill the supervisors by the loop in CLAUDE.md.
+
+| section | holds down |
+|---|---|
+| 0 | a selector that can see a toast, and two terminals to measure — a measurement of zero panes passes anything |
+| 1 · 2 | a CONDITION (poll error, notice): leaves by itself when its owner clears; ✕ hides it and the hide survives the owner re-reporting the same outage, then a fresh outage after a clear is a NEW toast; a notice's detail is still capped at 140 |
+| 3 · 4 | an EVENT (failed action, reaper note): survives two more 3s polls (DRY-51) and leaves only on ✕ |
+| 5 | an arrival does not move a toast already on screen, and the newcomer goes below |
+| 6 | the same in **tile**, where an in-flow banner also *resizes* every terminal — float only moves them |
+| 7 | raising a toast, and clicking its ✕, leaves `document.activeElement` on the terminal |
+
+Roles (`alert` on errors, `status` on notes and notices) and the stack's clearance
+from the rail are asserted alongside. The geometry is measured both when a toast
+is raised and when it clears.
+
+### The selectors live in one place
+
+`toast-dom.mts` exports them, and nine harnesses import it: the eight ticketed
+ones — `sidebar`, `tracker-cache`, `roam`, `surface`, `hang`, `spawn-layout` and
+`worktree-reap-ui` — plus `race.mts` and `sweep.mts`, which also read `.notice`
+and were missed on the first pass (a review caught them: they kept matching by
+coincidence, not by contract — `ToastStack` puts `t.kind` on the element as a
+class too, so the bare selector never went dark). They used to select on
+`.notice`, `.error` and `p.note`, class names other components also use, and
+several assert a **zero** count, which a selector matching nothing passes for
+the wrong reason (trap 5). `toast-stack.mts` is what proves each constant sees a
+real toast of its kind, so run it first after touching the markup.
+
+The one harness this ticket touches that does NOT select on a toast,
+`gate-actions.mts`: it raised a notice as a **lever**, to make the desk shorter
+than the window, and needed a new lever rather than a new selector. See the DRY-78
+section.
+
+### Making sure this one still discriminates
+
+The bug is "the toast is in the flow". Reproduce it with the NEW markup, so the
+harness fails for the geometric reason and not because a selector vanished:
+
+1. In `App.vue`, move `<ToastStack :toasts="toasts" @dismiss="dismissToast" />` out
+   of `.body` and to just above `<!-- BODY -->`.
+2. In `ToastStack.vue`, `.toasts { position: static; width: auto; }`.
+
+Expect **11 FAILED**: 5 in the float sections (`.body` shifts down 35px for one
+toast, 141px for three — the terminals move but keep their size) and 6 in the tile
+section (the terminals lose 15 / 49 / 35px of height, and are still animating back
+when the toast has gone, so the "…none did when it went" checks fail too). The
+real tree is 0. Restore both files and confirm with a checksum before committing —
+a mutation left in the tree ships.
 
 ## Workspace store: why a proxy and not `docker stop`
 

@@ -313,6 +313,7 @@ Desk and shell:
 | [dry-93-spawn-layout](docs/decisions/dry-93-spawn-layout.md) | which layout a spawn lands in, and why a spawn must not count as arranging the desk |
 | [dry-83-epic-children](docs/decisions/dry-83-epic-children.md) | expanding an epic that has nothing under it |
 | [dry-71-clipboard-keys](docs/decisions/dry-71-clipboard-keys.md) | `Ctrl+Shift+C/V`; `navigator.clipboard` is unavailable where this runs |
+| [dry-100-status-toasts](docs/decisions/dry-100-status-toasts.md) | the four status banners as an overlay; condition vs event lifecycles, why notices became dismissible, and a harness that used a banner as a lever |
 
 Tracker:
 

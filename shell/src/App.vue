@@ -9,6 +9,7 @@ import TrackerSidebar from "./components/TrackerSidebar.vue";
 import TicketDetail from "./components/TicketDetail.vue";
 import QuickLaunch from "./components/QuickLaunch.vue";
 import RunRail from "./components/RunRail.vue";
+import ToastStack from "./components/ToastStack.vue";
 import LoginView from "./components/LoginView.vue";
 import UsersPanel from "./components/UsersPanel.vue";
 import {
@@ -25,6 +26,7 @@ import { openGates, startGateStream, stopGateStream } from "./composables/gateSt
 import { askToNotify, notifyGate, useAttention } from "./composables/attention.js";
 import { isFinished, runState } from "./composables/runState.js";
 import { clearNotice, noticeList, setNotice } from "./composables/notices.js";
+import { useToastStack, type Toast } from "./composables/toasts.js";
 import { useWindowManager, type LayoutMode, type Win } from "./composables/useWindowManager.js";
 import { forgetLocalLayout } from "./composables/layoutStore.js";
 import {
@@ -155,7 +157,7 @@ const selectedTicket = ref<Ticket | null>(null);
 // session so it lives outside wm.windows, but it draws its z from the same
 // counter so it layers against (and can be raised above) the terminals.
 const ticketZ = ref(0);
-// Two different things wear the same banner and they must not clobber each
+// Two different things wear the same toast and they must not clobber each
 // other. `error` is a CONTINUING condition owned by the 3s poll: set while the
 // daemon won't answer, cleared the moment it does. An action failure is a past
 // event that nothing will re-raise — a kill that didn't take, a spawn that
@@ -177,6 +179,42 @@ const actionError = ref<string | null>(null);
  * moment it happens — nothing would ever take the line down again.
  */
 const actionNote = ref<string | null>(null);
+
+/**
+ * The four status surfaces as one overlay (DRY-100). They are DERIVED from their
+ * owners rather than copied out of them — `composables/toasts.ts` says why, and
+ * how a condition's ✕ differs from an event's. The order below is only the
+ * order simultaneous arrivals land in; the stack itself is in arrival order.
+ */
+const { toasts, dismiss: dismissToast } = useToastStack((): Toast[] => [
+  ...(error.value ? [{ key: "poll", kind: "error" as const, text: error.value }] : []),
+  ...(actionError.value
+    ? [
+        {
+          key: "action-error",
+          kind: "error" as const,
+          text: actionError.value,
+          onDismiss: () => (actionError.value = null),
+        },
+      ]
+    : []),
+  ...(actionNote.value
+    ? [
+        {
+          key: "action-note",
+          kind: "note" as const,
+          text: actionNote.value,
+          onDismiss: () => (actionNote.value = null),
+        },
+      ]
+    : []),
+  ...noticeList.value.map((n) => ({
+    key: `notice:${n.key}`,
+    kind: "notice" as const,
+    text: n.text,
+    detail: n.detail,
+  })),
+]);
 
 // Markdown doc viewer (DRY-35): opened by Ctrl/Cmd-clicking a file token in
 // any terminal pane. Like the ticket detail it's a floating non-window (no
@@ -271,8 +309,8 @@ let ticketPollStopped = false;
  * tickets that were never fetched.
  *
  * Owned by the 20s poll, so it's a CONDITION in the DRY-51 sense — cleared by
- * the next success, never dismissible — which is why it also raises a notice
- * rather than reusing `actionError`.
+ * the next success — which is why it also raises a notice (whose owner clears
+ * it) rather than reusing `actionError`, which nothing ever clears but a ✕.
  */
 const trackerError = ref<string | null>(null);
 
@@ -692,7 +730,7 @@ const clearableIds = computed(() => clearable(sessionList.value).map((c) => c.se
  *
  * A failure re-stamps the clock as well as reporting itself: without that, an
  * auto-clear that cannot succeed retries on every 3s poll and rewrites the
- * banner each time.
+ * toast each time.
  */
 async function clearSession(id: string): Promise<boolean> {
   const failed = await endWindow(id);
@@ -1114,7 +1152,7 @@ async function refresh() {
     sweepFinished(list);
     error.value = null;
   } catch (e) {
-    // Names the daemon it actually tried, not the dev default: this banner is
+    // Names the daemon it actually tried, not the dev default: this toast is
     // what you read during a version skew, and a prod shell pointed at :4318
     // telling you to check :4317 sends you to the wrong machine (DRY-51).
     //
@@ -1973,29 +2011,16 @@ onBeforeUnmount(stopDesk);
 
     <UsersPanel v-if="usersOpen" @close="usersOpen = false" />
 
-    <p v-if="error" class="error">{{ error }}</p>
-    <!-- Sticky: nothing re-raises a failed action, so it waits to be read. -->
-    <p v-if="actionError" class="error">
-      {{ actionError }}
-      <button class="banner-x" title="Dismiss" @click="actionError = null">✕</button>
-    </p>
-    <!-- Sticky like the one above and for the same reason, but not a failure:
-         something was removed on your behalf and you get to read about it
-         (DRY-90). -->
-    <p v-if="actionNote" class="note">
-      {{ actionNote }}
-      <button class="banner-x" title="Dismiss" @click="actionNote = null">✕</button>
-    </p>
-    <!-- Continuing conditions (DRY-58): something still works, just not the way
-         you'd assume. Muted rather than red, and NOT dismissible — whoever
-         raised it clears it when it stops being true, so an ✕ would only hide a
-         fact that's still the case. -->
-    <p v-for="n in noticeList" :key="n.key" class="notice">
-      {{ n.text }}<span v-if="n.detail" class="notice-detail">{{ n.detail }}</span>
-    </p>
-
     <!-- BODY -->
     <div class="body">
+      <!-- The four status surfaces (DRY-100). Absolutely positioned inside
+           `.body`, so raising or clearing one moves neither the sidebar, nor the
+           desk, nor any terminal. First in the DOM only so Tab reaches a ✕
+           before it reaches the sidebar; it takes no space either way.
+           Conditions and events have different ✕ semantics — see
+           composables/toasts.ts. -->
+      <ToastStack :toasts="toasts" @dismiss="dismissToast" />
+
       <TrackerSidebar
         v-if="sidebarOpen"
         :name="providerName"
@@ -2409,72 +2434,13 @@ onBeforeUnmount(stopDesk);
   border-radius: 4px;
   padding: 2px 5px;
 }
-.error {
-  margin: 0;
-  padding: 7px 14px;
-  background: #2a1416;
-  color: #f0c9c4;
-  font-size: 12.5px;
-  border-bottom: 1px solid #5c2b2b;
-}
-/* An action's outcome that isn't a failure (DRY-90). Dismissible like .error —
-   it is a past event, not a condition — but slate-and-green rather than red:
-   the commonest one says a finished worktree was tidied away, which is the
-   thing working rather than the thing breaking. */
-.note {
-  margin: 0;
-  padding: 7px 14px;
-  background: #15211b;
-  color: #b6d8c4;
-  font-size: 12.5px;
-  border-bottom: 1px solid #2c4a39;
-}
-/* Deliberately quieter than .error: amber-on-slate, one line, no dismiss
-   affordance. It reports a condition you should know about while you keep
-   working — not a fault to go and deal with (DRY-58). */
-.notice {
-  margin: 0;
-  padding: 6px 14px;
-  background: #21201a;
-  color: #d8c9a3;
-  font-size: 12px;
-  border-bottom: 1px solid #4a4130;
-  /* One line, always. A notice that grows with its error message pushes the
-     desk down under the cursor, which is the opposite of unobtrusive. The text
-     is already capped in notices.ts; this is the backstop for a long unbroken
-     token (a URL, a path) that no character limit would split. */
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.notice-detail {
-  margin-left: 8px;
-  opacity: 0.6;
-  font-size: 11.5px;
-}
-.banner-x {
-  float: right;
-  padding: 0 2px;
-  border: 0;
-  background: none;
-  color: #f0c9c4;
-  font-size: 12px;
-  line-height: 1;
-  opacity: 0.6;
-  cursor: pointer;
-}
-.banner-x:hover {
-  opacity: 1;
-}
-/* The ✕ takes .error's pink from the rule above, which reads as an alert on a
-   line that isn't one. */
-.note .banner-x {
-  color: inherit;
-}
 .body {
   flex: 1;
   display: flex;
   min-height: 0;
+  /* The positioning context for the toast stack (DRY-100). It does nothing to
+     `.body`'s own box, which is the point. */
+  position: relative;
 }
 .desk {
   flex: 1;
