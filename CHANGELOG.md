@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.9.0](https://github.com/Einlanzerous/drydock/compare/v1.8.0...v1.9.0) (2026-09-23)
+
+
+### Features
+
+* **daemon:** spawn prompt follows the ticket's review_mode (DRY-99) ([#84](https://github.com/Einlanzerous/drydock/issues/84)) ([f730580](https://github.com/Einlanzerous/drydock/commit/f730580d489e57841789203ca523ce2f2900c592))
+* **shell:** status banners are toasts, not rows that push the desk down (DRY-100) ([#86](https://github.com/Einlanzerous/drydock/issues/86)) ([69bb486](https://github.com/Einlanzerous/drydock/commit/69bb486f689fec4971128053626b57a392e1a75c))
+
 ## [1.8.0](https://github.com/Einlanzerous/drydock/compare/v1.7.0...v1.8.0) (2026-09-11)
 
 
