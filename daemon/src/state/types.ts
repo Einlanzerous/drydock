@@ -110,6 +110,17 @@ export interface SessionRecord {
    * surface. Recorded at the moment we still know.
    */
   endReason?: SessionEndReason;
+  /**
+   * Somebody asked for this session to be cleared away (DRY-101) — its window
+   * closed, its rail card dismissed, its tombstone dismissed.
+   *
+   * Not `endReason`, and the difference is the whole field. `endReason` records
+   * why the PROCESS ended; a session that had already ended and was then cleared
+   * keeps its `finished`/`failed` there, which reads the same as one that died
+   * with nobody looking. A client that finds this set must not offer to resume
+   * it: the person who could have wanted that already said no.
+   */
+  dismissedAt?: number;
 }
 
 /**
@@ -150,6 +161,12 @@ export interface SessionHistory {
   ): Promise<void>;
   /** Learn the wrapped CLI's own session id, once a hook reports it. */
   noteAgentSessionId(owner: string, id: string, agentSessionId: string): Promise<void>;
+  /**
+   * Record that somebody asked for this session to be cleared (DRY-101). Safe to
+   * call twice, and safe for an id that has no row — the first stamp wins and a
+   * missing row is not this call's problem to invent.
+   */
+  dismiss(owner: string, id: string): Promise<void>;
   /** Most recent first. Includes sessions that are still running. */
   recent(owner: string, limit: number): Promise<SessionRecord[]>;
   /** Drop history past the retention policy. Returns how many rows went. */

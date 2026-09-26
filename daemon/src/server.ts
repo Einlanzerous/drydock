@@ -1049,6 +1049,20 @@ const server = http.createServer(async (req, res) => {
       }
       const ticket = typeof body.ticket === "string" ? body.ticket : undefined;
 
+      // A workspace's zsh names the agent it belongs to (DRY-101). Kept only when
+      // that agent is a session the CALLER owns: the field's one effect is to
+      // stop a desk giving this session a window of its own while the named agent
+      // is listed, so accepting an arbitrary id would let a spawn tuck itself
+      // behind somebody else's window — a colleague's public run, say. (A name
+      // nothing lists is harmless, not invisible: the desk only claims a zsh whose
+      // agent it can see, so it falls back to an ordinary window.) Dropped silently
+      // rather than refused: it is a hint about layout, and failing a spawn over
+      // it would cost a live PTY for a cosmetic.
+      const companionOf =
+        typeof body.companionOf === "string" && manager.get(body.companionOf)?.ownedBy(me().id)
+          ? body.companionOf
+          : undefined;
+
       // Worktree isolation (DRY-15). A ticket-bound spawn in a git repo runs in
       // its own worktree/branch unless the client opts out (`worktree: false`)
       // or the daemon has it disabled. Explicit `worktree`(path)/`branch` strings
@@ -1091,6 +1105,7 @@ const server = http.createServer(async (req, res) => {
         repo: typeof body.repo === "string" ? body.repo : undefined,
         worktree,
         branch,
+        companionOf,
         title: typeof body.title === "string" ? body.title : undefined,
         cols: typeof body.cols === "number" ? body.cols : undefined,
         rows: typeof body.rows === "number" ? body.rows : undefined,
@@ -1239,7 +1254,15 @@ const server = http.createServer(async (req, res) => {
       // asked for. This route has always been idempotent and has to stay that
       // way — DRY-60's sweep and the ✕ button race each other by design, and a
       // second kill landing after the first must not raise a banner.
-      if (!session) return send(res, 200, { ok: true });
+      //
+      // It is still a REQUEST, though, and worth remembering (DRY-101): this is
+      // how a dismissed tombstone arrives — the PTY is long gone and the shell
+      // is only asking to be rid of the card. The history row is scoped to the
+      // caller, so an id that is not theirs marks nothing.
+      if (!session) {
+        history.dismissed(me().id, killMatch[1]);
+        return send(res, 200, { ok: true });
+      }
       // Somebody else's, though, is refused — and refused as "unknown", so this
       // doesn't become a way to enumerate other people's sessions. Before
       // accounts this was a bare `manager.remove(id)`: harmless when one person
@@ -1249,6 +1272,11 @@ const server = http.createServer(async (req, res) => {
         return send(res, 404, { error: `unknown session ${killMatch[1]}` });
       }
       manager.remove(killMatch[1]);
+      // Whatever state it was in. A live session ends as `stopped`, which already
+      // says somebody asked; one that had EXITED keeps the `finished`/`failed` it
+      // died with, which reads the same as an ending nobody was there for — and
+      // that is the case a second browser drew a Resume card for (DRY-101).
+      history.dismissed(me().id, killMatch[1]);
       return send(res, 200, { ok: true });
     }
 

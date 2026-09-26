@@ -135,6 +135,11 @@ export interface SpawnOptions {
   worktree?: string;
   /** Branch checked out in that worktree. */
   branch?: string;
+  /**
+   * The agent session this one is the co-located zsh of (DRY-101). Checked by
+   * the route — it must name a session the caller owns — not by this type.
+   */
+  companionOf?: string;
   /** Run unattended: a rail card instead of a window, and hour-long gates (DRY-49). */
   autonomous?: boolean;
   /** Who kicked it off. Defaults to the human at the browser. */
@@ -351,6 +356,8 @@ export class PtySession {
   readonly repo?: string;
   readonly worktree?: string;
   readonly branch?: string;
+  /** The agent this is the workspace zsh of, if it is one (DRY-101). */
+  readonly companionOf?: string;
   readonly origin: RunOrigin;
   readonly permissionMode: PermissionMode;
   /**
@@ -478,6 +485,7 @@ export class PtySession {
     this.repo = meta.repo;
     this.worktree = meta.worktree;
     this.branch = meta.branch;
+    this.companionOf = meta.companionOf;
     this.autonomous = meta.autonomous;
     this.origin = meta.origin;
     this.permissionMode = meta.permissionMode;
@@ -509,6 +517,7 @@ export class PtySession {
       repo: this.repo,
       worktree: this.worktree,
       branch: this.branch,
+      companionOf: this.companionOf,
       autonomous: this.autonomous,
       origin: this.origin,
       permissionMode: this.permissionMode,
@@ -613,6 +622,7 @@ export class PtySession {
       repo: opts.repo,
       worktree: opts.worktree,
       branch: opts.branch,
+      companionOf: opts.companionOf,
       autonomous,
       origin: opts.origin ?? "you",
       permissionMode,
@@ -1178,7 +1188,16 @@ export class PtySession {
       clients: this.clients.size,
       replayBytes: this.scrollbackBytes,
     });
-    this.send(ws, { type: "replay", data: Buffer.concat(this.scrollback).toString("utf8") });
+    this.send(ws, {
+      type: "replay",
+      data: Buffer.concat(this.scrollback).toString("utf8"),
+      // What the ring was drawn at, so the pane can replay it there and THEN fit
+      // (DRY-101). Read here rather than off the pane's later resize message:
+      // this frame is sent before that one can arrive, so it is still the size
+      // the previous client left.
+      cols: this.cols,
+      rows: this.rows,
+    });
     this.send(ws, {
       type: "status",
       status: this.status,
@@ -1423,6 +1442,7 @@ export class PtySession {
       ticket: this.ticket,
       worktree: this.worktree,
       branch: this.branch,
+      companionOf: this.companionOf,
       status: this.status,
       exitCode: this.exitCode,
       idle: this.idle,

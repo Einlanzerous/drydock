@@ -100,6 +100,34 @@ export interface SessionRecord {
   endedAt?: number;
   exitCode?: number;
   endReason?: "finished" | "failed" | "stopped" | "unknown";
+  /** Somebody asked for it to be cleared away — see `closedOnPurpose`. */
+  dismissedAt?: number;
+}
+
+/**
+ * Did somebody ask for this session to go away? (DRY-101)
+ *
+ * A window whose session has gone is drawn as a Resume card (DRY-56) because the
+ * session might have died while nobody was looking — and a card for a window
+ * somebody closed on purpose is the desk resurrecting something that was already
+ * put away. It happens through a SECOND browser: the closing tab removes its own
+ * window in the same tick as the kill, so it never sees a card, but every other
+ * tab still holds the window, finds its session gone, and draws one — then writes
+ * that window back into the shared desk, from where the next reload restores it.
+ *
+ * Two facts say yes, and neither is enough alone. `stopped` is a live session
+ * that was killed. `dismissedAt` is the one that covers a session that had
+ * ALREADY ended — its `endReason` still says `finished` or `failed`, exactly as
+ * it does for a run that died with nobody watching, so only the daemon's record
+ * of the request can tell them apart. Old rows carry the first and not the
+ * second, which is why the pair is one predicate rather than a choice.
+ *
+ * `exitCode` is deliberately not an input. Signalling a process exits it
+ * 129/137/143, and inferring "closed on purpose" from a number is DRY-49's trap
+ * in a third surface.
+ */
+export function closedOnPurpose(record: SessionRecord): boolean {
+  return record.endReason === "stopped" || Boolean(record.dismissedAt);
 }
 
 /**
@@ -157,6 +185,12 @@ export async function createSession(opts: {
   worktree?: string | false;
   /** Override the branch checked out in the worktree (default `agent/<TICKET>`). */
   branch?: string;
+  /**
+   * The agent this session is the co-located zsh of (DRY-101) — a workspace's
+   * second PTY names the first. Recorded by the daemon so the pairing survives
+   * whatever happens to the saved desk; see `SessionInfo.companionOf`.
+   */
+  companionOf?: string;
   title?: string;
   /** Run unattended: a rail card instead of a window, hour-long gates (DRY-49). */
   autonomous?: boolean;

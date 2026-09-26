@@ -61,4 +61,10 @@ role there is a construct-server change, deliberately out of scope (DRY-28/58).
      label AND the args the click sends — they're computed in different files,
      and a card that says "Start again" while still passing `--resume` is the
      same bug in better copy.
-
+7. **A `/kill` no longer leaves a card (DRY-101).** Since then the daemon records
+   that somebody asked, and a window whose session is gone AND was asked for is
+   dropped rather than drawn — which is how a window closed on one device stopped
+   coming back as a card on another. Point 3's "assert `stopped` from `/kill`" still
+   holds for the history row; what changed is that the row no longer produces a card.
+   A card for a session that *died on its own* needs that state built deliberately:
+   see `diedOnItsOwn` in `scripts/verify/tombstone.mts`.
