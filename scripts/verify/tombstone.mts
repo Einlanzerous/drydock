@@ -72,7 +72,29 @@ const api = async <T,>(p: string, init?: RequestInit): Promise<T> => {
  * directly. `dismissed_at` may not exist on the tree this is aimed at (a pre-fix
  * daemon has never heard of it), and there is nothing to clear there.
  */
-function diedOnItsOwn(id: string): void {
+async function diedOnItsOwn(id: string): Promise<void> {
+  // FIRST, wait for the daemon's own writes to land. The session was live when it
+  // was killed: `/kill` answers 200 before the exit arrives, and both history
+  // writes are fire-and-forget. `end()` is guarded by `ended_at is null`, so an
+  // UPDATE that gets in ahead of it does not set `ended_at` and the daemon's
+  // ending then rewrites `end_reason` back to `stopped`; and `dismiss()` is
+  // guarded by `dismissed_at is null`, so it re-stamps a row we had just cleared.
+  // Either way the card is not drawn and the harness fails for a reason that has
+  // nothing to do with what it tests (DRY-101 review).
+  const record = async () =>
+    (await api<HistoryResponse>("/api/sessions/history")).sessions.find((r) => r.id === id);
+  const waitFor = async (ok: () => Promise<boolean>, ms: number): Promise<boolean> => {
+    for (const end = Date.now() + ms; Date.now() < end; await new Promise((r) => setTimeout(r, 150))) {
+      if (await ok()) return true;
+    }
+    return false;
+  };
+  if (!(await waitFor(async () => Boolean((await record())?.endedAt), 15_000))) {
+    throw new Error(`history never recorded the ending of ${id}`);
+  }
+  // Written at kill time, ahead of the exit, so it is there by now — a bounded
+  // wait rather than a requirement, because a pre-fix daemon never writes one.
+  await waitFor(async () => Boolean((await record())?.dismissedAt), 2_000);
   const statements = [
     `update pty_sessions set end_reason = 'failed', exit_code = 3 where id = '${id}'`,
     `update pty_sessions set dismissed_at = null where id = '${id}'`,
@@ -109,7 +131,7 @@ async function deadSessionWithAgentId(): Promise<string> {
   await api(`/api/sessions/${id}/kill`, { method: "POST" });
   // Killed only to get it out of the registry; see `diedOnItsOwn` for why the
   // kill alone no longer leaves anything to draw a card from.
-  diedOnItsOwn(id);
+  await diedOnItsOwn(id);
   return id;
 }
 

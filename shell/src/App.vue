@@ -988,7 +988,6 @@ function reconcile(list: SessionInfo[]) {
       // Repaired in place — see promoteToWorkspace for why that is not
       // `updateWin`, and why geometry is left alone.
       wm.promoteToWorkspace(win.id, shellId, {
-        title: "workspace",
         ...workspaceWindow(shellId, ticket),
         // Keeps the window the size somebody left it: a repair is not a spawn.
         w: win.w,
@@ -1002,9 +1001,12 @@ function reconcile(list: SessionInfo[]) {
     if (w.kind !== "workspace" && claimed.has(w.id)) wm.remove(w.id);
     // Being cleared right now (DRY-60). The kill has landed and the window
     // hasn't gone yet, which is indistinguishable from a session that died —
-    // and answering it as one draws a tombstone over a window somebody asked to
-    // be rid of, or raises the file tier's lost-session notice for a loss that
-    // was deliberate. clearSession removes it a tick later.
+    // and answering it as one raises the file tier's lost-session notice for a
+    // loss that was deliberate, and leaves the window sitting there with nothing
+    // to draw while history is asked. (Before DRY-101 it drew a tombstone over a
+    // window somebody asked to be rid of; the daemon now records the kill, so
+    // `closedIds` drops it instead — a milder symptom, not the absence of one.)
+    // clearSession removes it a tick later.
     else if (clearing.has(w.id)) continue;
     else if (!ids.has(w.id)) {
       // Its PTY is gone AND somebody asked for that (DRY-101): the window was
@@ -1416,10 +1418,17 @@ async function spawnFresh(kind: "claude" | "shell") {
  * DRY-36: a ticket-bound workspace opens in its most-agent state — drawer closed
  * and shell collapsed, each one click away. A ticketless one (the palette's
  * `workspace` row) keeps the shell visible; it exists to pair agent + zsh.
+ *
+ * The TITLE is part of "the same window", and was the one field a rebuild got
+ * wrong: `reconcile` names a session's window after its command, so a device that
+ * rebuilt the workspace showed `claude-code` where the one that spawned it showed
+ * `workspace` — and on a shared desk the title then flipped with whoever saved
+ * last. Carried here so the spawn, the rebuild and the repair cannot disagree.
  */
 function workspaceWindow(shellId: string, ticket?: string) {
   return {
     kind: "workspace" as const,
+    title: "workspace",
     shellId,
     drawerOpen: false,
     shellCollapsed: !!ticket,
@@ -1483,7 +1492,6 @@ async function spawnWorkspace(
     wm.add({
       id: agent.id,
       type: "agent",
-      title: "workspace",
       ticket: opts.ticket?.key,
       repo: basename(agent.cwd),
       ...workspaceWindow(shell.id, opts.ticket?.key),

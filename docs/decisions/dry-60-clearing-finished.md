@@ -81,13 +81,23 @@ The traps:
    id because they are on different rows. Measure any change here against the
    LANE's rect, never the card's: `getClientRects()` is non-empty for an element
    an ancestor clips, so a card entirely off-screen looks fine from inside.
-6. **Whatever sweeps must remove the window CLIENT-SIDE.** (This is the same-tab half;
-   DRY-101 is the other-tab half — a second browser still holds the window, and used to
-   draw the card this paragraph is about.) Kill the session and
-   let `reconcile` notice, and on a history tier every swept window comes back as
-   a DRY-56 tombstone — the "third dismissal" — while on the file tier each one
-   raises "a window that closes can't be resumed" for a removal that was
-   deliberate. There is a poll between the kill landing and the window going, so
+6. **Whatever sweeps must remove the window CLIENT-SIDE.** Kill the session and
+   let `reconcile` notice, and on the file tier each swept window raises "a window
+   that closes can't be resumed" for a removal that was deliberate. On a history
+   tier it used to be worse: every one came back as a DRY-56 tombstone, the "third
+   dismissal". Since DRY-101 the daemon records the kill, so reconcile **drops** the
+   window instead — but only after asking history, a poll or two in which it sits
+   there with nothing to draw. A milder symptom, not the absence of one, and the
+   rule stands. (DRY-101 is also the other-tab half of this: a second browser still
+   holds the window, and used to draw the card this paragraph is about.)
+
+   **This harness no longer catches it, and did not have to be told.** Mutation-tested
+   in DRY-101 by deleting `endWindow`'s `forgetWindow`: `sweep.mts` fails 1 of 27 on
+   the database tier (the button's own check) and 0 of 27 on the file tier, because it
+   checks removal only after waiting out the sweep, by which time reconcile has
+   dropped the window anyway. The check that does see it is `desk-restore.mts` S1 —
+   the ✕'s window is gone within 1.5s, under one poll. There is a poll between the
+   kill landing and the window going, so
    reconcile also has to skip ids that are mid-clear; it is not enough to remove
    the window afterwards. **And the mid-clear set is not sufficient on its own**,
    because it only covers the span from the kill being issued to the window being

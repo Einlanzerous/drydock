@@ -178,8 +178,8 @@ simply drops the window — and the harness says so. Rig, the ports, and the
 discrimination recipe are in
 [scripts/verify/README.md](../../scripts/verify/README.md#reloading-the-desk-dry-101).
 
-Against the pre-fix tree it fails **12 of 36** on the file tier and **25 of 45** on
-the database tier; against this tree, 0 of 36 and 0 of 45 (twice). S6 — count,
+Against the pre-fix tree it fails **13 of 37** on the file tier and **26 of 46** on
+the database tier; against this tree, 0 of 37 and 0 of 46. S6 — count,
 layout mode and geometry surviving a plain reload on one device — passes both ways:
 it is a guard on what must not regress, not evidence of the fix.
 
@@ -188,6 +188,14 @@ Also run, as regression checks for the paths this touched, and all green: `sweep
 (DRY-62). **`tombstone.mts` had to change**: it made its card by `/kill`ing a
 session, and a kill is now — by design — the one thing that no longer leaves a card.
 Anything else that asserts a `stopped` card exists must learn the same.
+
+**`sweep.mts` no longer guards the client-side removal, and this was found by
+mutation rather than by reading** (the PR review caught the stale sentence; the
+mutation showed how far it went). With `endWindow`'s `forgetWindow` deleted it fails 1
+of 27 on the database tier and 0 of 27 on the file tier — the daemon now records a
+kill, so a window left for reconcile is dropped a poll later instead of drawn as a
+card, and that harness looks only after waiting out the sweep. S1 asserts the ✕'s
+window is gone within 1.5s and fails against the same mutation; DRY-60's doc says so.
 
 By hand, the two things a page cannot show:
 

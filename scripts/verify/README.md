@@ -2222,10 +2222,10 @@ DRY-93's reason (a default throwaway daemon reaps across the HOST's worktrees ro
 
 | section | what it holds down |
 |---|---|
-| S1 | a window closed with the ✕ on A is still open on B; B finds its session gone. It must draw no card, must not write the window back, and neither device may bring it back on reload |
+| S1 | a window closed with the ✕ on A is still open on B; B finds its session gone. A's own window must go **at once** (within 1.5s, under one poll — the one check here that sees a missing client-side removal; DRY-60's harness does not, mutation-tested). B must draw no card and must not write the window back, and neither device may bring it back on reload |
 | S2 | a desk that **already carries** closed windows — one stopped, one that exited on its own and was then cleared — heals on load and is rewritten without them. Ends with the control: a session that **died on its own** and was forgotten still gets its card. Every other check here passes for a fix that drops every window whose session has gone |
 | S3 | a card dismissed on A goes from B **without a reload** (B has to ask again; up to the 15s history floor), is not written back, and history keeps both the failure and the dismissal |
-| S4 | a workspace spawned from the palette on A, watched by a B that never heard of it: **one** window with both panes on B, in the saved desk, and after A reloads |
+| S4 | a workspace spawned from the palette on A, watched by a B that never heard of it: **one** window with both panes on B, **titled as the spawned one is**, in the saved desk, and after A reloads |
 | S5 | a desk saved the old way — the agent as a bare terminal, the zsh as a window — is put back together in place: the window keeps its position and size, the zsh is not killed |
 | S6 | count, layout mode and each window's rect survive a plain reload of a tiled desk on one device. **Passes against the bug** — a guard on what must not regress, not evidence of the fix |
 | S7 | a pane restored into a window **narrower** than its PTY last drew at adds no stacked prompts or stray glyphs; a pane with an empty replay still fits its window; and the replay frame carries the PTY's size |
@@ -2241,8 +2241,8 @@ database tier, none of four run alone — so **run it in full at least once**, n
 only through `ONLY=S7`.
 
 Discrimination (recipe [below](#making-sure-a-harness-still-discriminates)): against
-the pre-fix tree it fails **12 of 36** on the file tier and **25 of 45** on the
-database tier; with the fix, 0 of 36 and 0 of 45 (twice). S1–S3 account for 13 of
+the pre-fix tree it fails **13 of 37** on the file tier and **26 of 46** on the
+database tier; with the fix, 0 of 37 and 0 of 46. S1–S3 account for 13 of
 the database tier's failures and none of the file tier's.
 
 ## The ticket panel's comment thread (DRY-76)
@@ -2622,7 +2622,7 @@ perl -0pi -e 's/if \(own\) return own;/return own ?? "WRONG";/' \
 # STAGES the revert, so restore with `git checkout HEAD -- daemon/src shell/src` and
 # confirm with `git status` before committing anything.
 git checkout <that commit>~1 -- daemon/src shell/src
-(cd daemon && node --import tsx ../scripts/verify/desk-restore.mts)  # file: 12 of 36; database: 25 of 45
+(cd daemon && node --import tsx ../scripts/verify/desk-restore.mts)  # file: 13 of 37; database: 26 of 46
 git checkout HEAD -- daemon/src shell/src
 ```
 

@@ -233,7 +233,23 @@ const seededWindow = (
  * the pre-fix daemon has never heard of it — and that is fine: there is nothing
  * there to clear.
  */
-function diedOnItsOwn(id: string): void {
+async function diedOnItsOwn(id: string): Promise<void> {
+  // Wait for the daemon's own history writes first — they are fire-and-forget and
+  // guarded (`ended_at is null`, `dismissed_at is null`), so an UPDATE that gets in
+  // ahead of them is undone by them. The sleeps at the call sites happened to be
+  // long enough; this is what makes it not depend on that (DRY-101 review).
+  const record = async () => (await history()).find((r) => r.id === id);
+  const waitFor = async (ok: () => Promise<boolean>, ms: number): Promise<boolean> => {
+    for (const end = Date.now() + ms; Date.now() < end; await sleep(150)) {
+      if (await ok()) return true;
+    }
+    return false;
+  };
+  if (!(await waitFor(async () => Boolean((await record())?.endedAt), 15_000))) {
+    throw new Error(`history never recorded the ending of ${id}`);
+  }
+  // Written at kill time, ahead of the exit; a pre-fix daemon never writes one.
+  await waitFor(async () => Boolean((await record())?.dismissedAt), 2_000);
   const sql = [
     "update pty_sessions set end_reason = 'failed', exit_code = 3",
     ` where id = '${id}'`,
@@ -395,7 +411,18 @@ try {
     await settled();
 
     await frameOf(A.page, "alpha").locator(".ctl.close").click();
-    check("A closed alpha with the ✕", (await until(A.page, count(2))).length === 2);
+    // At ONCE, not eventually: the closing tab removes its own window in the same
+    // tick as the kill (DRY-60). A build that left the removal to reconcile would
+    // still get there — a poll later, and on the database tier two, since it asks
+    // history first — so the usual 20s wait passes for it, and so does DRY-60's own
+    // harness (mutation-tested in DRY-101: deleting `endWindow`'s removal fails one
+    // of its 27 checks on the database tier and none on the file tier). 1.5s is
+    // under one 3s poll, and on the database tier the mutation lingers for at
+    // least two; on the file tier it can land inside the budget, so this is
+    // deterministic there in one direction only — a failure is real, a pass is not
+    // proof.
+    const closed = await until(A.page, count(2), 1500);
+    check("A's ✕ takes the window off at once, not on the next poll", closed.length === 2, `${closed.length} windows after 1.5s`);
 
     // B has not been told anything. Give it the time to notice on its own: under
     // the bug it draws a card for alpha (database tier) and holds it forever.
@@ -462,7 +489,7 @@ try {
       await sleep(1500);
       await kill(died.id);
       await sleep(500);
-      diedOnItsOwn(died.id);
+      await diedOnItsOwn(died.id);
       await seedDesk("float", [
         seededWindow(live.id, "bravo"),
         seededWindow(died.id, "fail", { x: 150, y: 100, z: 2 }),
@@ -492,7 +519,7 @@ try {
       await sleep(1500);
       await kill(died.id);
       await sleep(500);
-      diedOnItsOwn(died.id);
+      await diedOnItsOwn(died.id);
       const cardA = await until(A.page, (ws) => ws.some((w) => w.tomb));
       const cardB = await until(B.page, (ws) => ws.some((w) => w.tomb));
       check("the session died on its own: both draw a card", cardA.some((w) => w.tomb) && cardB.some((w) => w.tomb));
@@ -544,6 +571,15 @@ try {
     const b1 = await desk(B.page);
     check("B, told nothing, shows ONE window for the workspace", b1.filter((w) => w.repo === HOME).length === 1, labels(b1).join(", "));
     check("…a workspace, with its zsh in it", b1.some((w) => w.workspace), labels(b1).join(", "));
+    // The same window, not merely the same shape: the desk is shared, so a title
+    // that differs between the device that spawned it and the one that rebuilt it
+    // flips with whichever saved last.
+    const titleOf = (ws: Win[]) => ws.find((w) => w.workspace)?.title;
+    check(
+      "…titled as the spawned one is",
+      titleOf(b1) === titleOf(a) && titleOf(a) === "workspace",
+      `A: ${JSON.stringify(titleOf(a))} · B: ${JSON.stringify(titleOf(b1))}`,
+    );
     await provokeWrite(B.page, "bravo");
     const ids = await settled();
     check("the saved desk has two windows (bravo + the workspace)", ids.length === 2, `${ids.length}`);

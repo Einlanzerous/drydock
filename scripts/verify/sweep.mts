@@ -12,8 +12,14 @@
 //
 // Rig in this directory's README. Run it against BOTH tiers: the file store is
 // where a swept session's scrollback was the only copy there ever was, and the
-// database tier is where a removed window could come back as a tombstone
-// (round B's "the window is gone" is what proves it doesn't).
+// database tier is where a removed window used to come back as a tombstone.
+//
+// It no longer proves that it doesn't (DRY-101). The daemon now records a kill, so
+// a window left for `reconcile` is dropped a poll or two later instead of drawn as
+// a card, and round B waits out the sweep before looking — by which time either
+// removal has happened. Deleting `endWindow`'s client-side removal fails 1 of 27
+// checks on the database tier and 0 of 27 on the file tier. `desk-restore.mts` S1
+// asserts the removal is prompt; this file asserts what gets swept, and when.
 //
 // The `page.evaluate` bodies below are functions rather than strings, and that
 // is checked rather than assumed — none of them binds a name to a function, so
