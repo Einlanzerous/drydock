@@ -460,8 +460,12 @@ async function main(): Promise<void> {
   // the reaper would have been a scheduled job on top of a primitive that
   // ignored its own safety check.
   console.log("\nPOST /api/worktrees/remove");
+  // One modified file AND one untracked one, because the refusal has to say
+  // WHICH (DRY-89): "2 uncommitted changes" doesn't tell somebody whether they
+  // are about to lose two edits or two files that exist nowhere else.
   const resettable = addWorktree("demo-DRY-108", "agent/DRY-108");
   fs.writeFileSync(path.join(resettable, "README.md"), "# demo\nunsaved\n");
+  fs.writeFileSync(path.join(resettable, "notes.md"), "scratch\n");
   {
     const { status, json } = await post<RemoveResponse>("/api/worktrees/remove", {
       repo: "demo",
@@ -473,6 +477,11 @@ async function main(): Promise<void> {
       `${status} ${json.error ?? ""}`,
     );
     check("…with the safety report attached", json.safety?.clean === false, JSON.stringify(json.safety));
+    check(
+      "…and it counts what would be lost, split modified from untracked",
+      /2 uncommitted changes \(1 modified, 1 untracked\)/.test(json.safety?.reason ?? ""),
+      json.safety?.reason,
+    );
   }
   {
     const { status } = await post<RemoveResponse>("/api/worktrees/remove", {
@@ -482,6 +491,31 @@ async function main(): Promise<void> {
     });
     check("force: true still discards it", status === 200 && !there(resettable), `${status}`);
   }
+  // A clean worktree costs nothing to remove, so it must not ask for a force.
+  // Without this the two checks above pass against a route that refuses EVERYTHING.
+  const idle = addWorktree("demo-DRY-111", "agent/DRY-111");
+  {
+    const { status } = await post<RemoveResponse>("/api/worktrees/remove", { repo: "demo", worktree: idle });
+    check("a clean worktree goes without a force", status === 200 && !there(idle), `${status}`);
+  }
+  // A failure that is NOT a refusal (DRY-89): a locked worktree passes the
+  // safety predicate (clean, merged) and then git declines to remove it. The
+  // panel shows this body verbatim, so it has to be git's own sentence rather
+  // than "Error: Command failed: git worktree remove <path>" with the reason
+  // buried underneath.
+  const locked = mergedWorktree("demo-DRY-112", "agent/DRY-112", "e.txt");
+  git(REPO, "worktree", "lock", "--reason", "harness", locked);
+  {
+    const { status, json } = await post<RemoveResponse>("/api/worktrees/remove", { repo: "demo", worktree: locked });
+    check("a locked worktree fails with a 500, not a refusal", status === 500 && there(locked), `${status}`);
+    check(
+      "…in git's own words",
+      /locked working tree/.test(json.error ?? "") && !/Command failed/.test(json.error ?? ""),
+      json.error,
+    );
+  }
+  git(REPO, "worktree", "unlock", locked);
+  git(REPO, "worktree", "remove", "--force", locked);
 
   // --- 6. the scheduled sweep ----------------------------------------------
   //
