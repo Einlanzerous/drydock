@@ -157,19 +157,28 @@ const modeSummary = computed(() => {
 // DRY-15 worktree isolation. `isGit` gates the whole feature (repo-less tickets
 // can't isolate); `isolate` is the user's on/off toggle (default on for a git
 // repo); `branch`/`worktreePath` are the editable targets; `worktreeExists`
-// flags that a prior spawn's worktree will be reused (with a Reset affordance).
+// flags that a prior spawn's worktree will be reused (with a Discard affordance).
 const isGit = ref(false);
 const isolate = ref(true);
 const branch = ref("");
 const worktreePath = ref("");
 const worktreeExists = ref(false);
-const resetting = ref(false);
-// What the daemon refused to discard, in its own words (DRY-90). Reset used to
+const discarding = ref(false);
+// What the daemon refused to discard, in its own words (DRY-90). Discard used to
 // pass `--force` unconditionally, so this state could not arise: the button
 // deleted uncommitted work without mentioning it. Null while nothing has been
 // refused; a sentence once something has, which is what the second button is
 // asking about.
-const resetRefused = ref<string | null>(null);
+const discardRefused = ref<string | null>(null);
+// Any OTHER reason the removal didn't happen (DRY-89) — a locked worktree, a
+// repo that moved, a daemon that isn't answering. It was swallowed, on the
+// theory that the panel staying on the reuse state was the report; but a button
+// that does nothing and says nothing reads as broken, and the reuse state is
+// also exactly what a worktree that WAS discarded looks like when the re-preview
+// fails. Distinct from `discardRefused` because the remedy differs: a refusal
+// offers "Discard anyway", and forcing past a failure git didn't refuse over
+// would just fail again.
+const discardError = ref<string | null>(null);
 
 /**
  * The pre-filled prompt for a ticket — the host's template, expanded (DRY-94).
@@ -208,7 +217,7 @@ function defaultPrompt(t: Ticket): string {
 const filledPrompt = ref("");
 
 // Preview the spawn target (cwd + planned worktree/branch) for the current
-// ticket. Also re-run after a Reset to refresh the reuse flag.
+// ticket. Also re-run after a Discard to refresh the reuse flag.
 async function previewTarget(t: Ticket): Promise<void> {
   try {
     const r = await resolveRepoCwd(t.repo, t.key);
@@ -237,7 +246,8 @@ watch(
     branch.value = "";
     worktreePath.value = "";
     worktreeExists.value = false;
-    resetRefused.value = null;
+    discardRefused.value = null;
+    discardError.value = null;
     auto.value = true;
     pos.value = null; // re-center each freshly opened ticket
     // The panel is a scroll container since DRY-74, and it isn't re-created
@@ -352,26 +362,33 @@ function sendAutonomous(): void {
   });
 }
 
-// Prune the existing worktree (DRY-15 "reset"): removes it + starts the branch
-// fresh on the next spawn. The agent's branch is kept; only the checkout is
-// dropped. Re-previews so the reuse badge clears.
-async function resetWorktree(force = false): Promise<void> {
-  if (resetting.value || !worktreePath.value) return;
-  resetting.value = true;
+// Prune the existing worktree (DRY-15): removes it + starts the branch fresh on
+// the next spawn. The agent's branch is kept; only the checkout is dropped —
+// which is COMMITTED work only. Uncommitted and untracked files are not on the
+// branch and do not survive, so the daemon refuses a checkout that has any until
+// this is called again with `force` (DRY-90), and the button says "Discard"
+// rather than "Reset" because that is what it does to them (DRY-89). A clean
+// worktree goes on the first press. Re-previews so the reuse badge clears.
+async function discardWorktree(force = false): Promise<void> {
+  if (discarding.value || !worktreePath.value) return;
+  discarding.value = true;
+  discardError.value = null;
   try {
     await removeWorktree({ repo: props.ticket.repo, worktree: worktreePath.value, force });
-    resetRefused.value = null;
+    discardRefused.value = null;
     await previewTarget(props.ticket);
   } catch (e) {
-    // A refusal is the one failure here worth words: the worktree is still
-    // there ON PURPOSE, and naming what is in it is the whole difference
-    // between a second button and a mystery. Every other failure leaves the
-    // panel on the reuse state, which is already the honest report.
     if (e instanceof WorktreeNotSafe) {
-      resetRefused.value = e.safety?.reason ?? "uncommitted or unpushed work";
+      // The worktree is still there ON PURPOSE, and naming what is in it is the
+      // whole difference between a second button and a mystery.
+      discardRefused.value = e.safety?.reason ?? "uncommitted or unpushed work";
+    } else {
+      // Not a refusal, so no second button: it would only fail the same way.
+      discardRefused.value = null;
+      discardError.value = e instanceof Error ? e.message : String(e);
     }
   } finally {
-    resetting.value = false;
+    discarding.value = false;
   }
 }
 
@@ -630,24 +647,33 @@ function jumpToThread(): void {
         </div>
         <p v-if="worktreeExists" class="wt-reuse">
           A worktree already exists here — it'll be <strong>reused</strong> (its branch and any changes kept).
-          <button class="wt-reset" :disabled="resetting" @click="resetWorktree(false)">
-            {{ resetting ? "Resetting…" : "Reset" }}
+          <button
+            class="wt-discard"
+            :disabled="discarding"
+            title="Remove this checkout so the next spawn starts the branch fresh. Asks first if it holds uncommitted or unpushed work. The branch stays."
+            @click="discardWorktree(false)"
+          >
+            {{ discarding ? "Discarding…" : "Discard" }}
           </button>
         </p>
         <!-- The daemon refused, and said why (DRY-90). Shown rather than
-             swallowed because Reset now KEEPS work by default: without this the
+             swallowed because Discard KEEPS work by default: without this the
              button would appear to do nothing at all. The second press is the
              `--force` this route used to apply to every press. -->
-        <p v-if="resetRefused" class="wt-refused">
-          Kept — it has <strong>{{ resetRefused }}</strong>.
+        <p v-if="discardRefused" class="wt-refused">
+          Kept — it has <strong>{{ discardRefused }}</strong>.
           <button
-            class="wt-reset"
-            :disabled="resetting"
-            :title="`Discard ${resetRefused} in ${worktreePath}. The branch stays.`"
-            @click="resetWorktree(true)"
+            class="wt-discard"
+            :disabled="discarding"
+            :title="`Remove ${worktreePath} anyway. Uncommitted and untracked files in it are deleted for good; the branch, and any commits on it, stay.`"
+            @click="discardWorktree(true)"
           >
-            {{ resetting ? "Discarding…" : "Reset anyway" }}
+            {{ discarding ? "Discarding…" : "Discard anyway" }}
           </button>
+        </p>
+        <!-- Anything else that stopped it (DRY-89). Not a refusal, so no button. -->
+        <p v-if="discardError" class="wt-discard-error" role="alert">
+          Couldn't discard the worktree: {{ discardError }}
         </p>
       </template>
       <p v-else-if="isGit" class="wt-warn">
@@ -1078,6 +1104,20 @@ function jumpToThread(): void {
 .wt-refused strong {
   color: #edc178;
 }
+/* Red where .wt-refused is amber: this one IS a failure (DRY-89), the other a
+   deliberate keep. Same palette the toasts and login use for "it went wrong". */
+.wt-discard-error {
+  margin: 6px 0 0;
+  padding: 6px 9px;
+  border-radius: 7px;
+  background: #2a1416;
+  border: 1px solid #5c2b2b;
+  color: #f0c9c4;
+  font-size: 10.5px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .wt-reuse {
   display: flex;
   align-items: center;
@@ -1090,7 +1130,7 @@ function jumpToThread(): void {
 .wt-reuse strong {
   color: #9fd2b8;
 }
-.wt-reset {
+.wt-discard {
   flex: 0 0 auto;
   margin-left: auto;
   background: #1b2531;
@@ -1101,7 +1141,7 @@ function jumpToThread(): void {
   padding: 3px 9px;
   cursor: pointer;
 }
-.wt-reset:disabled {
+.wt-discard:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }

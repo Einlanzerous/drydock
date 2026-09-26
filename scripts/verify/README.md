@@ -1419,16 +1419,26 @@ What it holds down:
   time somebody spawns that ticket. Proved by re-adding it.
 - **The dependency gets its own pair.** `POST /api/worktrees/remove` on a dirty
   worktree must 409 with the safety report and leave it there; the same request
-  with `force: true` must still discard it. Reset is a human pressing a button
-  and has to keep working — what it must not do is what it did until DRY-90,
-  which is delete uncommitted work without mentioning it.
+  with `force: true` must still discard it. Discard (called Reset until DRY-89)
+  is a human pressing a button and has to keep working — what it must not do is
+  what it did until DRY-90, which is delete uncommitted work without mentioning
+  it. DRY-89 added three more claims to that section: the refusal COUNTS what it
+  found (`2 uncommitted changes (1 modified, 1 untracked)` — the dirty fixture
+  has one of each on purpose, so a count that lumps them fails); a CLEAN
+  worktree goes without a force (the inverse, since a route that refuses
+  everything passes all of the above); and a locked worktree fails 500 in git's
+  own sentence, not `Error: Command failed: git worktree remove <path>` with the
+  reason buried under it.
 
 Discrimination (see [the section below](#making-sure-a-harness-still-discriminates)),
 and this one needs more than one mutation, because the predicate is enforced in
 two places and the liveness/finished rules are a third:
 
-- `removeWorktree` back to an unconditional `--force`: **3 of 31** fail, all in
-  the `/api/worktrees/remove` section. The reaper's own cases survive, correctly
+- `removeWorktree` back to an unconditional `--force`: **4 of 35** fail (3 of 31
+  before DRY-89 added the counts check), all in the `/api/worktrees/remove`
+  section. One of them is a cascade worth knowing about: `force: true still
+  discards it` reports 500, because the unforced call before it already removed
+  the worktree. The reaper's own cases survive, correctly
   — `consider` refuses before the primitive is reached.
 - `WorktreeReaper.consider` with its safety check deleted (and the primitive
   forced, or the belt underneath hides it): **12 of 31**, including `the sweep
@@ -1438,6 +1448,11 @@ two places and the liveness/finished rules are a third:
   liveness, `merged` short-circuiting the tracker, and a detached HEAD measured
   rather than refused: **6 of 31**, a pair per behaviour. Worth running as one
   mutation, since the failing names map straight onto them.
+- The **12 of 31** and **6 of 31** above were taken before DRY-89 added four
+  checks (35 now). None of the four touches `consider` or the liveness rules, so
+  the fail counts should stand, but they were not re-taken.
+- DRY-89's own: the pre-DRY-89 `worktree.ts` + `server.ts` fail **2 of 35** —
+  `…and it counts what would be lost` and `…in git's own words`, one each.
 
 
 ### …and which gesture may trigger it
@@ -1453,15 +1468,27 @@ whoever sent it:
   against the very worktree B just proved reapable (same ticket, same branch,
   same predicate), so the only variable is who closed the window. Aim this at a
   worktree the policy would refuse anyway and it passes against the bug.
-- **A**: the panel's Reset refuses a dirty worktree, says what is in it, and
-  discards it on the second press.
+- **A**: the panel's Discard refuses a dirty worktree, says what is in it
+  (counted, modified apart from untracked), and discards it on the second press
+  (`Discard anyway`). A clean worktree goes on the FIRST press and never shows
+  the second button. And a failure that is not a refusal — a locked worktree,
+  which the safety predicate passes and git then declines — shows a red
+  `.wt-discard-error` in the panel with no override button, because forcing past
+  something git didn't refuse over would only fail again. That used to leave the
+  panel on the reuse state with nothing said.
 
 `DRYDOCK_WORKTREE_REAP_MS=0` in that rig is not laziness — the scheduled reaper
 has to be OFF or it removes C's worktree on its own and the sweep gets the
 blame. Discrimination: move the `reapClosedWorktree` call out of `closeWindow`
 and into `endWindow` (the shared path — exactly the mistake the ticket warns
-about) and it fails **2 of 17**: `the worktree is STILL THERE` and `nothing
-claimed otherwise`. Those two are the whole point of the file.
+about) and it fails **2 of 17** (of 28 now — DRY-89 added eleven to section
+A): `the worktree is STILL THERE` and `nothing claimed otherwise`. Those two
+are the whole point of the file. Swallowing the non-refusal error in
+`discardWorktree` again (the `else` branch) fails **1 of 28**: `a failure that
+isn't a refusal is reported`. DRY-89's section A uses DRY-5 twice — the discard
+keeps its BRANCH, so the locked case re-adds the worktree on it — because DRY-5
+and DRY-4 are the only loose open tickets in the stub; DRY-2 is open but has no
+sidebar row until the DRY-1 epic is expanded.
 
 ## A session's first output (DRY-79)
 

@@ -1161,7 +1161,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // Prune a worktree on demand (DRY-15 cleanup policy). Worktrees are kept on
-    // session close; this is the explicit removal path — e.g. the panel's "Reset"
+    // session close; this is the explicit removal path — e.g. the panel's "Discard"
     // when reusing a stale worktree. The branch is left for the human to merge.
     //
     // Refuses by default since DRY-90: `removeWorktree` used to pass `--force`
@@ -1188,7 +1188,13 @@ const server = http.createServer(async (req, res) => {
         if (err instanceof WorktreeNotSafe) {
           return send(res, 409, { error: err.message, safety: err.safety });
         }
-        return send(res, 500, { error: `worktree remove: ${String(err)}` });
+        // git's own sentence ("cannot remove a locked working tree…") is the
+        // useful part; `String(err)` buries it under "Command failed: git
+        // worktree remove <path>", and the panel now shows this verbatim
+        // (DRY-89) instead of leaving the button looking inert.
+        const stderr = (err as { stderr?: unknown }).stderr;
+        const detail = typeof stderr === "string" && stderr.trim() ? stderr.trim() : String(err);
+        return send(res, 500, { error: `worktree remove: ${detail}` });
       }
     }
 

@@ -9,9 +9,12 @@
 //      branch, the same predicate — so the only difference between the two
 //      sections is who closed the window. Point it at a worktree the policy
 //      would refuse anyway and this check passes against the bug.
-//   A. The panel's Reset refuses a dirty worktree, says what is in it, and
-//      discards it on the second press. It passed `--force` unconditionally
-//      until this ticket, so there was no refusal to render.
+//   A. The panel's Discard (called Reset until DRY-89) refuses a dirty
+//      worktree, says what is in it — counted, modified apart from untracked —
+//      and discards it on the second press. It passed `--force` unconditionally
+//      until DRY-90, so there was no refusal to render. A clean worktree goes on
+//      the first press, and a failure that ISN'T a refusal (a locked worktree)
+//      is reported in the panel rather than leaving the button looking inert.
 //
 // C is the one this file exists for. The sweep runs with nobody present and
 // takes a pile of windows at once; a deletion hanging off it is the failure
@@ -185,28 +188,74 @@ check("the worktree is STILL THERE", fs.existsSync(WT("demo-DRY-3")), WT("demo-D
 const sweptNote = await page.locator(TOAST.note).count();
 check("and nothing claimed otherwise", sweptNote === 0, `${sweptNote} note banner(s)`);
 
-// --- A: Reset refuses, then discards on demand -------------------------------
-console.log("\nA. the panel's Reset");
+// --- A: Discard refuses, then discards on demand -----------------------------
+console.log("\nA. the panel's Discard");
 // DRY-5, not DRY-3: the sidebar's pull is `open=true`, so a CLOSED ticket has
 // no row to click. (DRY-3 is closed in the stub, which is what made it the
-// right ticket for B and C and the wrong one here.)
+// right ticket for B and C and the wrong one here.) DRY-2 is open too, but it
+// sits under the DRY-1 epic and has no row until that is expanded, so the two
+// loose ones — DRY-5 and DRY-4 — are all this section has, and the failing case
+// below reuses DRY-5.
 const aPath = addWorktree(fixture, "demo-DRY-5", "agent/DRY-5");
 fs.writeFileSync(`${aPath}/README.md`, "# demo\nunsaved work\n");
+// Two kinds of loss, so the count has something to tell apart (DRY-89).
+fs.writeFileSync(`${aPath}/notes.md`, "scratch\n");
 await page.locator(".grp").first().click().catch(() => {});
 await page.waitForTimeout(400);
 await page.locator(".row", { hasText: "DRY-5" }).first().click();
 await page.waitForSelector(".panel", { timeout: 5000 });
 await page.waitForTimeout(1000);
 const reuse = await page.locator(".wt-reuse").count();
-check("the panel offers Reset for an existing worktree", reuse === 1, `${reuse}`);
-await page.locator(".wt-reuse .wt-reset").click();
+check("the panel offers Discard for an existing worktree", reuse === 1, `${reuse}`);
+const firstLabel = (await page.locator(".wt-reuse .wt-discard").textContent())?.trim();
+check("…and calls it what it does", firstLabel === "Discard", firstLabel);
+await page.locator(".wt-reuse .wt-discard").click();
 await page.waitForTimeout(1500);
 const refused = await page.locator(".wt-refused").first().textContent().catch(() => null);
-check("Reset is refused, and says what it found", !!refused && /uncommitted/.test(refused), (refused ?? "(nothing)").trim());
+check("Discard is refused, and says what it found", !!refused && /uncommitted/.test(refused), (refused ?? "(nothing)").trim());
+check(
+  "…counting what would be lost, modified apart from untracked",
+  !!refused && /1 modified/.test(refused) && /1 untracked/.test(refused),
+  (refused ?? "(nothing)").trim(),
+);
 check("…and the worktree is untouched", fs.existsSync(aPath), aPath);
-await page.locator(".wt-refused .wt-reset").click();
+check("…with no failure banner, because this is a refusal", (await page.locator(".wt-discard-error").count()) === 0);
+const secondLabel = (await page.locator(".wt-refused .wt-discard").textContent())?.trim();
+check("the second press is labelled as the override", secondLabel === "Discard anyway", secondLabel);
+await page.locator(".wt-refused .wt-discard").click();
 await page.waitForTimeout(2000);
-check("Reset anyway discards it", !fs.existsSync(aPath), aPath);
+check("Discard anyway discards it", !fs.existsSync(aPath), aPath);
+
+// A clean worktree costs nothing to remove, so it goes on the first press and
+// never shows the second button. Without this the refusal above passes against
+// a panel that asks about EVERYTHING.
+const cleanPath = addWorktree(fixture, "demo-DRY-4", "agent/DRY-4");
+await page.locator(".row", { hasText: "DRY-4" }).first().click();
+await page.waitForTimeout(1000);
+check("the panel offers Discard for the clean one", (await page.locator(".wt-reuse").count()) === 1);
+await page.locator(".wt-reuse .wt-discard").click();
+await page.waitForTimeout(1500);
+check("a clean worktree goes on one press", !fs.existsSync(cleanPath), cleanPath);
+check("…without asking", (await page.locator(".wt-refused").count()) === 0);
+
+// A failure that is not a refusal (DRY-89). The worktree is clean and merged,
+// so the safety predicate says yes — and git then declines, because it is
+// locked. That used to leave the panel on the reuse state with nothing said.
+// DRY-5 again: the discard above kept its BRANCH, so the worktree comes back on
+// the existing one rather than through `addWorktree`, which would create it.
+const lockedPath = WT("demo-DRY-5");
+git(fixture.repo, "worktree", "add", lockedPath, "agent/DRY-5");
+git(fixture.repo, "worktree", "lock", "--reason", "harness", lockedPath);
+await page.locator(".row", { hasText: "DRY-5" }).first().click();
+await page.waitForTimeout(1000);
+check("the panel offers Discard for the locked one", (await page.locator(".wt-reuse").count()) === 1);
+await page.locator(".wt-reuse .wt-discard").click();
+await page.waitForTimeout(1500);
+const failure = await page.locator(".wt-discard-error").first().textContent().catch(() => null);
+check("a failure that isn't a refusal is reported", !!failure && /locked/.test(failure), (failure ?? "(nothing)").trim());
+check("…offering no override, which would only fail again", (await page.locator(".wt-refused").count()) === 0);
+check("…and the worktree is still there", fs.existsSync(lockedPath), lockedPath);
+git(fixture.repo, "worktree", "unlock", lockedPath);
 
 await page.screenshot({ path: "/tmp/dry90-ui.png" });
 await browser.close();

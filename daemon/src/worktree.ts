@@ -254,7 +254,15 @@ export function worktreeSafety(wtPath: string): WorktreeSafety {
     return { ...unknown, reason: "git can't read it" };
   }
   const clean = status === "";
-  const dirtyCount = status === "" ? 0 : status.split("\n").length;
+  // `git()` trims, which eats the leading space of a first ` M file` line — so
+  // read the untracked marker (`??`), which trimming can't touch, and call
+  // everything else modified. Entries, not files: git collapses a wholly
+  // untracked directory to one `?? dir/` line, and reading it file by file
+  // (`-uall`) would put a huge un-ignored tree through `git()`'s 1 MiB buffer,
+  // where a failure reads as "git can't read it" (DRY-89).
+  const lines = clean ? [] : status.split("\n");
+  const untrackedCount = lines.filter((line) => line.startsWith("??")).length;
+  const modifiedCount = lines.length - untrackedCount;
 
   // A DETACHED HEAD is refused outright rather than measured. Everything below
   // reasons about HEAD, but what a removal promises to keep is the BRANCH — and
@@ -291,7 +299,20 @@ export function worktreeSafety(wtPath: string): WorktreeSafety {
   if (safe) return { ...found, safe };
 
   const why: string[] = [];
-  if (!clean) why.push(`${dirtyCount} uncommitted change${dirtyCount === 1 ? "" : "s"}`);
+  if (!clean) {
+    // Names what a forced removal would destroy, not just how much (DRY-89): the
+    // person deciding whether to discard reads this sentence, and "3 uncommitted
+    // changes" doesn't say whether that is three edits or three new files that
+    // exist nowhere else. It keeps the words the reaper's log and the harnesses
+    // already match on.
+    const split = [
+      modifiedCount > 0 ? `${modifiedCount} modified` : "",
+      untrackedCount > 0 ? `${untrackedCount} untracked` : "",
+    ].filter(Boolean);
+    why.push(
+      `${lines.length} uncommitted change${lines.length === 1 ? "" : "s"} (${split.join(", ")})`,
+    );
+  }
   if (!merged && unpushed > 0) why.push(`${unpushed} unpushed commit${unpushed === 1 ? "" : "s"}`);
   if (!merged && unpushed === -1) {
     why.push(
