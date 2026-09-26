@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.9.1](https://github.com/Einlanzerous/drydock/compare/v1.9.0...v1.9.1) (2026-09-26)
+
+
+### Bug Fixes
+
+* a reloaded desk comes back as it was left (DRY-101) ([#88](https://github.com/Einlanzerous/drydock/issues/88)) ([5d94b2c](https://github.com/Einlanzerous/drydock/commit/5d94b2ce910fc86a540248555ad6dd9fa8b4c92c))
+* **shell:** worktree Discard counts what it would lose and reports failures (DRY-89) ([#87](https://github.com/Einlanzerous/drydock/issues/87)) ([3006921](https://github.com/Einlanzerous/drydock/commit/3006921db6b546835856c7ea8a1b29aae0bf2157))
+
 ## [1.9.0](https://github.com/Einlanzerous/drydock/compare/v1.8.0...v1.9.0) (2026-09-23)
 
 
