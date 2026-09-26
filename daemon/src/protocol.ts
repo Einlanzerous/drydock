@@ -39,7 +39,25 @@ export type ClientMessage =
 
 /** Daemon -> Client, over a per-session WebSocket. */
 export type ServerMessage =
-  | { type: "replay"; data: string } // one-shot scrollback dump on attach
+  | {
+      type: "replay"; // one-shot scrollback dump on attach
+      data: string;
+      /**
+       * The PTY's size when this was sent (DRY-101) — the width the tail of `data`
+       * was DRAWN at, which is not the width of the pane about to receive it.
+       *
+       * The bytes are cursor movements as much as text: a prompt that redraws
+       * itself with "up two lines, clear, rewrite" means those numbers for the
+       * width it ran at, and written into a terminal of a different width it
+       * lands on the wrong rows — stacked prompts, split lines, a truncated
+       * right-hand segment. So a pane replays at THIS size and only then fits
+       * itself, which is what resizing a live terminal is and what an app already
+       * knows how to answer (SIGWINCH). Optional because a daemon older than this
+       * doesn't send it, and the pane then does what it always did.
+       */
+      cols?: number;
+      rows?: number;
+    }
   | { type: "data"; data: string } // live PTY output
   | { type: "status"; status: SessionStatus; exitCode?: number }
   | { type: "idle"; idle: boolean } // agent yielded its turn (Stop hook) / resumed
@@ -242,6 +260,22 @@ export interface SessionInfo {
   worktree?: string;
   /** Branch checked out in that worktree (e.g. `agent/DRY-15`). */
   branch?: string;
+  /**
+   * The agent session this one is the co-located zsh of (DRY-101).
+   *
+   * A workspace (DRY-21) is one window over TWO sessions, and until this field
+   * the only record of which zsh belonged to which agent was the window entry in
+   * the saved desk — the DESK's memory, not the daemon's. Any client that lost
+   * that entry (a second tab writing its own view back, a wiped mirror) then saw
+   * a shell PTY with no window and gave it one, so a reload came back with every
+   * workspace as two. Recorded at spawn instead, on the session, where it
+   * survives a daemon restart with the rest of the index and cannot be
+   * overwritten by whichever browser saved last.
+   *
+   * Set only on the shell. A client reads the pairing off the list: a shell
+   * whose `companionOf` is listed belongs to that agent's window and gets none.
+   */
+  companionOf?: string;
   status: SessionStatus;
   exitCode: number | null;
   /** Agent has yielded its turn and is waiting on the user (Stop hook). */

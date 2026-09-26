@@ -1,0 +1,21 @@
+-- DRY-101: somebody asked for this session to go away, which is not how it ended.
+--
+-- `end_reason` says why the PROCESS stopped, and for a session that was killed
+-- while running it also happens to say somebody asked (`stopped`). It says
+-- nothing for the case that matters here: a session that had ALREADY ended —
+-- exited on its own, failed — whose window somebody then closed. Its row still
+-- reads `finished` or `failed`, which is exactly what a session that died with
+-- nobody looking reads too, so a second browser holding the same window could
+-- not tell "closed on purpose" from "died while you were away" and drew the
+-- Resume card (DRY-56) for both. It then wrote that window back into the shared
+-- desk, and the next reload brought back a window that had been closed for days.
+--
+-- A column of its own rather than rewriting `end_reason` to `stopped`: a failed
+-- run somebody acknowledged is still a failed run, and the row is the only place
+-- that says so once the window is gone.
+--
+-- Nullable, with no backfill. A row from before this migration that was closed
+-- deliberately and had been running says so through `end_reason` already; one
+-- that had already ended cannot be told apart from one nobody closed, and
+-- guessing would delete a Resume card somebody may still want.
+alter table pty_sessions add column if not exists dismissed_at timestamptz;

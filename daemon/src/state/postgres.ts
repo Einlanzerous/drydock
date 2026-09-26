@@ -528,11 +528,27 @@ export class PostgresStore implements StateStore {
       });
     },
 
+    dismiss: async (owner, id) => {
+      await this.guard(async () => {
+        // `dismissed_at is null` keeps the FIRST stamp: the sweep and the ✕ race
+        // each other by design (DRY-60), and a second ask must not move the time
+        // the first one was made. Owner-scoped like every write here, so a caller
+        // can only ever mark rows on its own desk — which is what lets the route
+        // call this for an id the daemon no longer lists.
+        await this.pool.query(
+          `update pty_sessions set dismissed_at = now()
+            where id::text = $1 and owner_id = $2 and dismissed_at is null`,
+          [id, owner],
+        );
+      });
+    },
+
     recent: async (owner, limit) => {
       return this.guard(async () => {
         const { rows } = await this.pool.query<PtySessionRow>(
           `select id, command, args, cwd, repo, ticket, worktree, branch, title,
-                  agent_session_id, created_at, last_active_at, ended_at, exit_code, end_reason
+                  agent_session_id, created_at, last_active_at, ended_at, exit_code, end_reason,
+                  dismissed_at
              from pty_sessions
             where owner_id = $1
          -- By when it last MATTERED, not when it started. Ordering by
@@ -716,6 +732,7 @@ interface PtySessionRow {
   ended_at: Date | null;
   exit_code: number | null;
   end_reason: string | null;
+  dismissed_at: Date | null;
 }
 
 function toRecord(row: PtySessionRow): SessionRecord {
@@ -735,5 +752,6 @@ function toRecord(row: PtySessionRow): SessionRecord {
     endedAt: row.ended_at?.getTime(),
     exitCode: row.exit_code ?? undefined,
     endReason: (row.end_reason as SessionRecord["endReason"]) ?? undefined,
+    dismissedAt: row.dismissed_at?.getTime(),
   };
 }

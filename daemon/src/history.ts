@@ -156,6 +156,23 @@ export class SessionHistoryRecorder {
     );
   }
 
+  /**
+   * Somebody asked for this session to be cleared away (DRY-101).
+   *
+   * By id and owner rather than by session, because the caller is `/kill` and it
+   * is idempotent by design: it answers 200 for a session the registry no longer
+   * has, and that is precisely the case a dismissed TOMBSTONE arrives as — the
+   * PTY is long gone and the only thing left to mark is the history row.
+   *
+   * Fire-and-forget like every write here. A dismissal that fails to record
+   * costs a second browser one stale Resume card; failing the kill over it would
+   * cost somebody a window that will not close.
+   */
+  dismissed(owner: string, id: string): void {
+    if (!this.history) return;
+    this.fire("record a dismissal", id, this.history.dismiss(owner, id));
+  }
+
   /** One account's recent sessions — the viewer's, never the daemon's. */
   recent(owner: string, limit: number) {
     return this.history?.recent(owner, limit);

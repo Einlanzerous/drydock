@@ -193,6 +193,17 @@ export interface SessionMeta {
   repo?: string;
   worktree?: string;
   branch?: string;
+  /**
+   * The agent this session is the co-located zsh of, when it is one (DRY-101).
+   *
+   * Optional, and NOT a reason to bump PROTOCOL_VERSION, for the reason `owner`
+   * below gives: an absent value has exactly one honest reading ("not a
+   * workspace's shell"), which is what every session spawned before this field
+   * was. A supervisor never reads it — it is in the index because that is the
+   * only record that outlives a daemon restart, and "which agent does this zsh
+   * belong to" has to.
+   */
+  companionOf?: string;
   autonomous: boolean;
   origin: RunOrigin;
   permissionMode: PermissionMode;

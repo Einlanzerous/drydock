@@ -225,8 +225,26 @@ function sendWs(msg: ClientMessage) {
   if (sock && sock.readyState === WebSocket.OPEN) sock.send(JSON.stringify(msg));
 }
 
+/**
+ * Replays being parsed, which is when this terminal must NOT be fitted (DRY-101).
+ *
+ * A replay is written at the size it was recorded at, and `write` is
+ * asynchronous — the bytes are parsed on a later task. A fit in that gap (the
+ * mount-time frame callback, a ResizeObserver, a layout change moving the window)
+ * puts the terminal back at the pane's width BEFORE the bytes are parsed, and
+ * they are then drawn at the wrong width after all. Load-dependent, which is what
+ * made it look like noise: `desk-restore.mts`' render check failed in both full
+ * runs of it on the database tier and in none of the four it was run on its own.
+ * Counted rather than boolean so a second
+ * replay (a reconnect) arriving while the first is still queued cannot release
+ * the guard early.
+ */
+let replaying = 0;
+
 function doFit() {
-  if (props.hidden || !fit.value || !term.value) return;
+  // Not lost: the replay's own write callback fits once it has been parsed, at
+  // whatever size the pane has BY then.
+  if (props.hidden || replaying > 0 || !fit.value || !term.value) return;
   try {
     fit.value.fit();
     sendWs({ type: "resize", cols: term.value.cols, rows: term.value.rows });
@@ -326,7 +344,26 @@ function openSocket(url: string) {
         // what the terminal already shows prints the session's entire history a
         // second time.
         term.value?.reset();
-        term.value?.write(msg.data);
+        // At the size it was DRAWN at, then fit (DRY-101). The bytes carry
+        // cursor movements computed for the PTY's width; replayed into a pane of
+        // another width they land on the wrong rows, which is where a restored
+        // shell's stacked prompts and a restored agent's stray `● main` under
+        // its input box came from. `onopen` has already fitted this terminal to
+        // the pane and told the PTY, so without this the replay was always
+        // written at the NEW width.
+        if (Number.isInteger(msg.cols) && Number.isInteger(msg.rows) && msg.cols! > 0 && msg.rows! > 0) {
+          term.value?.resize(msg.cols!, msg.rows!);
+        }
+        // Fit in the write's own callback, not after it: `data` frames the
+        // PTY's redraw produced are already queued behind this one, and xterm
+        // runs the callback before the next queued write — so they land at the
+        // pane's width, which is the width the redraw was drawn for. `replaying`
+        // holds every OTHER fit off until then; see it.
+        replaying++;
+        term.value?.write(msg.data, () => {
+          replaying--;
+          doFit();
+        });
         break;
       case "data":
         term.value?.write(msg.data);

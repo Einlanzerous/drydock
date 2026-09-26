@@ -81,7 +81,9 @@ The traps:
    id because they are on different rows. Measure any change here against the
    LANE's rect, never the card's: `getClientRects()` is non-empty for an element
    an ancestor clips, so a card entirely off-screen looks fine from inside.
-6. **Whatever sweeps must remove the window CLIENT-SIDE.** Kill the session and
+6. **Whatever sweeps must remove the window CLIENT-SIDE.** (This is the same-tab half;
+   DRY-101 is the other-tab half — a second browser still holds the window, and used to
+   draw the card this paragraph is about.) Kill the session and
    let `reconcile` notice, and on a history tier every swept window comes back as
    a DRY-56 tombstone — the "third dismissal" — while on the file tier each one
    raises "a window that closes can't be resumed" for a removal that was

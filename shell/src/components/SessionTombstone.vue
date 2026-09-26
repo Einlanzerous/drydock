@@ -25,6 +25,10 @@ const emit = defineEmits<{
 /** Present tense where it's honest, past where it isn't. */
 const outcome = computed(() => {
   switch (props.record.endReason) {
+    // Not reachable from the desk since DRY-101: a stopped session is one
+    // somebody asked to close, and its window is dropped rather than drawn as a
+    // card (see `closedOnPurpose`). Kept so a record handed in some other way
+    // still reads truthfully instead of falling through to "ended".
     case "stopped":
       return "stopped by request";
     case "failed":

@@ -32,6 +32,7 @@ import { forgetLocalLayout } from "./composables/layoutStore.js";
 import {
   DAEMON_HTTP,
   canResumeConversation,
+  closedOnPurpose,
   createSession,
   fetchConfig,
   fetchSessionHistory,
@@ -498,10 +499,42 @@ function basename(p: string): string {
 // A workspace window (DRY-21) owns a second, "claimed" PTY — its bottom zsh
 // shell — that must never get its own standalone window. Collect those ids so
 // reconcile skips them (and cleans up any stray window that raced onto one).
+//
+// Two sources, and the second is the one that keeps a reload honest (DRY-101).
+// The window entries in the saved desk are one browser's memory of the pairing,
+// and the desk is shared: a second tab that had never heard of the workspace
+// saves its own view — the agent as a bare terminal, the zsh as a window — over
+// the entry that knew, and the next reload restores two windows for one
+// workspace. The daemon recorded the pairing at spawn (`companionOf`), where no
+// browser's save can reach it.
 function claimedShellIds(): Set<string> {
-  const s = new Set<string>();
+  const s = new Set<string>(workspacePairs().values());
   for (const w of wm.windows) if (w.kind === "workspace" && w.shellId) s.add(w.shellId);
   return s;
+}
+
+/**
+ * agent session id → the zsh the DAEMON says belongs to it (DRY-101).
+ *
+ * Read off the registry rather than the list it was built from, so it answers the
+ * same for `reconcile` and for the sweep that runs after it. A shell counts only
+ * while its agent is still listed: with the agent gone there is no window for it
+ * to live in, and hiding a live PTY behind a window that cannot exist is the
+ * orphan DRY-51 spent a review getting rid of. It falls back to being an
+ * ordinary shell, which is the honest answer and the only one a person can
+ * still reach.
+ *
+ * First shell wins, so two claiming one agent cannot both vanish into a window
+ * that has a single lower pane.
+ */
+function workspacePairs(): Map<string, string> {
+  const pairs = new Map<string, string>();
+  for (const c of Object.values(sessionsById)) {
+    if (c.companionOf && sessionsById[c.companionOf] && !pairs.has(c.companionOf)) {
+      pairs.set(c.companionOf, c.id);
+    }
+  }
+  return pairs;
 }
 
 /**
@@ -555,6 +588,7 @@ function forgetWindow(id: string) {
   if (w?.kind === "workspace" && w.shellId) delete live[w.shellId];
   wm.remove(id);
   delete tombstones[id];
+  closedIds.delete(id);
   awaitingHistory.delete(id);
   delete ticketById[id];
   delete live[id];
@@ -568,6 +602,24 @@ function dropWindow(id: string) {
   const w = wm.windows.find((x) => x.id === id);
   if (w?.kind === "workspace" && w.shellId) killSession(w.shellId).catch(() => {});
   forgetWindow(id);
+}
+
+/**
+ * A tombstone's Dismiss (DRY-101): put the card away here, and SAY so.
+ *
+ * `dropWindow` alone removes the window from this desk and tells nobody, so any
+ * other browser holding the same window finds its session gone, draws the same
+ * card, and saves it back into the shared desk — from where this browser's next
+ * reload restores it. The kill is the daemon's only channel for "somebody
+ * asked", and it is safe to send for a session that no longer exists: the route
+ * answers 200 for one it has forgotten, and stamps the history row instead.
+ *
+ * Not awaited. The daemon may be slow or partitioned from its database (DRY-58),
+ * and a dismiss that waits on a store is a button that feels broken.
+ */
+function dismissTombstone(id: string): void {
+  killSession(id).catch(() => {});
+  dropWindow(id);
 }
 
 /**
@@ -877,9 +929,13 @@ function isForeign(s: SessionInfo): boolean {
 // --- session discovery / reconciliation ---
 function reconcile(list: SessionInfo[]) {
   const ids = new Set(list.map((s) => s.id));
-  const claimed = claimedShellIds();
   for (const k of Object.keys(sessionsById)) if (!ids.has(k)) delete sessionsById[k];
   for (const s of list) sessionsById[s.id] = s;
+  // AFTER the registry is current, not before: the daemon's pairing is read off
+  // it, and a shell listed for the first time this tick has to be claimed in the
+  // same pass that would otherwise give it a window (DRY-101).
+  const claimed = claimedShellIds();
+  const pairs = workspacePairs();
 
   for (const s of list) {
     // A workspace's shell PTY is rendered inside its workspace window, not as a
@@ -905,15 +961,38 @@ function reconcile(list: SessionInfo[]) {
     // already gone. The next poll would then drop it again: a window that
     // flickers back onto the desk on its way out.
     if (clearing.has(s.id)) continue;
-    if (!wm.windows.find((w) => w.id === s.id)) {
+    // The zsh the daemon paired with this agent, if any (DRY-101). Its window is
+    // this one's lower pane, so an agent with a pair is a workspace whatever this
+    // desk happens to remember.
+    const shellId = pairs.get(s.id);
+    // Prefer client-side spawn intent, but fall back to the daemon's record so a
+    // ticket badge survives a page reload / reattach.
+    const ticket = ticketById[s.id] ?? s.ticket;
+    const win = wm.windows.find((w) => w.id === s.id);
+    if (!win) {
       wm.add({
         id: s.id,
         type: s.command === "claude" ? "agent" : "bash",
         title: s.command === "claude" ? "claude-code" : s.command,
-        // Prefer client-side spawn intent, but fall back to the daemon's record
-        // so a ticket badge survives a page reload / reattach.
-        ticket: ticketById[s.id] ?? s.ticket,
+        ticket,
         repo: basename(s.cwd),
+        // Built whole. Adding a bare terminal here would hide the zsh (it is
+        // claimed above) behind a window with no pane to show it: a live PTY
+        // nobody can reach, which is worse than the duplicate this replaces.
+        // The numbers are `spawnWorkspace`'s, so a rebuilt workspace and a
+        // spawned one are the same window.
+        ...(shellId ? workspaceWindow(shellId, ticket) : {}),
+      });
+    } else if (shellId && (win.kind !== "workspace" || !win.shellId)) {
+      // Saved as a bare terminal by a browser that never knew about the zsh.
+      // Repaired in place — see promoteToWorkspace for why that is not
+      // `updateWin`, and why geometry is left alone.
+      wm.promoteToWorkspace(win.id, shellId, {
+        title: "workspace",
+        ...workspaceWindow(shellId, ticket),
+        // Keeps the window the size somebody left it: a repair is not a spawn.
+        w: win.w,
+        h: win.h,
       });
     }
   }
@@ -928,6 +1007,18 @@ function reconcile(list: SessionInfo[]) {
     // was deliberate. clearSession removes it a tick later.
     else if (clearing.has(w.id)) continue;
     else if (!ids.has(w.id)) {
+      // Its PTY is gone AND somebody asked for that (DRY-101): the window was
+      // closed, or the card was dismissed, on another tab. The closing tab never
+      // draws a card — it removes its window in the same tick as the kill — so a
+      // card here is the desk bringing back something that was already put away,
+      // and writing it into the shared blob for every other device to restore.
+      // No card, no notice: nothing was lost, it was cleared. Checked before the
+      // tombstone branch, which would otherwise take it.
+      if (closedIds.has(w.id)) {
+        awaitingHistory.delete(w.id);
+        dropWindow(w.id);
+        continue;
+      }
       // Its PTY is gone. On a tier that records sessions the window STAYS, as a
       // tombstone you can resume from (DRY-56) — before this it simply vanished
       // on the next poll, taking with it any record that the session had
@@ -939,6 +1030,15 @@ function reconcile(list: SessionInfo[]) {
       // alone would offer a resume that can't say where to resume.
       if (tombstones[w.id]) {
         awaitingHistory.delete(w.id);
+        // Keep asking while a card is on screen (DRY-101). This branch used to be
+        // the end of the conversation with the daemon: the card was drawn once
+        // and never checked again, so a Dismiss on another device — which is
+        // exactly how a card ends — never reached this one, and the stale copy
+        // sat here until a click wrote it back into the shared desk. NOT forced:
+        // the floor is what stops one card costing a database round trip per 3s
+        // poll (see refreshHistory), and a dismissal taking up to 15s to arrive
+        // is the price of that.
+        void refreshHistory();
         // A workspace's co-located zsh has no window of its own, and
         // `claimedShellIds()` keeps reconcile from ever giving it one. Turning
         // the window into a tombstone skips dropWindow — the only thing that
@@ -989,6 +1089,16 @@ function reconcile(list: SessionInfo[]) {
  * instead, so the answer is always the daemon's.
  */
 const tombstones = reactive<Record<string, SessionRecord>>({});
+/**
+ * Sessions the daemon's history says somebody asked to be rid of (DRY-101).
+ *
+ * The other half of `tombstones`: what a window whose session has gone is
+ * checked against first. A window found here is removed, never drawn as a card.
+ * Plain ids — nothing here needs the record, and merging rather than replacing
+ * for the same reason `tombstones` does (the page is capped; an entry that falls
+ * off it must not turn back into a card).
+ */
+const closedIds = new Set<string>();
 const resuming = ref<string | null>(null);
 /** Null until asked; false once we know this tier keeps no history. */
 const historyKept = ref<boolean | null>(null);
@@ -1058,7 +1168,13 @@ async function doRefreshHistory(): Promise<void> {
     // already hold can fall out of a later page and would otherwise be dropped
     // silently — taking its window with it, which is the loss this feature
     // exists to prevent. Entries are cleaned up when their window goes.
-    for (const r of records) if (r.endedAt) tombstones[r.id] = r;
+    for (const r of records) {
+      if (!r.endedAt) continue;
+      // Not a card (DRY-101) — see closedOnPurpose. Held apart from `tombstones`
+      // so a window whose session is gone can be told to go, rather than drawn.
+      if (closedOnPurpose(r)) closedIds.add(r.id);
+      else tombstones[r.id] = r;
+    }
   } catch (e) {
     // A store outage degrades the desk rather than blanking it: keep whatever
     // tombstones we already had and let the next poll try again. Same rule as
@@ -1292,6 +1408,27 @@ async function spawnFresh(kind: "claude" | "shell") {
   }
 }
 
+/**
+ * The workspace-shaped half of a window — one definition for the spawn and for a
+ * reconcile that has to rebuild one (DRY-101), so a workspace the desk restored
+ * is the window it would have spawned.
+ *
+ * DRY-36: a ticket-bound workspace opens in its most-agent state — drawer closed
+ * and shell collapsed, each one click away. A ticketless one (the palette's
+ * `workspace` row) keeps the shell visible; it exists to pair agent + zsh.
+ */
+function workspaceWindow(shellId: string, ticket?: string) {
+  return {
+    kind: "workspace" as const,
+    shellId,
+    drawerOpen: false,
+    shellCollapsed: !!ticket,
+    shellRatio: 0.2,
+    w: 760,
+    h: 620,
+  };
+}
+
 // Spawn a composite workspace (DRY-21): one managed window binding a ticket +
 // two PTYs — the agent (claude) and a co-located zsh shell sharing its cwd. The
 // window is registered *before* the next poll so reconcile claims the shell PTY
@@ -1334,25 +1471,22 @@ async function spawnWorkspace(
     // Co-locate the human's shell in the agent's *resolved* cwd — which is the
     // worktree when isolated — so both panes start in exactly the same directory.
     // It passes no ticket, so it just runs there and never makes a second worktree.
-    const shell = await createSession({ command: "shell", title: "shell", cwd: agent.cwd });
+    // `companionOf` is what lets any OTHER browser know this zsh has no window of
+    // its own (DRY-101) — the window below is only this desk's memory of it.
+    const shell = await createSession({
+      command: "shell",
+      title: "shell",
+      cwd: agent.cwd,
+      companionOf: agent.id,
+    });
     if (opts.ticket) ticketById[agent.id] = opts.ticket.key;
     wm.add({
       id: agent.id,
-      kind: "workspace",
       type: "agent",
       title: "workspace",
       ticket: opts.ticket?.key,
       repo: basename(agent.cwd),
-      shellId: shell.id,
-      // DRY-36: a ticket spawn opens in its most-agent state — drawer closed
-      // and shell collapsed, each one click away. A ticketless one (the
-      // palette's `workspace` row) keeps the shell visible; it exists to pair
-      // agent + zsh.
-      drawerOpen: false,
-      shellCollapsed: !!opts.ticket,
-      shellRatio: 0.2,
-      w: 760,
-      h: 620,
+      ...workspaceWindow(shell.id, opts.ticket?.key),
     });
     await refresh();
     focusWindow(agent.id);
@@ -2097,7 +2231,7 @@ onBeforeUnmount(stopDesk);
             :record="tombstones[w.id]"
             :busy="resuming === w.id"
             @resume="resumeSession"
-            @dismiss="dropWindow"
+            @dismiss="dismissTombstone"
           />
         </WindowFrame>
 

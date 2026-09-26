@@ -200,6 +200,27 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
     arranged = true;
   }
 
+  /**
+   * Turn a plain window into the workspace it should have been (DRY-101).
+   *
+   * For a desk that has lost the pairing — a window saved as a bare terminal by a
+   * browser that never knew the agent had a zsh — while the daemon still says
+   * which shell belongs to it. Only the workspace fields change: the window keeps
+   * its slot, its geometry and its z, because this is a repair and not a spawn,
+   * and a repair that moved things would be the desk rearranging itself under
+   * somebody.
+   *
+   * Deliberately NOT `updateWin`, which latches `arranged` — the flag that says a
+   * human shaped this desk. Nobody did this; a reconcile pass noticed a fact.
+   * Latching it would make the next outage heal treat this client's desk as an
+   * arrangement worth keeping over the daemon's copy (DRY-58, DRY-93).
+   */
+  function promoteToWorkspace(id: string, shellId: string, patch: Partial<Win> = {}): void {
+    const w = windows.find((x) => x.id === id);
+    if (!w) return;
+    Object.assign(w, patch, { kind: "workspace", shellId });
+  }
+
   function remove(id: string) {
     const i = windows.findIndex((w) => w.id === id);
     if (i >= 0) windows.splice(i, 1);
@@ -419,6 +440,7 @@ export function useWindowManager(opts: { persistKey?: string } = {}) {
     hydrate,
     add,
     updateWin,
+    promoteToWorkspace,
     remove,
     replaceId,
     bringFront,

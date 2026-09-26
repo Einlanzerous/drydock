@@ -12,8 +12,9 @@
 // the click sends. `curl /api/sessions/history` shows the flag either way.
 //
 // The rig is in this directory's README. Two things it deliberately does NOT
-// need: no SQL (the agent session id is planted through the daemon's own
-// SessionStart hook, exactly as a real agent reports it), and no API tokens
+// need: SQL for the AGENT ID (planted through the daemon's own SessionStart
+// hook, exactly as a real agent reports it — the one statement it does run is
+// about how the session ENDED, see `diedOnItsOwn`), and no API tokens
 // (the spawned `claude` is never prompted — it sits at its composer and is
 // killed). What it does need is a database tier, since tombstones are drawn
 // from history and only Postgres retains it.
@@ -22,6 +23,7 @@
 // to be the same value the daemon was started with:
 //   (cd daemon && CLAUDE_CONFIG_DIR=/tmp/dry62-claude \
 //      node --import tsx ../scripts/verify/tombstone.mts)
+import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { chromium, type Page } from "playwright";
@@ -32,6 +34,9 @@ const SHELL = process.env.DRY62_SHELL ?? "http://127.0.0.1:5392";
 // Must match the CLAUDE_CONFIG_DIR the daemon was started with; the daemon
 // resolves transcripts from its own environment (see daemon/src/transcripts.ts).
 const CONFIG_DIR = process.env.CLAUDE_CONFIG_DIR ?? "/tmp/dry62-claude";
+// The throwaway Postgres from the README's rig. Reached with `docker exec psql`
+// exactly once, by `diedOnItsOwn` below.
+const DB = process.env.DRY62_DB ?? "dry62-db";
 
 const AGENT_ID = "00000000-dead-4000-8000-00000000d62a";
 const TRANSCRIPT = path.join(CONFIG_DIR, "projects", "-dry62-probe", `${AGENT_ID}.jsonl`);
@@ -55,6 +60,35 @@ const api = async <T,>(p: string, init?: RequestInit): Promise<T> => {
   return (res.status === 204 ? null : await res.json().catch(() => null)) as T;
 };
 
+/**
+ * Make a history row read as a session that died with nobody asking (DRY-101).
+ *
+ * `/kill` used to be enough to produce a card. It no longer is, on purpose: a
+ * kill is somebody asking for the session to go, the daemon records that, and a
+ * window for it is dropped rather than drawn as a Resume card — drawing one is
+ * how a window closed on one device came back from another. What a card is FOR is
+ * a session that ended on its own and was then forgotten, which nothing over HTTP
+ * can produce without restarting the daemon, so the row is put into that state
+ * directly. `dismissed_at` may not exist on the tree this is aimed at (a pre-fix
+ * daemon has never heard of it), and there is nothing to clear there.
+ */
+function diedOnItsOwn(id: string): void {
+  const statements = [
+    `update pty_sessions set end_reason = 'failed', exit_code = 3 where id = '${id}'`,
+    `update pty_sessions set dismissed_at = null where id = '${id}'`,
+  ];
+  for (const statement of statements) {
+    try {
+      execFileSync("docker", ["exec", DB, "psql", "-U", "drydock", "-d", "drydock", "-c", statement], {
+        stdio: "pipe",
+      });
+    } catch (err) {
+      const text = String((err as { stderr?: Buffer }).stderr ?? err);
+      if (!/dismissed_at/.test(text)) throw err;
+    }
+  }
+}
+
 /** A dead `claude` session in history, carrying an agent id we chose. */
 async function deadSessionWithAgentId(): Promise<string> {
   const spawned = await api<SpawnResponse>("/api/sessions", {
@@ -73,6 +107,9 @@ async function deadSessionWithAgentId(): Promise<string> {
     body: JSON.stringify({ session_id: AGENT_ID }),
   });
   await api(`/api/sessions/${id}/kill`, { method: "POST" });
+  // Killed only to get it out of the registry; see `diedOnItsOwn` for why the
+  // kill alone no longer leaves anything to draw a card from.
+  diedOnItsOwn(id);
   return id;
 }
 

@@ -98,6 +98,15 @@ Three groups:
   when touching `spawnFresh` / `spawnWorkspace` / `watchRun` in `App.vue`,
   `setLayout` / `add` / `computeRects` in `useWindowManager.ts`, or anything
   else that decides what a new window does to the desk that is already there.
+- **Reloading the desk (DRY-101)** —
+  [its own section](#reloading-the-desk-dry-101). Two browsers standing in for two
+  devices, a throwaway daemon and the DRY-88 stub CLI; about ten minutes a tier, and
+  **run it on both** — only the database tier can fail its first three sections. Run
+  it when touching `reconcile` / `workspacePairs` / `claimedShellIds` /
+  `doRefreshHistory` / `dismissTombstone` in `App.vue`, `closedOnPurpose`,
+  `promoteToWorkspace`, the `/kill` route, `SessionHistoryRecorder.dismissed`,
+  `companionOf` anywhere, or the replay path in `TerminalPane.vue` /
+  `PtySession.attach`.
 - **The tombstone's resume button (DRY-62)** —
   [its own section](#the-tombstones-resume-button-dry-62). A browser and a
   throwaway Postgres, about a minute. Run it when touching
@@ -767,9 +776,14 @@ those are computed in two different files (`SessionTombstone.vue` and
 `App.vue`), which is why they now call one shared predicate and why the harness
 checks the label and the spawn separately rather than trusting either.
 
-No SQL and no API tokens, both on purpose: the agent session id is planted
-through the daemon's own SessionStart hook exactly as an agent reports it, and
-the `claude` it spawns is never prompted. Note the plant must come AFTER the
+No SQL for the agent id and no API tokens, both on purpose: the agent session id
+is planted through the daemon's own SessionStart hook exactly as an agent reports
+it, and the `claude` it spawns is never prompted. There is one `UPDATE` since
+DRY-101, and it is about how the session ENDED, not what it carried: a kill is now
+recorded as somebody asking, and a window for such a session is dropped instead of
+drawn as a card, so `/kill` alone no longer leaves anything to draw one from. The
+harness puts the row into "died on its own and was forgotten" through
+`docker exec $DRY62_DB psql` (default `dry62-db`, the container above). Note the plant must come AFTER the
 spawn's own hook — `agent_session_id` is written `where agent_session_id is
 null`, so the first writer wins.
 
@@ -2153,6 +2167,84 @@ float round is not among them, honestly — the removed call was already a no-op
 there, which is the whole reason this shipped unnoticed — so those 21 checks are
 a guard on what must not regress rather than evidence of the fix.
 
+## Reloading the desk (DRY-101)
+
+Two browsers, a throwaway daemon and a stub CLI on its PATH. About ten minutes per
+tier, and it should be run on **both**: the file store keeps no history, so it has
+no card to resurrect and S1–S3 cannot fail there — the harness says so, and the
+sections that can (S4–S7) still run.
+
+Two browser CONTEXTS are the two devices — separate localStorage, so neither sees
+the other's mirror. "Stale" is not simulated: device B is opened first and left
+alone while A closes things, which is what a laptop in a drawer is. **B has to
+write for any of it to fail**, and the harness makes it with a click on a window
+(`bringFront` bumps z, the deep watcher pushes the whole desk). A version that only
+watched B passed against the bug.
+
+```sh
+bunx playwright install chromium             # once per machine; see "Running these"
+
+mkdir -p /tmp/dry101-bin
+printf '#!/bin/sh\nexec node --import %s/node_modules/tsx/dist/loader.mjs %s/scripts/verify/stub-cli.mts "$@"\n' \
+  "$PWD" "$PWD" > /tmp/dry101-bin/claude && chmod +x /tmp/dry101-bin/claude
+
+# database tier only — a FRESH container whenever you want a schema that has never
+# seen migration 004:
+docker run -d --name dry101-db -e POSTGRES_PASSWORD=dry101pw -e POSTGRES_USER=drydock \
+  -e POSTGRES_DB=drydock -p 127.0.0.1:55101:5432 postgres:16-alpine
+
+(cd daemon && PATH="/tmp/dry101-bin:$PATH" \
+   DRYDOCK_PORT=4401 DRYDOCK_HOST=127.0.0.1 DRYDOCK_SESSIONS_DIR=/tmp/d101 \
+   DRYDOCK_TRACKER=fixture DRYDOCK_CLEAR_FINISHED_AFTER_MS=0 \
+   DRYDOCK_WORKTREES_ROOT=/tmp/dry101-wt DRYDOCK_WORKTREE_REAP_MS=0 \
+   DRYDOCK_STATE_FILE=/tmp/dry101-state.json \
+   node --import tsx src/index.ts &)
+   # …database tier: replace DRYDOCK_STATE_FILE with
+   #   DRYDOCK_DATABASE_URL='postgres://drydock:dry101pw@127.0.0.1:55101/drydock'
+(cd shell && VITE_DAEMON_URL=http://127.0.0.1:4401 bunx vite --port 5401 --strictPort &)
+
+(cd daemon && node --import tsx ../scripts/verify/desk-restore.mts)
+(cd daemon && ONLY=S7 node --import tsx ../scripts/verify/desk-restore.mts)   # one section
+```
+
+**If you are an agent Drydock spawned, strip `DRYDOCK_*` from the daemon's
+environment first** (CLAUDE.md, "second-instance pattern"). Such a session's own
+environment carries prod's database URL, auth password and tracker token, and "real
+env wins" hands them to the throwaway: the tell is `/healthz` answering
+`store.kind: "postgres"` when you passed a state file.
+
+`DRYDOCK_CLEAR_FINISHED_AFTER_MS=0` turns DRY-60's sweep off, and the harness
+**refuses to run without it** — left on, a window it counts can be cleared mid-round
+by something with nothing to do with this ticket. It also refuses `:4317` and
+`:4318`: it kills every session the daemon has, to start each section from a clean
+desk, and those are the two that own real agents. The worktree knobs are set for
+DRY-93's reason (a default throwaway daemon reaps across the HOST's worktrees root).
+
+| section | what it holds down |
+|---|---|
+| S1 | a window closed with the ✕ on A is still open on B; B finds its session gone. It must draw no card, must not write the window back, and neither device may bring it back on reload |
+| S2 | a desk that **already carries** closed windows — one stopped, one that exited on its own and was then cleared — heals on load and is rewritten without them. Ends with the control: a session that **died on its own** and was forgotten still gets its card. Every other check here passes for a fix that drops every window whose session has gone |
+| S3 | a card dismissed on A goes from B **without a reload** (B has to ask again; up to the 15s history floor), is not written back, and history keeps both the failure and the dismissal |
+| S4 | a workspace spawned from the palette on A, watched by a B that never heard of it: **one** window with both panes on B, in the saved desk, and after A reloads |
+| S5 | a desk saved the old way — the agent as a bare terminal, the zsh as a window — is put back together in place: the window keeps its position and size, the zsh is not killed |
+| S6 | count, layout mode and each window's rect survive a plain reload of a tiled desk on one device. **Passes against the bug** — a guard on what must not regress, not evidence of the fix |
+| S7 | a pane restored into a window **narrower** than its PTY last drew at adds no stacked prompts or stray glyphs; a pane with an empty replay still fits its window; and the replay frame carries the PTY's size |
+
+Two things about S7. It measures **what the restore added**, not what is on screen:
+the shell's first prompt is drawn before the pane resizes the PTY from its 80×24
+default and redrawn after, so some dirt is zsh's own and predates any replay. And a
+right-hand segment that merely *wrapped* onto its own line after a shrink is reflow,
+not dirt — a first cut counted it and scored a correct render as five artifacts. It
+needs `zsh` on the host and skips itself without one. It failed intermittently
+before the pane held fits off while a replay is parsed — both full runs on the
+database tier, none of four run alone — so **run it in full at least once**, not
+only through `ONLY=S7`.
+
+Discrimination (recipe [below](#making-sure-a-harness-still-discriminates)): against
+the pre-fix tree it fails **12 of 36** on the file tier and **25 of 45** on the
+database tier; with the fix, 0 of 36 and 0 of 45 (twice). S1–S3 account for 13 of
+the database tier's failures and none of the file tier's.
+
 ## The ticket panel's comment thread (DRY-76)
 
 Two harnesses, because the claim has two halves and neither can see the other's
@@ -2518,6 +2610,20 @@ perl -0pi -e 's/if \(own\) return own;/return own ?? "WRONG";/' \
 #    the bound covering a pending check, and the conditional hand-back, for the
 #    decision, full and built-in evidence prompts. Nothing else fails, which is the
 #    point: they are the only checks that read the loop's WORDS.
+
+# DRY-101 the desk reloads as it was left. Merge not written down, for the reason the
+# other recipes give — find it from the file that arrived with it:
+#   git log --diff-filter=A --format=%h -- scripts/verify/desk-restore.mts
+# daemon/src AND shell/src, because the fix is a pair (the daemon records the pairing,
+# the dismissal and the replay size; the shell reads them). The shell is picked up by
+# Vite at once; the DAEMON needs the rig restarted. Two things the checkout will not do:
+# it leaves 004_session_dismissed.sql in place (harmless — a column nothing writes — but
+# use a FRESH database container for the pre-fix run so the ledger is honest), and it
+# STAGES the revert, so restore with `git checkout HEAD -- daemon/src shell/src` and
+# confirm with `git status` before committing anything.
+git checkout <that commit>~1 -- daemon/src shell/src
+(cd daemon && node --import tsx ../scripts/verify/desk-restore.mts)  # file: 12 of 36; database: 25 of 45
+git checkout HEAD -- daemon/src shell/src
 ```
 
 The prefill recipe is the fourth to rot, and its own comment says so a line
