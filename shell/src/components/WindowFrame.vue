@@ -58,14 +58,22 @@ const grab = computed(() => (props.layout === "float" ? "grab" : "default"));
       :style="{ cursor: grab }"
       @mousedown="emit('dragStart', $event)"
     >
+      <!-- DRY-102: the kind is the dot's SHAPE, not a word beside it. The bar
+           used to open with `shell` / `workspace` / `claude-code` on every
+           window, which told two windows apart far less often than the ticket
+           and the repo next to it did. Colour was already taken — it means
+           status — so a plain shell is a square and anything with an agent in
+           it is a circle. The word survives as the dot's tooltip, which is
+           also where desk-restore.mts reads it: DRY-101's "a rebuilt workspace
+           is titled as the spawned one" still has to be checkable. -->
       <span
         class="dot"
-        :class="{ pulse: attention }"
+        :class="{ pulse: attention, square: win.type === 'bash' }"
+        :title="win.title"
         :style="{ background: statusColor, boxShadow: `0 0 7px ${statusGlow}` }"
       ></span>
-      <span class="title">{{ win.title }}</span>
       <span v-if="win.ticket" class="ticket">{{ win.ticket }}</span>
-      <span class="repo">~/{{ win.repo }}</span>
+      <span class="repo" :class="{ lead: !win.ticket }">~/{{ win.repo }}</span>
       <div class="grow"></div>
       <span v-if="statusTag" class="statustag">{{ statusTag }}</span>
       <div class="grow"></div>
@@ -133,14 +141,11 @@ const grab = computed(() => (props.layout === "float" ? "grab" : "default"));
   border-radius: 50%;
   flex: 0 0 auto;
 }
+.dot.square {
+  border-radius: 2px;
+}
 .dot.pulse {
   animation: ddpulse 1.2s ease-in-out infinite;
-}
-.title {
-  font-family: "JetBrains Mono", monospace;
-  font-size: 12px;
-  font-weight: 500;
-  color: #c5cfda;
 }
 .ticket {
   font-family: "JetBrains Mono", monospace;
@@ -156,6 +161,13 @@ const grab = computed(() => (props.layout === "float" ? "grab" : "default"));
   font-family: "JetBrains Mono", monospace;
   font-size: 11px;
   color: #56606c;
+}
+/* With no ticket badge the repo is the only text in the bar, so it takes the
+   weight the kind word used to carry rather than staying a footnote (DRY-102). */
+.repo.lead {
+  font-size: 12px;
+  font-weight: 500;
+  color: #c5cfda;
 }
 .statustag {
   flex: 0 0 auto;

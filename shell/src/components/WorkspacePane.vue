@@ -346,7 +346,8 @@ onBeforeUnmount(onSplitUp);
 .sdot {
   width: 6px;
   height: 6px;
-  border-radius: 50%;
+  /* A shell's dot is a square wherever one is drawn (DRY-102). */
+  border-radius: 1.5px;
   background: #7a9e6b;
   flex: 0 0 auto;
 }

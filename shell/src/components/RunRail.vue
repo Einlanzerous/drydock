@@ -889,7 +889,7 @@ function onCardClick(card: Card): void {
           >
             <span
               class="dot"
-              :class="{ pulse: it.attention }"
+              :class="{ pulse: it.attention, square: it.win.type === 'bash' }"
               :style="{ background: it.statusColor, boxShadow: `0 0 7px ${it.statusGlow}` }"
             ></span>
             <div class="dock-text">
@@ -1356,6 +1356,11 @@ function onCardClick(card: Card): void {
   height: 8px;
   border-radius: 50%;
   flex: 0 0 auto;
+}
+/* Same rule as the window bar (DRY-102): a plain shell is a square, so a docked
+   window keeps the shape it had on the desk. */
+.dot.square {
+  border-radius: 2px;
 }
 .dot.pulse {
   animation: ddpulse 1.2s ease-in-out infinite;

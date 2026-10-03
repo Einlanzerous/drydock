@@ -1088,9 +1088,9 @@ npm i playwright --prefix scripts/verify     # ad-hoc; not a repo dependency
 (cd daemon && node --import tsx ../scripts/verify/clipboard.mts)
 ```
 
-Panes are told apart by their working directory: a window's title comes from its
-COMMAND, so five `/bin/sh` panes are identical in the bar, and the `~/<cwd>` chip
-beside it is the only thing about a spawn the desk renders that the caller picks.
+Panes are told apart by their working directory: a window's kind comes from its
+COMMAND (and since DRY-102 is a dot's shape, not a word), so five `/bin/sh` panes
+are identical in the bar, and the `~/<cwd>` chip in it is the only thing about a spawn the desk renders that the caller picks.
 **The harness creates those directories itself**, deliberately — it used to ask
 you to `mkdir` them, and a missing one is silent and looks exactly like a product
 bug: the daemon records the cwd it was handed, so the frame still says `~/<dir>`
@@ -2505,6 +2505,7 @@ tiers** — the file store is what a fresh clone runs.
 | `health.mts` | DRY-48. `/healthz` has an opinion: a real uncaught exception is counted and reported as `degraded` without ever reading as `down`, a broken store or tracker or log sink never un-readies the daemon, and the three postures of `DRYDOCK_EXIT_ON_UNCAUGHT` do what they say — including `idle`, which must stay up while a session runs and exit once none does. |
 | `spawn-layout.mts` | DRY-93. A spawn adds a window to the desk you are on: the layout mode is untouched — on the header AND on the daemon — and the new window is visible in that mode's own terms (a cell of the grid in tile, the large pane in focus). All three spawn paths, all three modes, plus the flag DRY-28's conflict rule reads: a spawn must not count as somebody arranging this desk, and a switcher click still must. |
 | `review-mode-prompt.mts` | DRY-99. A ticket spawns the prompt for ITS Switchyard `review_mode`, asserted on what arrives at the PTY: each mode, `null` (unclassified), an absent key (an older server or a tracker with no modes — a different answer from `null`), and a mode this build has never heard of (read as `null`). The panel's own fetch beats a stale sidebar row and never overwrites an edit in progress; a daemon that serves no per-mode prompts (older than DRY-99) falls back to the ordinary one; `DRYDOCK_AGENT_PROMPT` speaks for `evidence` only; a blank per-mode variable is unset; `\n` decodes; a bad placeholder in ANY per-mode template refuses to boot naming the variable. |
+| `window-bar.mts` | DRY-102. A window's bar prints no kind word (`shell` / `workspace` / `claude-code`) in Float, Tile or Focus; a plain shell's status dot is a square and anything with an agent in it is a circle; the word survives as the dot's tooltip; and a docked shell with no ticket still has a labelled chip, with the square it had on the desk. |
 | `desk-chrome.mts` | DRY-82. One spawn control on the header and a palette that carries what the two removed buttons did; a layout switcher centred on the window rather than on the slack its siblings leave; `key=value` filter pills that cost the tracker nothing and say when they name something this pull cannot contain; and a term the pull cannot contain found through `/api/tracker/search`, debounced. |
 
 Each exits non-zero on failure and prints one line per check.
@@ -2651,6 +2652,16 @@ perl -0pi -e 's/if \(own\) return own;/return own ?? "WRONG";/' \
 git checkout <that commit>~1 -- daemon/src shell/src
 (cd daemon && node --import tsx ../scripts/verify/desk-restore.mts)  # file: 13 of 37; database: 26 of 46
 git checkout HEAD -- daemon/src shell/src
+
+# DRY-102 the bar says the kind with the dot's shape. Shell only, so Vite picks the
+# revert up at once and the rig stays up. Find the merge the same way:
+#   git log --diff-filter=A --format=%h -- scripts/verify/window-bar.mts
+# Only the two components — reverting all of shell/src would be the same result today
+# and a different one the day something else there changes. It STAGES the revert too.
+git checkout <that commit>~1 -- shell/src/components/WindowFrame.vue shell/src/components/RunRail.vue
+(cd daemon && node --import tsx ../scripts/verify/window-bar.mts)  # 21 of 25, then the Docked step throws:
+                                                                    # it finds the shell by its dot's tooltip
+git checkout HEAD -- shell/src/components/WindowFrame.vue shell/src/components/RunRail.vue
 ```
 
 The prefill recipe is the fourth to rot, and its own comment says so a line

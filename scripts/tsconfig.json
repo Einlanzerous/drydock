@@ -72,6 +72,7 @@
     "verify/ticket-panel.mts",
     "verify/toast-stack.mts",
     "verify/tombstone.mts",
-    "verify/tracker-cache.mts"
+    "verify/tracker-cache.mts",
+    "verify/window-bar.mts"
   ]
 }

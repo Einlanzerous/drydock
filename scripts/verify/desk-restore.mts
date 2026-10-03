@@ -301,7 +301,9 @@ const desk = (page: Page): Promise<Win[]> =>
     els.map((e) => {
       const r = e.getBoundingClientRect();
       return {
-        title: e.querySelector(".bar .title")?.textContent?.trim() ?? "",
+        // The bar stopped printing the kind word in DRY-102; it is the dot's
+        // tooltip now, and still what a rebuilt workspace must agree on.
+        title: e.querySelector(".bar .dot")?.getAttribute("title") ?? "",
         repo: (e.querySelector(".bar .repo")?.textContent ?? "").replace(/^~\//, "").trim(),
         tomb: !!e.querySelector(".tomb"),
         workspace: !!e.querySelector(".ws"),
@@ -373,7 +375,7 @@ async function settled(): Promise<string[]> {
 
 /** A click that makes the device WRITE: focus bumps z and the deep watcher pushes. */
 async function provokeWrite(page: Page, repo: string): Promise<void> {
-  await frameOf(page, repo).first().locator(".bar .title").click();
+  await frameOf(page, repo).first().locator(".bar .repo").click();
   await sleep(SETTLE_MS);
 }
 

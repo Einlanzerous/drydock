@@ -18,7 +18,10 @@ export interface Win {
   id: string; // daemon session id (for a workspace, the *agent* PTY)
   kind: WinKind; // "terminal" (default) | "workspace"
   type: WinType;
-  title: string; // "claude-code" | "bash"
+  // "claude-code" | "shell" | "workspace" | a ticket key. Not drawn in the bar
+  // since DRY-102 — it is the dot's tooltip, and the rail's label for a window
+  // with no ticket.
+  title: string;
   ticket?: string; // e.g. "ARGY-89" — badge in the title bar
   repo: string; // "~/{repo}" label
   // Float-mode geometry (the other layouts derive rects from window order):
