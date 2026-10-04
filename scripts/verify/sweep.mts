@@ -213,7 +213,8 @@ interface Frame {
 const frames = (page: Page): Promise<Frame[]> =>
   page.evaluate(() =>
     [...document.querySelectorAll(".frame")].map((f) => ({
-      title: f.querySelector(".title")?.textContent?.trim() ?? "",
+      // The dot's tooltip since DRY-102; the bar no longer prints the title.
+      title: f.querySelector(".bar .dot")?.getAttribute("title") ?? "",
       tag: f.querySelector(".statustag")?.textContent?.trim() ?? "",
     })),
   );
@@ -373,7 +374,7 @@ await page.goto(SHELL, { waitUntil: "domcontentloaded" });
 await page.waitForSelector(".topbar");
 await page.waitForSelector(".frame", { timeout: 20000 });
 await setVisible(page, true);
-await page.click('.frame:has(.title:text-is("DRY60-FOCUSED")) .body');
+await page.click('.frame:has(.bar .dot[title="DRY60-FOCUSED"]) .body');
 await sleep(POLL_MS * 2);
 
 let open = await frames(page);
