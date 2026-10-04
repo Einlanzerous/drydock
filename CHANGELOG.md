@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.0](https://github.com/Einlanzerous/drydock/compare/v1.9.1...v1.10.0) (2026-10-04)
+
+
+### Features
+
+* **shell:** a window's bar says its kind with the dot's shape, not a word (DRY-102) ([#90](https://github.com/Einlanzerous/drydock/issues/90)) ([fa41af8](https://github.com/Einlanzerous/drydock/commit/fa41af806981c703afc64857eec12e9187e2f313))
+
 ## [1.9.1](https://github.com/Einlanzerous/drydock/compare/v1.9.0...v1.9.1) (2026-09-26)
 
 
