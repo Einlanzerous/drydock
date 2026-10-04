@@ -117,7 +117,9 @@ const SNAP_JS = `(() => {
     streamDown: !!q(".rail .offline"),
     gatePanel: !!q(".rail .panel .title"),
     railCards: all(".rail .card .id"),
-    windowTitles: all(".frame .bar .title"),
+    // One entry per window. The bar stopped printing the title in DRY-102 — it
+    // is the dot's tooltip — and all() maps textContent, which a dot has none of.
+    windowTitles: Array.from(document.querySelectorAll(".frame .bar .dot")).map((n) => n.getAttribute("title") || ""),
     watching: text(".watching"),
   };
 })()`;

@@ -316,7 +316,6 @@ Desk and shell:
 | [dry-71-clipboard-keys](docs/decisions/dry-71-clipboard-keys.md) | `Ctrl+Shift+C/V`; `navigator.clipboard` is unavailable where this runs |
 | [dry-100-status-toasts](docs/decisions/dry-100-status-toasts.md) | the four status banners as an overlay; condition vs event lifecycles, why notices became dismissible, and a harness that used a banner as a lever |
 | [dry-101-desk-restore](docs/decisions/dry-101-desk-restore.md) | why a reload brought back closed windows and split every workspace in two — the saved desk is shared and last write wins; what "closed on purpose" is, where the zsh pairing lives, and replaying a pane at the width it was drawn at |
-| [dry-102-window-bar](docs/decisions/dry-102-window-bar.md) | the bar dropped its kind word: a shell's dot is a square, an agent's a circle — and why `win.title` had to stay in the model |
 
 Tracker:
 

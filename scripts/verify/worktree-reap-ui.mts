@@ -137,7 +137,9 @@ const frames = async (n: number, ms = 12_000): Promise<number> => {
 };
 const dump = async (label: string) => {
   if (!VERBOSE) return;
-  const titles = await page.locator(".frame .title").allTextContents();
+  const titles = await page
+    .locator(".frame .bar .dot")
+    .evaluateAll((els) => els.map((e) => e.getAttribute("title") ?? ""));
   const err = await page.locator(TOAST.error).allTextContents();
   const note = await page.locator(TOAST.note).allTextContents();
   console.log(`    [dom ${label}] frames=${JSON.stringify(titles)} error=${JSON.stringify(err)} note=${JSON.stringify(note)}`);
