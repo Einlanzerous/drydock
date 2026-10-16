@@ -60,6 +60,7 @@
     "verify/desk-restore.mts",
     "verify/epic-children.mts",
     "verify/gate-actions.mts",
+    "verify/group-title.mts",
     "verify/hang.mts",
     "verify/prefill.mts",
     "verify/race.mts",
