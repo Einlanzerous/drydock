@@ -278,6 +278,19 @@ Why a second proxy rather than a mode on `proxy-http.mts`: that one breaks the
 state store, and the two outages are independent conditions — sharing it would
 mean a path parameter on a harness three other scripts depend on.
 
+### The group header's tooltip (DRY-77)
+
+Same rig as `sidebar.mts`; the proxy isn't exercised, so pointing `SHELL_URL`
+at a vite that talks to a fixture daemon directly works too.
+
+```sh
+(cd daemon && node --import tsx ../scripts/verify/group-title.mts)
+```
+
+| harness | what it holds down |
+|---|---|
+| `group-title.mts` | A repo group header says what a click does, and while a filter is active says the filter holds it open — the sentence DRY-75 gave the epic row and not the group above it. Asserts the unfiltered title, the filtered one, that a click during the filter leaves the group open with the same copy, and that clearing the filter takes the qualifier back off. Against the unpatched `TrackerSidebar.vue` it reports **5 FAILED** (every title check reads `null`). |
+
 ### The backlog control (DRY-85)
 
 Same rig — daemon, proxy and vite exactly as above — so run it beside

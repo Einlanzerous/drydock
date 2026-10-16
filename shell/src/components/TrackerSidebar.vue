@@ -850,8 +850,29 @@ function rowsOf(g: RepoGroup): Row[] {
 // re-runs rowsOf — and every epicRollup inside it — on each patch. It reads the
 // same reactive state either way, so this only changes how often it runs.
 const rendered = computed(() =>
-  groups.value.map((g) => ({ ...g, rows: isOpen(g.repo) ? rowsOf(g) : [] })),
+  groups.value.map((g) => ({
+    ...g,
+    rows: isOpen(g.repo) ? rowsOf(g) : [],
+    title: groupTitle(g.repo),
+  })),
 );
+
+/**
+ * The repo group header's tooltip (DRY-77) — the same sentence `epicRowTitle`
+ * gives an epic, because the two idioms behave identically under a filter: a
+ * click writes `expanded` and nothing moves until the filter lifts. DRY-75 only
+ * explained it on the inner idiom, so the outer one, which people hit first,
+ * read as a header ignoring its clicks.
+ *
+ * Like the epic's, it names the gesture and not the state (a `title` doesn't
+ * repaint under a click), and it has no inert branch: `groupTickets` drops
+ * empty groups, so a rendered group always has rows to show.
+ */
+function groupTitle(repo: string): string {
+  return filtering.value
+    ? `Expand or collapse ${repo} — the filter holds it open for now`
+    : `Expand or collapse ${repo}`;
+}
 
 function isOpen(repo: string): boolean {
   return filtering.value || !!expanded[repo];
@@ -1319,7 +1340,12 @@ const searchScope = computed(() => found.value.scope.join(", "));
         </p>
       </div>
       <template v-for="grp in rendered" :key="grp.repo">
-        <button class="grp" :class="{ open: isOpen(grp.repo) }" @click="toggle(grp.repo)">
+        <button
+          class="grp"
+          :class="{ open: isOpen(grp.repo) }"
+          :title="grp.title"
+          @click="toggle(grp.repo)"
+        >
           <span class="chev">▸</span>
           <span class="grp-name">{{ grp.repo }}</span>
           <span class="grp-count">{{ grp.count }}</span>
