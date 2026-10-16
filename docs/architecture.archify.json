@@ -1,0 +1,374 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Drydock — system map",
+    "subtitle": "A per-host daemon that owns AI-CLI terminals, and the web shell that attaches to them",
+    "quality_profile": "showcase",
+    "viewBox": [
+      1300,
+      620
+    ],
+    "repository": {
+      "url": "https://github.com/Einlanzerous/drydock",
+      "revision": "6542907c68ed184e06fe0e0eb3efd6679276e27c"
+    }
+  },
+  "components": [
+    {
+      "id": "browser",
+      "type": "external",
+      "label": "Browser",
+      "sublabel": "any machine on the network",
+      "pos": [
+        40,
+        80
+      ],
+      "size": [
+        150,
+        60
+      ]
+    },
+    {
+      "id": "shell",
+      "type": "frontend",
+      "label": "drydock-shell",
+      "sublabel": "Vue 3 + xterm.js · nginx :5321",
+      "pos": [
+        300,
+        80
+      ],
+      "size": [
+        180,
+        64
+      ],
+      "sources": [
+        {
+          "path": "shell/src/App.vue",
+          "label": "desk"
+        },
+        {
+          "path": "shell/src/lib/daemon.ts",
+          "label": "daemon client"
+        },
+        {
+          "path": "shell/docker/nginx.conf"
+        }
+      ]
+    },
+    {
+      "id": "tracker",
+      "type": "external",
+      "label": "Ticket tracker",
+      "sublabel": "Switchyard · Jira · fixture",
+      "pos": [
+        900,
+        80
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "daemon/src/tracker/switchyard.ts",
+          "label": "Switchyard"
+        },
+        {
+          "path": "daemon/src/tracker/jira.ts",
+          "label": "Jira"
+        },
+        {
+          "path": "daemon/src/tracker/cache.ts",
+          "label": "cache"
+        }
+      ]
+    },
+    {
+      "id": "auth",
+      "type": "security",
+      "label": "Daemon auth",
+      "sublabel": "off · single · multi",
+      "pos": [
+        300,
+        260
+      ],
+      "size": [
+        180,
+        64
+      ],
+      "sources": [
+        {
+          "path": "daemon/src/auth/index.ts"
+        },
+        {
+          "path": "daemon/src/auth/tokens.ts",
+          "label": "hook keys"
+        }
+      ]
+    },
+    {
+      "id": "daemon",
+      "type": "backend",
+      "label": "drydock-daemon",
+      "sublabel": "Node HTTP + WS · :4318",
+      "tag": "systemd user unit",
+      "pos": [
+        600,
+        260
+      ],
+      "size": [
+        180,
+        64
+      ],
+      "sources": [
+        {
+          "path": "daemon/src/server.ts",
+          "label": "routes"
+        },
+        {
+          "path": "daemon/src/manager.ts",
+          "label": "sessions"
+        },
+        {
+          "path": "deploy/drydock-daemon.service"
+        }
+      ]
+    },
+    {
+      "id": "runs",
+      "type": "backend",
+      "label": "Autonomous runs",
+      "sublabel": "gates · handoffs",
+      "pos": [
+        900,
+        260
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "daemon/src/runs.ts"
+        },
+        {
+          "path": "daemon/src/agent-prompt.ts",
+          "label": "prompt"
+        }
+      ]
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "Postgres",
+      "sublabel": "desk state · session history",
+      "tag": "or a state file",
+      "pos": [
+        600,
+        80
+      ],
+      "size": [
+        180,
+        64
+      ],
+      "sources": [
+        {
+          "path": "daemon/src/state/postgres.ts"
+        },
+        {
+          "path": "daemon/src/state/file.ts",
+          "label": "file tier"
+        }
+      ]
+    },
+    {
+      "id": "sessions",
+      "type": "database",
+      "label": "Sessions index",
+      "sublabel": "~/.drydock/sessions-<port>",
+      "pos": [
+        300,
+        460
+      ],
+      "size": [
+        180,
+        64
+      ],
+      "sources": [
+        {
+          "path": "daemon/src/sessions-dir.ts"
+        }
+      ]
+    },
+    {
+      "id": "supervisor",
+      "type": "backend",
+      "label": "Supervisors",
+      "sublabel": "one detached process per PTY",
+      "tag": "outlive the daemon",
+      "pos": [
+        600,
+        460
+      ],
+      "size": [
+        180,
+        64
+      ],
+      "sources": [
+        {
+          "path": "daemon/src/supervisor/main.ts"
+        },
+        {
+          "path": "daemon/src/supervisor/wire.ts",
+          "label": "wire protocol"
+        }
+      ]
+    },
+    {
+      "id": "cli",
+      "type": "external",
+      "label": "AI CLIs",
+      "sublabel": "claude · plain shells",
+      "pos": [
+        900,
+        460
+      ],
+      "size": [
+        170,
+        64
+      ],
+      "sources": [
+        {
+          "path": "daemon/src/hooks.ts",
+          "label": "hook settings"
+        },
+        {
+          "path": "daemon/src/spawn-env.ts",
+          "label": "spawn env"
+        }
+      ]
+    },
+    {
+      "id": "worktrees",
+      "type": "database",
+      "label": "Git worktrees",
+      "sublabel": "one per ticket · reaped",
+      "pos": [
+        1120,
+        460
+      ],
+      "size": [
+        150,
+        64
+      ],
+      "sources": [
+        {
+          "path": "daemon/src/worktree.ts"
+        },
+        {
+          "path": "daemon/src/worktree-reaper.ts",
+          "label": "reaper"
+        }
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "browser-to-shell",
+      "from": "browser",
+      "to": "shell",
+      "label": "loads the SPA"
+    },
+    {
+      "id": "browser-to-auth",
+      "from": "browser",
+      "to": "auth",
+      "label": "REST + WS attach",
+      "variant": "emphasis"
+    },
+    {
+      "id": "auth-to-daemon",
+      "from": "auth",
+      "to": "daemon",
+      "variant": "security"
+    },
+    {
+      "id": "daemon-to-tracker",
+      "from": "daemon",
+      "to": "tracker",
+      "label": "ticket pulls"
+    },
+    {
+      "id": "runs-to-tracker",
+      "from": "runs",
+      "to": "tracker",
+      "label": "run-end comment"
+    },
+    {
+      "id": "daemon-to-runs",
+      "from": "daemon",
+      "to": "runs"
+    },
+    {
+      "id": "daemon-to-postgres",
+      "from": "daemon",
+      "to": "postgres",
+      "label": "desk · history"
+    },
+    {
+      "id": "daemon-to-supervisor",
+      "from": "daemon",
+      "to": "supervisor",
+      "label": "unix socket",
+      "variant": "emphasis",
+      "labelDy": 24
+    },
+    {
+      "id": "supervisor-to-sessions",
+      "from": "supervisor",
+      "to": "sessions",
+      "label": "meta · scrollback"
+    },
+    {
+      "id": "supervisor-to-cli",
+      "from": "supervisor",
+      "to": "cli",
+      "label": "PTY"
+    },
+    {
+      "id": "cli-to-worktrees",
+      "from": "cli",
+      "to": "worktrees",
+      "label": "cwd"
+    },
+    {
+      "id": "cli-to-daemon",
+      "from": "cli",
+      "to": "daemon",
+      "label": "hooks · loopback",
+      "variant": "security",
+      "fromSide": "top",
+      "toSide": "right"
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "drydock-daemon process",
+      "wraps": [
+        "auth",
+        "daemon",
+        "runs"
+      ]
+    },
+    {
+      "kind": "region",
+      "label": "detached — survives a daemon restart",
+      "wraps": [
+        "supervisor",
+        "cli"
+      ]
+    }
+  ]
+}
