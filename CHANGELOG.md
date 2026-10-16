@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.1](https://github.com/Einlanzerous/drydock/compare/v1.10.0...v1.10.1) (2026-10-16)
+
+
+### Bug Fixes
+
+* **shell:** a repo group header says the filter holds it open (DRY-77) ([#92](https://github.com/Einlanzerous/drydock/issues/92)) ([acbe2c0](https://github.com/Einlanzerous/drydock/commit/acbe2c052377ed0a1c9669ff9fbb1bd8dbb6ccea))
+
 ## [1.10.0](https://github.com/Einlanzerous/drydock/compare/v1.9.1...v1.10.0) (2026-10-04)
 
 
