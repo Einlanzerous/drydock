@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.2](https://github.com/Einlanzerous/drydock/compare/v1.10.1...v1.10.2) (2026-10-24)
+
+
+### Bug Fixes
+
+* **deps:** bump dompurify and shell toolchain past known advisories (DRY-104) ([#95](https://github.com/Einlanzerous/drydock/issues/95)) ([3b1ce18](https://github.com/Einlanzerous/drydock/commit/3b1ce18349ca795b685d3c1d87446cee39006c01))
+
 ## [1.10.1](https://github.com/Einlanzerous/drydock/compare/v1.10.0...v1.10.1) (2026-10-16)
 
 
