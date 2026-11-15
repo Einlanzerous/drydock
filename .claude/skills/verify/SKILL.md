@@ -14,6 +14,7 @@ own live PTYs. Stand up a throwaway pair instead:
 #    Then one unique scratch dir for the sessions dir and state file; the cleanup below greps for it.
 export VERIFY_DIR=$(mktemp -d /tmp/drydock-verify.XXXXXX)
 export DRYDOCK_SESSIONS_DIR=$VERIFY_DIR/sessions/
+echo "teardown needs: export DRYDOCK_SESSIONS_DIR=$DRYDOCK_SESSIONS_DIR"   # a later shell will not have it
 # 1. Throwaway daemon. Real env beats .env (a fresh worktree has no .env).
 cd daemon && DRYDOCK_PORT=4399 DRYDOCK_HOST=127.0.0.1 node --import tsx src/index.ts &
 
@@ -41,7 +42,7 @@ at a time:
 ```sh
 env $(env | grep -o '^DRYDOCK_[A-Z_0-9]*' | sed 's/^/-u /' | tr '\n' ' ') \
   DRYDOCK_PORT=4399 DRYDOCK_HOST=127.0.0.1 DRYDOCK_TRACKER=fixture \
-  DRYDOCK_SESSIONS_DIR=$VERIFY_DIR/sessions/ DRYDOCK_STATE_FILE=$VERIFY_DIR/s.json \
+  DRYDOCK_SESSIONS_DIR=${VERIFY_DIR:?run step 0 first}/sessions/ DRYDOCK_STATE_FILE=$VERIFY_DIR/s.json \
   node --import tsx src/index.ts
 ```
 
@@ -106,16 +107,21 @@ kills your own session. An exe-only loop is not enough either: every supervisor
 on the host is the same `node` binary, so it kills live agents belonging to
 daemons you are not testing, including the one holding your terminal. The
 throwaway `DRYDOCK_SESSIONS_DIR` is unique to your daemon and is in every
-supervisor's argv (re-export it if this is a new shell; an empty value
-matches everything); the exe test excludes the shell running the loop (whose own
+supervisor's argv (a new shell does not carry step 0's export: re-export it,
+or the loop below refuses to run); the exe test excludes the shell running the loop (whose own
 command line contains both literals).
 
 ```sh
-for p in $(pgrep -f "supervisor/main"); do
-  case "$(readlink /proc/$p/exe)" in *node*)
-    tr '\0' ' ' < /proc/$p/cmdline | grep -qF "$DRYDOCK_SESSIONS_DIR" && kill -9 "$p";;
-  esac
-done
+# Fails closed: an unset or foreign value must kill nothing (grep -F "" matches every supervisor).
+case "$DRYDOCK_SESSIONS_DIR" in
+  /tmp/drydock-verify.*/sessions/)
+    for p in $(pgrep -f "supervisor/main"); do
+      case "$(readlink /proc/$p/exe)" in *node*)
+        tr '\0' ' ' < /proc/$p/cmdline | grep -qF "$DRYDOCK_SESSIONS_DIR" && kill -9 "$p";;
+      esac
+    done;;
+  *) echo "DRYDOCK_SESSIONS_DIR is unset or not a step-0 dir; export the value step 0 set. Nothing killed." >&2;;
+esac
 ```
 
 The throwaway **daemon** needs exe AND cwd, because `pgrep -f "src/index.ts"`
