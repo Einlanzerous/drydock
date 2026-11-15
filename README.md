@@ -404,8 +404,8 @@ if you deliberately give them the same workspace name.
 - `CLAUDE.md` — agent/contributor onboarding: build, the load-bearing
   invariants, the recurring traps, conventions.
 - [docs/decisions/](docs/decisions/) — one doc per ticket: the trap list that
-  ticket produced, including the tracker smoke-test checklist. Indexed from
-  `CLAUDE.md`; read the one for a surface before changing it.
+  ticket produced, including the tracker smoke-test checklist. Find them with
+  `ls docs/decisions`; read the one for a surface before changing it.
 
 ## Ticket-driven sessions
 
@@ -504,8 +504,7 @@ project key when a ticket has none. Those slugs are what `DRYDOCK_REPOS_ROOT` /
 sidebar groups by them, so an `SRE` project splits into its services. A
 multi-component ticket prefers a component with a configured path override.
 Status: implemented but not yet exercised against a live Jira instance; the
-verification checklist is in [docs/decisions/](docs/decisions/), indexed from
-[CLAUDE.md](CLAUDE.md).
+verification checklist is in [docs/decisions/](docs/decisions/) (`ls docs/decisions`).
 
 **Scope the pull (DRY-30).** Unscoped, "all open tickets" against a corporate
 tracker is the whole instance. Two safeguards, both applied in the upstream

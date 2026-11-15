@@ -955,9 +955,9 @@ block used to be exe-only (found by the DRY-63 review), and exe-only is not a
 narrowing at all for the supervisors: `pgrep -f "supervisor/main"` matches every
 supervisor on the machine and they are all the same `node` binary, so it
 `kill -9`s the dev daemon's live agents and prod's (`:4318`) along with these
-three. CLAUDE.md names this exact failure — "an exe-only loop kills live agents
-belonging to daemons you are not testing, including the one holding the terminal
-you are typing in".
+three. The verify skill (`.claude/skills/verify/SKILL.md`) names this exact failure — an exe-only
+loop "kills live agents belonging to daemons you are not testing, including the one
+holding your terminal".
 
 So: the exe test excludes the shell running the loop (whose command line
 contains both literals), and the throwaway `DRYDOCK_SESSIONS_DIR` — unique to
@@ -1200,7 +1200,7 @@ is the copy anybody reading the harness will actually paste, so the two have to
 agree.)
 
 **Run it from a shell whose env still carries the prod daemon's config, and you
-will test the prod daemon's config.** The `env -u` list CLAUDE.md gives for the
+will test the prod daemon's config.** The `env -u` list the verify skill gives for the
 second-instance pattern applies here in full: a session spawned by Drydock
 inherits `DRYDOCK_AUTH_PASSWORD` and `DRYDOCK_DATABASE_URL`, and every
 unauthenticated `fetch` in this harness then 401s against a daemon it thinks is
@@ -1536,7 +1536,7 @@ count over a ~300 KB payload, so a host whose `.env` turns the ring down fails
 this file for a reason that isn't the ticket. It pins the default rather than
 changing it, and a short count prints a NOTE naming the variable.
 
-The same `env -u` sweep CLAUDE.md gives for the second-instance pattern applies
+The same `env -u` sweep the verify skill gives for the second-instance pattern applies
 — run this from a shell inside a Drydock session and every unauthenticated
 `fetch` here meets the prod daemon's auth.
 
@@ -1662,7 +1662,7 @@ reworked. Its throwaway unit pins `DRYDOCK_DATABASE_URL`, `DRYDOCK_AUTH_PASSWORD
 `_HASH` and `DRYDOCK_MULTI_USER` **empty** — it starts its own daemon with
 `WorkingDirectory=<repo>/daemon`, so `env.ts` walks up and loads the checkout's
 `.env`, and on a host that has run `bun run db:up` the daemon would come up on
-the Postgres tier and 401 every fetch here. That is CLAUDE.md's `env -u` sweep in
+the Postgres tier and 401 every fetch here. That is the verify skill's `env -u` sweep in
 the only form available to a unit file. And the relaunch check runs the real
 installer with a scratch `HOME` and a stub `systemctl` alongside the stub
 `systemd-run`: it depends on the guard `exec`ing before anything else runs, which
