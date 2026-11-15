@@ -11,6 +11,9 @@ own live PTYs. Stand up a throwaway pair instead:
 
 ```sh
 # 0. A fresh worktree needs its own node_modules + node-pty build: `bun install` at its root.
+#    Then one unique scratch dir for the sessions dir and state file; the cleanup below greps for it.
+export VERIFY_DIR=$(mktemp -d /tmp/drydock-verify.XXXXXX)
+export DRYDOCK_SESSIONS_DIR=$VERIFY_DIR/sessions/
 # 1. Throwaway daemon. Real env beats .env (a fresh worktree has no .env).
 cd daemon && DRYDOCK_PORT=4399 DRYDOCK_HOST=127.0.0.1 node --import tsx src/index.ts &
 
@@ -23,7 +26,7 @@ curl -s localhost:4399/healthz         # {status:"ok", ok:true, sessions:N} → 
 
 The sessions dir is per-port on purpose: a throwaway daemon sharing the dev
 daemon's would adopt its live agents and reparent them to a process you are
-about to Ctrl-C. Keep a unique `DRYDOCK_SESSIONS_DIR` for yours.
+about to Ctrl-C. Step 0 above sets a unique `DRYDOCK_SESSIONS_DIR` for yours.
 
 ### When you are a Drydock-spawned agent: strip the inherited env
 
@@ -38,7 +41,8 @@ at a time:
 ```sh
 env $(env | grep -o '^DRYDOCK_[A-Z_0-9]*' | sed 's/^/-u /' | tr '\n' ' ') \
   DRYDOCK_PORT=4399 DRYDOCK_HOST=127.0.0.1 DRYDOCK_TRACKER=fixture \
-  DRYDOCK_STATE_FILE=/tmp/s.json node --import tsx src/index.ts
+  DRYDOCK_SESSIONS_DIR=$VERIFY_DIR/sessions/ DRYDOCK_STATE_FILE=$VERIFY_DIR/s.json \
+  node --import tsx src/index.ts
 ```
 
 ## Driving the UI with Playwright
@@ -102,13 +106,14 @@ kills your own session. An exe-only loop is not enough either: every supervisor
 on the host is the same `node` binary, so it kills live agents belonging to
 daemons you are not testing, including the one holding your terminal. The
 throwaway `DRYDOCK_SESSIONS_DIR` is unique to your daemon and is in every
-supervisor's argv; the exe test excludes the shell running the loop (whose own
+supervisor's argv (re-export it if this is a new shell; an empty value
+matches everything); the exe test excludes the shell running the loop (whose own
 command line contains both literals).
 
 ```sh
 for p in $(pgrep -f "supervisor/main"); do
   case "$(readlink /proc/$p/exe)" in *node*)
-    tr '\0' ' ' < /proc/$p/cmdline | grep -q "/tmp/d79/" && kill -9 "$p";;
+    tr '\0' ' ' < /proc/$p/cmdline | grep -qF "$DRYDOCK_SESSIONS_DIR" && kill -9 "$p";;
   esac
 done
 ```

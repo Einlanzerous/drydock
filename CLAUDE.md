@@ -42,8 +42,8 @@ the `--watch` daemon and the agents keep running; on boot it reconciles them fro
 a per-port index of small files (`daemon/src/sessions-dir.ts`,
 `~/.drydock/sessions-<port>/`) and reattaches, scrollback included.
 `DRYDOCK_EXIT_ON_UNCAUGHT` defaults ON because a restart is cheap; its third
-value, `idle`, stays up while the daemon still holds sessions (`/healthz` says
-whether this process has taken a fault).
+value, `idle`, stays up while the daemon still holds sessions and exits once the
+process has taken a fault and holds none (`/healthz` says whether it has).
 
 - **Never bump `PROTOCOL_VERSION` in `supervisor/wire.ts` casually.** A daemon
   refuses to drive a supervisor from a different build rather than misparse it,
