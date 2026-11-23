@@ -15,6 +15,7 @@
 // Deliberately positionless: no `position`/`inset` here, so each host places
 // it. That's what lets the pane keep its exact pre-DRY-50 appearance.
 import { ref } from "vue";
+import { isPlainEnter } from "../lib/keys.js";
 
 const props = defineProps<{
   tool: string;
@@ -45,6 +46,11 @@ function approve() {
 // in-pane Deny button swallow its first click with nothing to show for it (the
 // field and the "Send denial" label are both behind allowReason), which is a
 // regression from the single-click deny the pane has always had.
+/** Enter in the reason field denies — unless it is committing an IME candidate. */
+function onReasonEnter(e: KeyboardEvent) {
+  if (isPlainEnter(e)) deny();
+}
+
 function deny() {
   if (!props.allowReason) {
     emit("resolve", "deny");
@@ -81,7 +87,8 @@ function cancelDeny() {
       <input
         v-model="reason"
         placeholder="Tell the agent why — it goes back as the tool result"
-        @keydown.enter="deny"
+        aria-label="Reason for denying, sent back to the agent"
+        @keydown.enter="onReasonEnter"
         @keydown.esc="cancelDeny"
       />
     </div>

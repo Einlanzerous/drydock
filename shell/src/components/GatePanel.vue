@@ -14,6 +14,7 @@
 // what it truncated, and carry the run-scoped controls.
 import { computed, nextTick, ref, watch } from "vue";
 import type { OpenGate } from "../composables/gateStore.js";
+import { isPlainEnter } from "../lib/keys.js";
 
 const props = defineProps<{
   gate: OpenGate;
@@ -97,6 +98,11 @@ const denyBtn = ref<HTMLButtonElement | null>(null);
 // Deny opens a field rather than firing immediately: a bare denial usually just
 // makes the agent retry the identical call, so the reason is what turns "no"
 // into a redirect. It goes back as the tool result.
+/** Enter in the reason field denies — unless it is committing an IME candidate. */
+function onReasonEnter(e: KeyboardEvent) {
+  if (isPlainEnter(e)) deny();
+}
+
 function deny() {
   if (!denying.value) {
     denying.value = true;
@@ -178,7 +184,8 @@ defineExpose({ cancelDenialIfOpen });
         ref="reasonEl"
         v-model="reason"
         placeholder="Tell the agent why — it goes back as a tool result"
-        @keydown.enter="deny"
+        aria-label="Reason for denying, sent back to the agent"
+        @keydown.enter="onReasonEnter"
       />
     </div>
 

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import {
   CATEGORY_COLOR,
   getTicket,
@@ -96,7 +96,7 @@ function onHeaderDown(e: MouseEvent): void {
  * held the top-left corner, so the panel could be dragged down until its footer
  * — and Spawn Agent with it — sat below the fold, where `.app { overflow:
  * hidden }` clips it and nothing scrolls it back: the ticket's own symptom by a
- * different route. The panel is capped at `82vh`/`92vw`, so the lower bound is
+ * different route. The panel is capped at `82dvh`/`92vw`, so the lower bound is
  * always above the upper one and the clamp can't invert.
  */
 function onDragMove(e: MouseEvent): void {
@@ -533,13 +533,50 @@ function whenText(raw?: string): string {
 // ticket it opens below the fold — the exact case this feature is for. The pill
 // beside the title is what says it's there, and this is what it does.
 const threadEl = ref<HTMLElement | null>(null);
+
+// Focus in on open, back on close (DRY-105). Back goes to text entry only —
+// never a button (DRY-40's duplicate-spawn bug was a retained button focus) —
+// and only if focus has fallen to <body> by the next frame, so a close that has
+// already put focus somewhere deliberate is left alone. That is NOT a guard
+// against Send: the spawned pane mounts when the spawn POST resolves, well after
+// this frame, so after Send the old terminal briefly has the keyboard until the
+// new pane claims it (DRY-40). The end state is right; the gap is the cost.
+let opener: HTMLElement | null = null;
+onMounted(() => {
+  opener = document.activeElement as HTMLElement | null;
+  panelEl.value?.focus({ preventScroll: true });
+});
+onBeforeUnmount(() => {
+  const el = opener;
+  opener = null;
+  requestAnimationFrame(() => {
+    const a = document.activeElement;
+    if ((!a || a === document.body) && el?.isConnected && el.matches("textarea, input")) {
+      el.focus({ preventScroll: true });
+    }
+  });
+});
 function jumpToThread(): void {
-  threadEl.value?.scrollIntoView({ behavior: "smooth", block: "start" });
+  // Smooth only when motion is welcome (DRY-105); the CSS gate can't see this.
+  const calm = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  threadEl.value?.scrollIntoView({ behavior: calm ? "auto" : "smooth", block: "start" });
 }
 </script>
 
 <template>
-  <div ref="panelEl" class="panel" :style="winStyle" @mousedown="emit('focus')">
+  <!-- A dialog, but a NON-modal one (DRY-20): it floats, drags, and leaves the desk
+       live behind it, so `showModal()` / aria-modal would lie about it and lock
+       the terminals out. Role and name for assistive tech, focus moved in on open
+       and handed back on close (see onMounted). -->
+  <div
+    ref="panelEl"
+    class="panel"
+    role="dialog"
+    :aria-label="`Ticket ${ticket.key}`"
+    tabindex="-1"
+    :style="winStyle"
+    @mousedown="emit('focus')"
+  >
     <header class="phead" @mousedown="onHeaderDown">
       <span
         class="status"
@@ -761,18 +798,21 @@ function jumpToThread(): void {
 /* Floating window (DRY-20): positioned absolutely within the app, stacked via
    the inline z-index. The default (undragged) position centers it near the top;
    a drag switches to explicit left/top. No backdrop — it's non-modal. */
+.panel:focus:not(:focus-visible) {
+  outline: none;
+}
 .panel {
   position: absolute;
   left: 50%;
   top: 56px;
   transform: translateX(-50%);
   width: min(620px, 92vw);
-  max-height: 82vh;
+  max-height: 82dvh;
   display: flex;
   flex-direction: column;
   /* The second axis of DRY-74. `.desc` is the designated flexible region, but
      it floors at `min-height: 80px` and everything below it is fixed, so under
-     ~480px of viewport the sum exceeds 82vh — and with no `overflow` here that
+     ~480px of viewport the sum exceeds 82dvh — and with no `overflow` here that
      surplus rendered below the panel's own bottom edge, off-screen, taking
      Spawn Agent with it. Scrolling the panel is the backstop for a viewport
      too short to hold it however the row is arranged.

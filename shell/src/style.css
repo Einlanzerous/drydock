@@ -1,6 +1,37 @@
 /* Global shell styles (DRY-9). Design tokens + animations from the prototype;
    per-component layout lives in each .vue's scoped <style>. */
-@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap");
+
+/* JetBrains Mono (OFL-1.1, latin subset) for the UI chrome. Self-hosted like
+   Meslo below: a render-blocking @import of Google Fonts put a third-party
+   request, and an IP leak, in front of first paint (DRY-105). */
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/JetBrainsMono-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/JetBrainsMono-500.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/fonts/JetBrainsMono-600.woff2") format("woff2");
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("/fonts/JetBrainsMono-700.woff2") format("woff2");
+}
 
 /* Nerd Font for the terminal — the powerline/icon glyphs an oh-my-zsh / p10k
    prompt draws. Self-hosted (MesloLGS NF, Apache-2.0) because xterm.js renders
@@ -39,10 +70,21 @@
   box-sizing: border-box;
 }
 
+/* The whole UI is dark, so native controls (select popups, checkboxes, form
+   fields, scrollbars) are too, and take the accent that TicketDetail's checkboxes
+   already used (DRY-105). */
+:root {
+  color-scheme: dark;
+  accent-color: #2a6db0;
+}
+
+/* body is overflow:hidden, so on a phone a height that tracks the LARGE viewport
+   would hide the bottom edge behind the browser toolbar. dvh (Firefox 101+)
+   follows the toolbar. */
 html,
 body,
 #app {
-  height: 100%;
+  height: 100dvh;
   margin: 0;
 }
 
@@ -103,6 +145,23 @@ body {
   to {
     transform: none;
     opacity: 1;
+  }
+}
+
+/* Reduced motion (DRY-105). One global gate instead of one per animation: every
+   entrance and pulse in the shell, current and future, stops here. `animation:
+   none` rather than a shortened duration on purpose — an infinite pulse that is
+   merely cut short freezes on its FIRST keyframe, which for ddpulse is the dim
+   one, so a "needs you" marker would sit at 45% opacity. With none the element
+   keeps its ordinary, fully visible style. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0s !important;
+    scroll-behavior: auto !important;
   }
 }
 

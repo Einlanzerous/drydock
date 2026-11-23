@@ -37,3 +37,20 @@ export function chordLetter(ev: KeyboardEvent): string | null {
   const physical = /^Key([A-Z])$/.exec(ev.code);
   return physical ? physical[1].toLowerCase() : null;
 }
+
+/**
+ * Enter that means "do it" — and not the Enter that commits an IME composition.
+ *
+ * Choosing a candidate in an input method (Japanese, Chinese, Korean) is
+ * confirmed with Enter, and the browser delivers that as a keydown too. A bare
+ * `e.key === "Enter"` handler treats it as a submit, so somebody typing a
+ * deny-reason or a project key in an IME sends it half-composed. Firefox sets
+ * `isComposing` on it; `keyCode 229` is the older signal Safari still reports
+ * for the keydown that ends a composition, so both are checked (DRY-105).
+ *
+ * Modifiers are the caller's business: the palette, for one, gives Shift+Enter
+ * its own meaning.
+ */
+export function isPlainEnter(ev: KeyboardEvent): boolean {
+  return ev.key === "Enter" && !ev.isComposing && ev.keyCode !== 229;
+}

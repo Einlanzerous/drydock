@@ -113,6 +113,17 @@ is where the detail moved when `CLAUDE.md` was split (DRY-95).
   nit — the next person will test against it. Check the ticket's own doc in
   `docs/decisions/`, not just `CLAUDE.md`; the latter now holds the summary.
 
+## Frontend (diffs touching `.vue` / `.css`)
+
+Firefox is the primary browser (CLAUDE.md, "Browser target"). Flag:
+
+- motion not gated on `prefers-reduced-motion` (the global block in `style.css` covers CSS animation and transitions; JS-driven motion, such as `scrollIntoView({ behavior: "smooth" })`, needs its own check)
+- a modal that is not a `<dialog>` opened with `showModal()` (a deliberately non-modal floating panel takes `role="dialog"` and an `aria-label` instead)
+- an Enter handler that does not guard `isComposing` (use `isPlainEnter` from `lib/keys.ts`)
+- `outline: none` without a `:focus-visible` ring, or an equally visible `:focus` replacement
+- a CSS feature Firefox 160 lacks, outside `@supports`
+- a `::-webkit-` rule without its standard property
+
 ## The verification bar
 
 The repo's claims are verified by driving the real thing: a throwaway daemon on

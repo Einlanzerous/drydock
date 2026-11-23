@@ -22,6 +22,7 @@
   // checked twice, harmlessly; the reverse leaves it checked once, without DOM,
   // which fails loudly rather than silently.
   "include": [
+    "verify/a11y-firefox.mts",
     "verify/auth.mts",
     "verify/backlog-toggle.mts",
     "verify/clipboard.mts",

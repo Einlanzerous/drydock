@@ -9,6 +9,10 @@ This file holds what you need before touching code. Per-ticket detail lives in
 `docs/decisions/` (`ls` it; read the matching file before changing that
 surface). When you finish a ticket, add a doc there rather than growing this file.
 
+## Browser target
+
+Firefox is the primary browser. Floor: Firefox 160 (the Firefox release when this was set; the quarterly `frontend-audit` run raises it). Anything newer is progressive enhancement behind `@supports` or feature detection. `build.target` in `shell/vite.config.ts` carries the same floor.
+
 ## Build & run
 
 ```sh
