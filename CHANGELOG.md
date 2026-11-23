@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.3](https://github.com/Einlanzerous/drydock/compare/v1.10.2...v1.10.3) (2026-11-23)
+
+
+### Bug Fixes
+
+* **web:** frontend quality pass - Firefox 160 floor, motion, dialogs, IME (DRY-105) ([#98](https://github.com/Einlanzerous/drydock/issues/98)) ([7cca4be](https://github.com/Einlanzerous/drydock/commit/7cca4be599dd2d6006e17280aa5e37e5963b6491))
+
 ## [1.10.2](https://github.com/Einlanzerous/drydock/compare/v1.10.1...v1.10.2) (2026-10-24)
 
 

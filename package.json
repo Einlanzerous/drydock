@@ -1,6 +1,6 @@
 {
   "name": "drydock",
-  "version": "1.10.2",
+  "version": "1.10.3",
   "private": true,
   "description": "Per-host daemon that owns AI-CLI PTYs, plus a web shell that attaches to them. PoC.",
   "workspaces": [
