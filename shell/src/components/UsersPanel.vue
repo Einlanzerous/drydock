@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from "vue";
 import {
   authUser,
   changePassword,
@@ -48,7 +48,15 @@ const current = ref("");
 
 const me = computed(() => authUser.value?.id);
 
+// A native modal <dialog> (DRY-105): inert page behind it, Tab kept inside, and
+// focus handed back to whatever opened it. The parent mounts this with v-if, so
+// mounting IS opening; close() on the way out is what returns focus, because a
+// dialog that is merely removed from the DOM does not.
+const dlg = ref<HTMLDialogElement | null>(null);
+onBeforeUnmount(() => dlg.value?.close());
+
 onMounted(async () => {
+  dlg.value?.showModal();
   await refresh();
   await nextTick();
   nameEl.value?.focus();
@@ -111,6 +119,9 @@ const setPassword = (row: AccountRow) =>
 </script>
 
 <template>
+  <!-- `cancel` is Esc. The parent owns the panel's lifetime, so it is routed to
+       `close` rather than letting the browser shut the dialog behind its back. -->
+  <dialog ref="dlg" class="udialog" aria-label="Accounts" @cancel.prevent="emit('close')">
   <div class="scrim" @click.self="emit('close')">
     <div class="panel">
       <header>
@@ -182,9 +193,25 @@ const setPassword = (row: AccountRow) =>
       </form>
     </div>
   </div>
+  </dialog>
 </template>
 
 <style scoped>
+/* Top-layer host only: full viewport, paints nothing — .scrim keeps the dim. */
+.udialog {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  overflow: hidden;
+}
 .scrim {
   position: absolute;
   inset: 0;

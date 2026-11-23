@@ -53,6 +53,7 @@
   // has nothing to resolve while the tree is still being installed), and
   // `verify/drift.sh` is shell orchestrating docker and psql.
   "exclude": [
+    "verify/a11y-firefox.mts",
     "verify/auth.mts",
     "verify/backlog-toggle.mts",
     "verify/clipboard.mts",

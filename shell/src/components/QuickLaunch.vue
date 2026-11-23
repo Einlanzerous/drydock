@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onMounted, ref, watch } from "vue";
 import { CATEGORY_COLOR, type Ticket } from "../lib/tracker.js";
+import { isPlainEnter } from "../lib/keys.js";
 
 // Ctrl+K quick-launch palette, and since DRY-82 the only place a session with
 // no ticket behind it is started from. Three pinned rows sit above the ticket
@@ -97,6 +98,33 @@ const query = ref("");
  */
 const idx = ref(PINNED.length);
 const inputEl = ref<HTMLInputElement | null>(null);
+const dlg = ref<HTMLDialogElement | null>(null);
+
+/**
+ * The palette is a native modal <dialog> (DRY-105): the browser makes the rest of
+ * the page inert, traps Tab, and gives it dialog semantics, none of which the old
+ * div scrim did. `props.open` stays the single source of truth — the dialog is
+ * driven FROM it, never the other way, so App.vue's Ctrl+K toggle and its focus
+ * hand-back (closePalette) are untouched.
+ */
+function syncDialog(o: boolean): void {
+  const d = dlg.value;
+  if (!d) return;
+  if (o && !d.open) d.showModal();
+  else if (!o && d.open) {
+    d.close();
+    // close() hands focus back to whatever had it when the dialog opened. That
+    // is right for a terminal's textarea, and exactly DRY-40's duplicate-spawn
+    // bug for a button (the next Enter becomes a second click). App.vue's
+    // closePalette restores text entry only, so drop anything else.
+    const a = document.activeElement as HTMLElement | null;
+    if (a && !a.matches("textarea, input")) a.blur();
+  }
+}
+onMounted(() => syncDialog(props.open));
+// post: the dialog's content is `v-if="open"`, so it must exist before showModal()
+// looks for something to focus.
+watch(() => props.open, syncDialog, { flush: "post" });
 
 const pinned = computed(() => {
   const q = query.value.trim().toLowerCase();
@@ -175,9 +203,12 @@ function onKey(e: KeyboardEvent) {
     // "spawn an agent on whatever ticket happens to be selected", which is the
     // one outcome a stale reflex must not produce (DRY-82).
     e.preventDefault();
-  } else if (e.key === "Enter") {
+  } else if (isPlainEnter(e)) {
+    // Not while an IME composition is open: Enter there commits the candidate,
+    // and spawning on it would launch whatever row happened to be highlighted.
     activate(sel.value);
   } else if (e.key === "Escape") {
+    e.preventDefault(); // also stops the dialog's own `cancel` from firing twice
     emit("close");
   }
 }
@@ -187,6 +218,15 @@ function onKey(e: KeyboardEvent) {
   <!-- .prevent matters: without it the browser's default mousedown focus action
        runs after the close handler and pulls focus off the terminal we just
        handed it back to (DRY-43). -->
+  <!-- `cancel` is Esc on the dialog itself (focus on the backdrop or a row, not the
+       input). Prevented so the browser does not close it behind App.vue's back:
+       the parent owns `open`, and closePalette is where focus is handed back. -->
+  <dialog
+    ref="dlg"
+    class="qdialog"
+    aria-label="Quick launch"
+    @cancel.prevent="emit('close')"
+  >
   <div v-if="open" class="scrim" @mousedown.prevent="emit('close')">
     <div class="palette" @mousedown.stop>
       <div class="search">
@@ -197,6 +237,7 @@ function onKey(e: KeyboardEvent) {
           ref="inputEl"
           v-model="query"
           placeholder="Spawn on a ticket — or type shell, claude, workspace"
+          aria-label="Search tickets, or type shell, claude or workspace"
           @keydown="onKey"
         />
         <span class="esc">esc</span>
@@ -253,9 +294,29 @@ function onKey(e: KeyboardEvent) {
       </div>
     </div>
   </div>
+  </dialog>
 </template>
 
 <style scoped>
+/* The dialog is only the top-layer host. It fills the viewport and paints
+   nothing, so .scrim below keeps its own dim and blur exactly as before. */
+.qdialog {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  overflow: hidden;
+}
+.qdialog:not([open]) {
+  display: none;
+}
 .scrim {
   position: absolute;
   inset: 0;
@@ -282,6 +343,9 @@ function onKey(e: KeyboardEvent) {
   gap: 11px;
   padding: 15px 17px;
   border-bottom: 1px solid #ffffff10;
+}
+.search:focus-within {
+  border-bottom-color: #3d6fa6;
 }
 .search input {
   flex: 1;

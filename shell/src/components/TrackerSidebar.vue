@@ -14,6 +14,7 @@ import {
   type Rollup,
   type Ticket,
 } from "../lib/tracker.js";
+import { isPlainEnter } from "../lib/keys.js";
 
 // Left sidebar: live tickets from the active tracker, grouped by repo. At PoC
 // fixture scale a flat list was fine; against a live tracker it pulls 100+
@@ -138,6 +139,15 @@ function short(e?: string | null): string {
 const whyShort = computed(() => short(props.pullError));
 
 const newProject = ref("");
+/** Enter adds the key — unless it is committing an IME candidate. */
+function onAddKey(e: KeyboardEvent): void {
+  // preventDefault only on the real Enter: swallowing the composition-ending
+  // one can stop an IME from committing its candidate.
+  if (!isPlainEnter(e)) return;
+  e.preventDefault();
+  addProject();
+}
+
 function addProject(): void {
   // Tracker project keys are uppercase by convention (Jira enforces it).
   const key = newProject.value.trim().toUpperCase();
@@ -1193,6 +1203,7 @@ const searchScope = computed(() => found.value.scope.join(", "));
           v-model="draft"
           type="text"
           placeholder="Search, or project=… status=…"
+          aria-label="Search tickets, or add a key=value filter"
           spellcheck="false"
           title="Type to search every loaded ticket. `project=`, `status=`, `assignee=` and `epic=` become filter pills — ↵ to add, ⌫ on an empty box to take the last one back."
           @keydown="onDraftKey"
@@ -1265,7 +1276,8 @@ const searchScope = computed(() => found.value.scope.join(", "));
           placeholder="+ project"
           spellcheck="false"
           title="Add a project key to pull (↵)"
-          @keydown.enter.prevent="addProject"
+          aria-label="Add a project key to pull"
+          @keydown.enter="onAddKey"
         />
         <!-- A switch rather than a bare checkbox (DRY-85). It was the only
              unstyled form control in the sidebar, and it is not a filter over

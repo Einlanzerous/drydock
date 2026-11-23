@@ -1878,7 +1878,9 @@ function onKey(e: KeyboardEvent) {
   // we run in the capture phase, so quickOpen is still true here and this bails
   // before one keystroke collapses both layers and discards a typed prompt.
   if (e.key === "Escape") {
-    if (quickOpen.value) return;
+    // The accounts dialog is a native modal and takes its own Esc (DRY-105); without
+    // this the same keystroke would also close the ticket panel beneath it.
+    if (quickOpen.value || usersOpen.value) return;
     // The rail's own transient layers — the run chooser, and a gate panel with
     // its deny-reason field open — are consulted HERE rather than owning a
     // listener of their own (DRY-73). Two listeners on window/capture cannot
