@@ -8,11 +8,14 @@
 //   MOTION    under prefers-reduced-motion: reduce a looping animation computes to
 //             `none`; without it, it still runs (the gate is not unconditional).
 //   DIALOG    Ctrl+K opens a real modal <dialog> (`:modal`), the search input
-//             has focus inside it, Esc closes it THROUGH App.vue (open -> false),
-//             and the accounts-style focus hand-back leaves nothing in the dialog.
+//             has focus inside it, and Esc closes it THROUGH App.vue (open -> false).
 //   IME       Enter with isComposing (and keyCode 229) does NOT activate a palette
 //             row; the same Enter without it does. The positive control is what
-//             makes the negative one mean something.
+//             makes the negative one mean something. Driven for the palette and the
+//             sidebar's project-key and search inputs. The two deny-reason fields
+//             (GatePanel, PermissionPrompt) need a raised gate, so they are held
+//             down through the helper they share, `isPlainEnter`, imported from
+//             the dev server: each is a one-line wrapper around it.
 //
 // RIG (a throwaway daemon on a spare port, env stripped of the session's own
 // DRYDOCK_* — see CLAUDE.md "Real env wins"):
@@ -116,6 +119,51 @@ try {
   await page.keyboard.press("Enter");
   await page.waitForTimeout(800);
   check("IME plain Enter (control) activates the row", !(await dlg.evaluate((d: HTMLDialogElement) => d.open)));
+
+  // Sidebar project key: a real Enter adds the pill below, a composing one adds
+  // nothing. `.addkey` is the "+ project" input; Enter sets scope, so watch the
+  // input's own value (addProject clears it on success).
+  const key = page.locator(".addkey");
+  await key.fill("zzz");
+  const fire = (sel: string, init: Record<string, unknown>): Promise<void> =>
+    page.evaluate(
+      ({ s, i }: { s: string; i: Record<string, unknown> }) => {
+        const el = document.querySelector(s) as HTMLInputElement;
+        el.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true, ...i }));
+      },
+      { s: sel, i: init },
+    );
+  await fire(".addkey", { isComposing: true });
+  await fire(".addkey", { keyCode: 229 });
+  check("IME composing Enter keeps the project key typed", (await key.inputValue()) === "zzz");
+  await fire(".addkey", {});
+  await page.waitForTimeout(300);
+  check("IME plain Enter (control) consumes the project key", (await key.inputValue()) === "");
+
+  // Sidebar search: a composing Enter must not commit the draft into a pill.
+  const search = page.locator(".searchbox input");
+  await search.fill("status=open");
+  await fire(".searchbox input", { isComposing: true });
+  await fire(".searchbox input", { keyCode: 229 });
+  check(
+    "IME composing Enter keeps the search draft",
+    (await search.inputValue()) === "status=open" && (await page.locator(".pill").count()) === 0,
+  );
+  await fire(".searchbox input", {});
+  check("IME plain Enter (control) commits the search draft", (await search.inputValue()) === "");
+
+  // The deny-reason fields' shared helper, straight from the dev server.
+  const helper = await page.evaluate(async () => {
+    const path = "/src/lib/keys.ts"; // a variable: tsc must not try to resolve a dev-server URL
+    const { isPlainEnter } = (await import(/* @vite-ignore */ path)) as {
+      isPlainEnter: (e: KeyboardEvent) => boolean;
+    };
+    // No named helper in here: tsx would wrap it in __name(), absent in the page.
+    return [{}, { isComposing: true }, { keyCode: 229 }].map((i) =>
+      isPlainEnter(new KeyboardEvent("keydown", { key: "Enter", ...i })),
+    );
+  });
+  check("IME isPlainEnter: plain yes, composing no, 229 no", helper.join() === "true,false,false", helper.join());
 } finally {
   await browser.close();
 }

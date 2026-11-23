@@ -632,7 +632,10 @@ function onDraftKey(e: KeyboardEvent): void {
   } else if (e.key === "ArrowUp") {
     e.preventDefault();
     sugIdx.value = Math.max(sugIdx.value - 1, -1);
-  } else if (e.key === "Enter") {
+  } else if (isPlainEnter(e)) {
+    // Not the Enter that commits an IME candidate (DRY-105): that would turn
+    // half-composed text into a pill, and preventDefault can stop the candidate
+    // committing at all.
     e.preventDefault();
     commitDraft();
   } else if (e.key === "Escape") {

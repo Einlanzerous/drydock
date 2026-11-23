@@ -534,12 +534,13 @@ function whenText(raw?: string): string {
 // beside the title is what says it's there, and this is what it does.
 const threadEl = ref<HTMLElement | null>(null);
 
-// Focus in on open, back on close (DRY-105). Back is conditional on purpose: a
-// close that comes from sending the ticket spawns a pane that claims focus for
-// itself (DRY-40), and an unconditional restore would take it straight back to
-// the old terminal. So after the panel is gone, restore only if nobody has
-// claimed the keyboard, and only to text entry — never to a button (DRY-40's
-// duplicate-spawn bug was a retained button focus).
+// Focus in on open, back on close (DRY-105). Back goes to text entry only —
+// never a button (DRY-40's duplicate-spawn bug was a retained button focus) —
+// and only if focus has fallen to <body> by the next frame, so a close that has
+// already put focus somewhere deliberate is left alone. That is NOT a guard
+// against Send: the spawned pane mounts when the spawn POST resolves, well after
+// this frame, so after Send the old terminal briefly has the keyboard until the
+// new pane claims it (DRY-40). The end state is right; the gap is the cost.
 let opener: HTMLElement | null = null;
 onMounted(() => {
   opener = document.activeElement as HTMLElement | null;

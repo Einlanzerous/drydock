@@ -142,6 +142,22 @@ Three groups:
   `attachCustomKeyEventHandler`, or an xterm bump — the keymap this depends on
   is xterm's, and it is what decides whether paste reaches the browser at all.
 
+## The frontend quality pass (DRY-105)
+
+Firefox, not Chromium: it is the estate's primary browser (CLAUDE.md, "Browser
+target"), and `<dialog>`, `prefers-reduced-motion` and IME behaviour are exactly
+where engines differ. `bunx playwright install firefox` once. The rig is a
+throwaway daemon on `:4398` with `DRYDOCK_TRACKER=fixture` and a vite on `:5398`,
+both in the header of the harness.
+
+```sh
+node --import tsx scripts/verify/a11y-firefox.mts
+```
+
+| harness | what it holds down |
+|---|---|
+| `a11y-firefox.mts` | JetBrains Mono is self-hosted and nothing is requested from Google; `color-scheme: dark`; a looping animation computes to `none` under reduce and still runs without it; Ctrl+K opens a real modal `<dialog>` with focus inside and Esc closes it through App.vue; and an Enter that is `isComposing` or `keyCode 229` activates nothing on the palette, the sidebar project key or the sidebar search, each with a plain-Enter positive control. The two deny-reason fields need a raised gate, so they are covered through the shared `isPlainEnter` only. Against `origin/main`'s `shell/src` it reports **3 FAILED** (font, scheme, motion) and then times out waiting for a dialog that is not there. |
+
 ## Running these
 
 Everything in this directory is TypeScript run through `tsx`, and every
